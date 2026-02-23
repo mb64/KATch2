@@ -128,3 +128,7 @@ Other interesting operations to support:
 3. An un-projection operator that materializes the automaton state as an explicit field in the packet, representing a netkat program as a single SPP.
 4. Pruning a netkat automaton to distill the SPPs to the minimum, removing "dead" elements of SPPs, such that you have the property that any packet pair in any internal SPP always appears in some guarded string of the entire automaton. This generalizes checking whether an automaton is empty (a semantically empty automaton would distill down to nothing)
 5. LTL/stackat/probabilities/transducers/etc
+
+## License
+
+This project is licensed under the MIT License. See `LICENSE`.
