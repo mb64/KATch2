@@ -13,6 +13,7 @@ use std::collections::HashMap;
 /// We use indices into the SPP store to represent SPPs.
 /// The zero SPP is represented by SPP(0) and the one SPP is represented by SPP(1).
 /// Indices into the store are the u32 value - 2.
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SPP(pub u32);
 
@@ -518,7 +519,7 @@ impl SPPstore {
     }
 
     pub fn random_packet_pair(&mut self, spp: SPP) -> Option<(Vec<bool>, Vec<bool>)> {
-        return self.random_packet_pair_helper(spp);
+        self.random_packet_pair_helper(spp)
     }
 
     fn random_packet_pair_helper(&mut self, spp: SPP) -> Option<(Vec<bool>, Vec<bool>)> {
@@ -562,7 +563,7 @@ impl SPPstore {
         spp: SPP,
         input: Vec<bool>,
     ) -> Option<Vec<bool>> {
-        return self.random_output_packet_from_input_helper(spp, input);
+        self.random_output_packet_from_input_helper(spp, input)
     }
 
     fn random_output_packet_from_input_helper(
@@ -573,7 +574,7 @@ impl SPPstore {
         if self.is_zero(spp) {
             return None;
         } else if spp == SPP::new(1) {
-            assert!(input.len() == 0);
+            assert!(input.is_empty());
             return Some(vec![]);
         }
         let spp_node = self.get(spp);

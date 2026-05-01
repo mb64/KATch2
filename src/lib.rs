@@ -1,6 +1,4 @@
-use console_error_panic_hook;
 use serde::{Deserialize, Serialize};
-use serde_wasm_bindgen;
 use wasm_bindgen::prelude::*;
 
 pub mod aut;

@@ -186,7 +186,7 @@ impl<'a> Lexer<'a> {
         _start_pos: Position,
     ) -> Result<TokenKind, ParseError> {
         while let Some(&next_c) = self.peek_char() {
-            if next_c.is_digit(10) {
+            if next_c.is_ascii_digit() {
                 num_str.push(self.next_char_with_pos().unwrap().0);
             } else if next_c == '.' {
                 // Look ahead to see if this is ".." (range operator) or part of IP
@@ -204,7 +204,7 @@ impl<'a> Lexer<'a> {
                 num_str.push(self.next_char_with_pos().unwrap().0);
                 // Continue reading the prefix length
                 while let Some(&c) = self.peek_char() {
-                    if c.is_digit(10) {
+                    if c.is_ascii_digit() {
                         num_str.push(self.next_char_with_pos().unwrap().0);
                     } else {
                         break;
@@ -216,7 +216,7 @@ impl<'a> Lexer<'a> {
                 num_str.push(self.next_char_with_pos().unwrap().0);
                 // Continue reading the second IP
                 while let Some(&c) = self.peek_char() {
-                    if c.is_digit(10) || c == '.' {
+                    if c.is_ascii_digit() || c == '.' {
                         num_str.push(self.next_char_with_pos().unwrap().0);
                     } else {
                         break;
@@ -241,7 +241,7 @@ impl<'a> Lexer<'a> {
             let (ip_part, suffix) = s.split_at(slash_pos);
             // Check if suffix is a valid CIDR prefix
             let prefix_part = &suffix[1..];
-            if prefix_part.is_empty() || !prefix_part.chars().all(|c| c.is_digit(10)) {
+            if prefix_part.is_empty() || !prefix_part.chars().all(|c| c.is_ascii_digit()) {
                 return false;
             }
             if let Ok(prefix) = prefix_part.parse::<u32>() {
@@ -283,7 +283,7 @@ impl<'a> Lexer<'a> {
                 return false;
             }
             // Check if all characters are digits
-            if !part.chars().all(|c| c.is_digit(10)) {
+            if !part.chars().all(|c| c.is_ascii_digit()) {
                 return false;
             }
             // Check if the number is in valid range (0-255)
@@ -453,7 +453,7 @@ impl<'a> Lexer<'a> {
                     // Let all identifiers including 'x', 'x0', 'x1', etc. go through the general identifier handling
                     _ => {
                         // Check if it's a digit that could start a number
-                        if c.is_digit(10) {
+                        if c.is_ascii_digit() {
                             let mut num_str = String::new();
                             num_str.push(c);
                             self.parse_number_or_ip(num_str, start_pos)?
@@ -489,7 +489,7 @@ impl<'a> Lexer<'a> {
                                 // Handle field identifiers like x0, x1, x2, etc.
                                 s if s.starts_with('x')
                                     && s.len() > 1
-                                    && s[1..].chars().all(|c| c.is_digit(10)) =>
+                                    && s[1..].chars().all(|c| c.is_ascii_digit()) =>
                                 {
                                     match s[1..].parse::<u32>() {
                                         Ok(index) => TokenKind::Field(index),
@@ -732,26 +732,24 @@ impl<'a> Parser<'a> {
                         let op_token = self.consume_token()?; // Consume 'U'
                         // Check for EOF before parsing RHS
                         match self.peek_kind() {
-                            Ok(&TokenKind::Eof) => {
-                                return Err(ParseError::new(
-                                    format!(
-                                        "Expected expression after {} but found end of input",
-                                        token_kind_to_user_string(&op_token.kind)
-                                    ),
-                                    op_token.span,
-                                ));
-                            }
+                            Ok(&TokenKind::Eof) => Err(ParseError::new(
+                                format!(
+                                    "Expected expression after {} but found end of input",
+                                    token_kind_to_user_string(&op_token.kind)
+                                ),
+                                op_token.span,
+                            )),
                             Err(ref pe)
                                 if pe.message.contains("Peeked beyond EOF")
                                     || pe.message.contains("Unexpected end of token stream") =>
                             {
-                                return Err(ParseError::new(
+                                Err(ParseError::new(
                                     format!(
                                         "Expected expression after {} but found end of input",
                                         token_kind_to_user_string(&op_token.kind)
                                     ),
                                     op_token.span,
-                                ));
+                                ))
                             }
                             Ok(_) => {
                                 // Other token, parse it
@@ -765,26 +763,24 @@ impl<'a> Parser<'a> {
                         let op_token = self.consume_token()?; // Consume 'R'
                         // Check for EOF before parsing RHS
                         match self.peek_kind() {
-                            Ok(&TokenKind::Eof) => {
-                                return Err(ParseError::new(
-                                    format!(
-                                        "Expected expression after {} but found end of input",
-                                        token_kind_to_user_string(&op_token.kind)
-                                    ),
-                                    op_token.span,
-                                ));
-                            }
+                            Ok(&TokenKind::Eof) => Err(ParseError::new(
+                                format!(
+                                    "Expected expression after {} but found end of input",
+                                    token_kind_to_user_string(&op_token.kind)
+                                ),
+                                op_token.span,
+                            )),
                             Err(ref pe)
                                 if pe.message.contains("Peeked beyond EOF")
                                     || pe.message.contains("Unexpected end of token stream") =>
                             {
-                                return Err(ParseError::new(
+                                Err(ParseError::new(
                                     format!(
                                         "Expected expression after {} but found end of input",
                                         token_kind_to_user_string(&op_token.kind)
                                     ),
                                     op_token.span,
-                                ));
+                                ))
                             }
                             Ok(_) => {
                                 // Other token, parse it
@@ -1109,15 +1105,13 @@ impl<'a> Parser<'a> {
                                 let pattern = self.parse_pattern(Some(field_width))?;
                                 Ok(Expr::bit_range_match(start, end, pattern))
                             }
-                            _ => {
-                                return Err(ParseError::new(
-                                    format!(
-                                        "Expected ':=' or '~' after bit range, found {}",
-                                        token_kind_to_user_string(&op_token.kind)
-                                    ),
-                                    op_token.span,
-                                ));
-                            }
+                            _ => Err(ParseError::new(
+                                format!(
+                                    "Expected ':=' or '~' after bit range, found {}",
+                                    token_kind_to_user_string(&op_token.kind)
+                                ),
+                                op_token.span,
+                            )),
                         }
                     }
                     TokenKind::Assign => {
@@ -1595,15 +1589,13 @@ impl<'a> Parser<'a> {
                                 let pattern = self.parse_pattern(Some(field_width))?;
                                 Ok(Expr::bit_range_match(start, end, pattern))
                             }
-                            _ => {
-                                return Err(ParseError::new(
-                                    format!(
-                                        "Expected ':=' or '~' after bit range, found {}",
-                                        token_kind_to_user_string(&op_token.kind)
-                                    ),
-                                    op_token.span,
-                                ));
-                            }
+                            _ => Err(ParseError::new(
+                                format!(
+                                    "Expected ':=' or '~' after bit range, found {}",
+                                    token_kind_to_user_string(&op_token.kind)
+                                ),
+                                op_token.span,
+                            )),
                         }
                     } else {
                         // Not a bit range, 'x' is already consumed, just return it as a variable
@@ -1799,7 +1791,7 @@ impl<'a> Parser<'a> {
                     })
                 } else {
                     // Check if next token is "mask" for wildcard syntax
-                    if matches!(self.peek_kind(), Ok(&TokenKind::Ident(ref s)) if s == "mask") {
+                    if matches!(self.peek_kind(), Ok(TokenKind::Ident(s)) if s == "mask") {
                         self.consume_token()?; // Consume "mask"
 
                         // Parse mask value
@@ -1865,7 +1857,7 @@ impl<'a> Parser<'a> {
                         let end_bits = ip_to_bits(&end_str)?;
                         bits_to_u128(&end_bits).map_err(|_| {
                             ParseError::new(
-                                format!("IP address too large for range"),
+                                "IP address too large for range".to_string(),
                                 end_token.span,
                             )
                         })?
@@ -1947,7 +1939,7 @@ impl<'a> Parser<'a> {
 fn bits_to_u128(bits: &[bool]) -> Result<u128, ParseError> {
     if bits.len() > 128 {
         return Err(ParseError::new(
-            format!("Bit vector too large (max 128 bits)"),
+            "Bit vector too large (max 128 bits)".to_string(),
             Default::default(),
         ));
     }
@@ -2135,9 +2127,9 @@ pub fn parse_expressions(input: &str) -> Result<Vec<Exp>, ParseErrorDetails> {
             {
                 break;
             }
-            Ok(ref kind_from_first_peek) => {
+            Ok(kind_from_first_peek) => {
                 // Immediately clone the kind to own it and release the borrow from peek_kind.
-                let owned_kind = (*kind_from_first_peek).clone();
+                let owned_kind = kind_from_first_peek.clone();
 
                 // Now, separately get the span from a new peek_token call.
                 let span_for_error = match parser.peek_token() {

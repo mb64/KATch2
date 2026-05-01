@@ -51,24 +51,14 @@ pub fn generate_static_site(
     <ul>"#,
         source_file_name, source_file_name
     )
-    .map_err(|e| {
-        IoError::new(
-            IoErrorKind::Other,
-            format!("Failed to write HTML head: {}", e),
-        )
-    })?;
+    .map_err(|e| IoError::other(format!("Failed to write HTML head: {}", e)))?;
 
     if expressions.is_empty() {
         writeln!(
             index_html_content,
             "        <li>No expressions found to generate reports for.</li>"
         )
-        .map_err(|e| {
-            IoError::new(
-                IoErrorKind::Other,
-                format!("Failed to write empty message: {}", e),
-            )
-        })?;
+        .map_err(|e| IoError::other(format!("Failed to write empty message: {}", e)))?;
     } else {
         for (i, expr) in expressions.iter().enumerate() {
             let expr_report_subdir_name = format!("expr_{}", i + 1);
@@ -83,12 +73,7 @@ pub fn generate_static_site(
                     "        <li class=\"error\">{}</li>",
                     error_msg
                 )
-                .map_err(|e_fmt| {
-                    IoError::new(
-                        IoErrorKind::Other,
-                        format!("Failed to write error li: {}", e_fmt),
-                    )
-                })?;
+                .map_err(|e_fmt| IoError::other(format!("Failed to write error li: {}", e_fmt)))?;
                 continue;
             }
 
@@ -104,12 +89,7 @@ pub fn generate_static_site(
                         report_link,
                         i + 1
                     )
-                    .map_err(|e| {
-                        IoError::new(
-                            IoErrorKind::Other,
-                            format!("Failed to write success li: {}", e),
-                        )
-                    })?;
+                    .map_err(|e| IoError::other(format!("Failed to write success li: {}", e)))?;
                 }
                 Err(e) => {
                     let error_msg =
@@ -121,22 +101,15 @@ pub fn generate_static_site(
                         error_msg
                     )
                     .map_err(|e_fmt| {
-                        IoError::new(
-                            IoErrorKind::Other,
-                            format!("Failed to write error li (render fail): {}", e_fmt),
-                        )
+                        IoError::other(format!("Failed to write error li (render fail): {}", e_fmt))
                     })?;
                 }
             }
         }
     }
 
-    writeln!(index_html_content, "    </ul>\n</body>\n</html>").map_err(|e| {
-        IoError::new(
-            IoErrorKind::Other,
-            format!("Failed to write HTML foot: {}", e),
-        )
-    })?;
+    writeln!(index_html_content, "    </ul>\n</body>\n</html>")
+        .map_err(|e| IoError::other(format!("Failed to write HTML foot: {}", e)))?;
 
     let index_file_path = site_specific_output_dir.join("index.html");
     let mut file = fs::File::create(&index_file_path)?;

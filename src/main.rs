@@ -81,13 +81,12 @@ fn process_directory(dir_path: &Path, out_dir: &Path) {
     let mut found_k2_files = false;
     for entry in WalkDir::new(dir_path).into_iter().filter_map(|e| e.ok()) {
         let current_path = entry.path();
-        if current_path.is_file() {
-            if let Some(ext) = current_path.extension() {
-                if ext == "k2" {
-                    found_k2_files = true;
-                    process_file(current_path, out_dir);
-                }
-            }
+        if current_path.is_file()
+            && let Some(ext) = current_path.extension()
+            && ext == "k2"
+        {
+            found_k2_files = true;
+            process_file(current_path, out_dir);
         }
     }
     if !found_k2_files {

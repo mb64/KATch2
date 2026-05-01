@@ -1,6 +1,5 @@
 use crate::aut::Aut;
 use crate::spp::{SPP, SPPstore};
-use regex;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;
@@ -158,10 +157,10 @@ fn generate_dot_recursive(
 pub fn render_spp(index: SPP, store: &SPPstore, output_dir: &Path) -> Result<()> {
     // Ensure the output directory exists
     fs::create_dir_all(output_dir).map_err(|e| {
-        Error::new(
-            ErrorKind::Other,
-            format!("Failed to create output directory {:?}: {}", output_dir, e),
-        )
+        Error::other(format!(
+            "Failed to create output directory {:?}: {}",
+            output_dir, e
+        ))
     })?;
 
     // Precompute liveness information
@@ -179,12 +178,8 @@ pub fn render_spp(index: SPP, store: &SPPstore, output_dir: &Path) -> Result<()>
     let svg_path = output_dir.join(format!("spp_{}.svg", index.0));
 
     // Write the generated DOT content to a file
-    fs::write(&dot_path, &dot_content).map_err(|e| {
-        Error::new(
-            ErrorKind::Other,
-            format!("Failed to write DOT file to {:?}: {}", dot_path, e),
-        )
-    })?;
+    fs::write(&dot_path, &dot_content)
+        .map_err(|e| Error::other(format!("Failed to write DOT file to {:?}: {}", dot_path, e)))?;
 
     // Execute the Graphviz 'dot' command to generate SVG from DOT
     let output = Command::new("dot")
@@ -208,14 +203,11 @@ pub fn render_spp(index: SPP, store: &SPPstore, output_dir: &Path) -> Result<()>
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Optionally remove the intermediate .dot file even on failure
         // if dot_path.exists() { fs::remove_file(&dot_path)?; }
-        return Err(Error::new(
-            ErrorKind::Other,
-            format!(
-                "Graphviz 'dot' command failed with status: {}. Stderr: {}",
-                output.status,
-                stderr.trim()
-            ),
-        ));
+        return Err(Error::other(format!(
+            "Graphviz 'dot' command failed with status: {}. Stderr: {}",
+            output.status,
+            stderr.trim()
+        )));
     }
 
     println!("Successfully generated SPP visualization: {:?}", svg_path);
@@ -287,14 +279,11 @@ fn generate_specific_automaton_dot(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::new(
-            ErrorKind::Other,
-            format!(
-                "Graphviz 'dot' command failed for {}: {}",
-                dot_filename,
-                stderr.trim()
-            ),
-        ));
+        return Err(Error::other(format!(
+            "Graphviz 'dot' command failed for {}: {}",
+            dot_filename,
+            stderr.trim()
+        )));
     }
     Ok(())
 }
@@ -719,7 +708,7 @@ pub fn render_aut(root_state: usize, aut: &mut Aut, output_dir: &Path) -> Result
 
     // Group SPPs in rows of 4 for even height distribution
     const CARDS_PER_ROW: usize = 4;
-    let rows = (sorted_spps.len() + CARDS_PER_ROW - 1) / CARDS_PER_ROW; // Ceiling division
+    let rows = sorted_spps.len().div_ceil(CARDS_PER_ROW); // Ceiling division
 
     for row_idx in 0..rows {
         html_content.push_str("            <div class=\"spp-row\">\n");

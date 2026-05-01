@@ -11,6 +11,12 @@ pub struct DesugarEnv {
     ranges: HashMap<String, (Field, Field)>,
 }
 
+impl Default for DesugarEnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DesugarEnv {
     pub fn new() -> Self {
         Self {
@@ -119,14 +125,14 @@ fn desugar_with_env(expr: &Expr, env: &DesugarEnv) -> Result<Exp, DesugarError> 
                 // Check bit width compatibility
                 if bits.len() > expected_bits {
                     // Bit vector is too large - this is always an error
-                    return Err(DesugarError {
+                    Err(DesugarError {
                         message: format!(
                             "Bit width mismatch: value has {} bits but alias '{}' expects {} bits",
                             bits.len(),
                             var,
                             expected_bits
                         ),
-                    });
+                    })
                 } else if bits.len() < expected_bits {
                     // Bit vector is too small - expand with leading zeros
                     // This is only allowed for decimal literals (which use minimal width)
@@ -152,14 +158,14 @@ fn desugar_with_env(expr: &Expr, env: &DesugarEnv) -> Result<Exp, DesugarError> 
                 // Check bit width compatibility
                 if bits.len() > expected_bits {
                     // Bit vector is too large - this is always an error
-                    return Err(DesugarError {
+                    Err(DesugarError {
                         message: format!(
                             "Bit width mismatch: value has {} bits but alias '{}' expects {} bits",
                             bits.len(),
                             var,
                             expected_bits
                         ),
-                    });
+                    })
                 } else if bits.len() < expected_bits {
                     // Bit vector is too small - expand with leading zeros
                     // This is only allowed for decimal literals (which use minimal width)
@@ -516,13 +522,13 @@ fn desugar_pattern_match(start: u32, end: u32, pattern: &Pattern) -> Result<Exp,
                 padded.extend_from_slice(bits);
                 desugar_bit_range_test(start, end, &padded)
             } else if bits.len() > width {
-                return Err(DesugarError {
+                Err(DesugarError {
                     message: format!(
                         "Pattern has {} bits but field has only {} bits",
                         bits.len(),
                         width
                     ),
-                });
+                })
             } else {
                 desugar_bit_range_test(start, end, bits)
             }
@@ -643,7 +649,7 @@ fn desugar_pattern_match(start: u32, end: u32, pattern: &Pattern) -> Result<Exp,
 
             if start_val > end_val {
                 return Err(DesugarError {
-                    message: format!("Invalid range: start is greater than end"),
+                    message: "Invalid range: start is greater than end".to_string(),
                 });
             }
 
@@ -680,7 +686,7 @@ fn desugar_pattern_match(start: u32, end: u32, pattern: &Pattern) -> Result<Exp,
 fn bits_to_u128(bits: &[bool]) -> Result<u128, DesugarError> {
     if bits.len() > 128 {
         return Err(DesugarError {
-            message: format!("Bit vector too large for range comparison (max 128 bits)"),
+            message: "Bit vector too large for range comparison (max 128 bits)".to_string(),
         });
     }
 

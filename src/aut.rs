@@ -62,7 +62,7 @@ pub struct Aut {
 
 impl Aut {
     pub fn new(num_vars: u32) -> Self {
-        let aut = Aut {
+        Aut {
             aexprs: vec![],
             aexpr_map: HashMap::new(),
             delta_map: HashMap::new(),
@@ -71,8 +71,7 @@ impl Aut {
             spp: spp::SPPstore::new(num_vars),
             // num_vars,
             num_calls: 0,
-        };
-        aut
+        }
     }
 
     // --- States ---
@@ -182,7 +181,7 @@ impl Aut {
             intersections.push(self.mk_intersect_n_base(distributed_state));
         }
 
-        return self.mk_union_n(intersections);
+        self.mk_union_n(intersections)
     }
 
     fn mk_intersect_n_base(&mut self, mut states: Vec<State>) -> State {
@@ -314,27 +313,21 @@ impl Aut {
             return self.mk_spp(result_spp);
         }
         // Simplify SPP.one ; e = e and e ; SPP.one = e and SPP.zero ; e = SPP.zero and e ; SPP.zero = SPP.zero
-        match self.get_expr(e1) {
-            AExpr::SPP(s1) => {
-                if *s1 == self.spp.one {
-                    return e2;
-                }
-                if *s1 == self.spp.zero {
-                    return self.mk_spp(self.spp.zero);
-                }
+        if let AExpr::SPP(s1) = self.get_expr(e1) {
+            if *s1 == self.spp.one {
+                return e2;
             }
-            _ => {}
+            if *s1 == self.spp.zero {
+                return self.mk_spp(self.spp.zero);
+            }
         }
-        match self.get_expr(e2) {
-            AExpr::SPP(s2) => {
-                if *s2 == self.spp.one {
-                    return e1;
-                }
-                if *s2 == self.spp.zero {
-                    return self.mk_spp(self.spp.zero);
-                }
+        if let AExpr::SPP(s2) = self.get_expr(e2) {
+            if *s2 == self.spp.one {
+                return e1;
             }
-            _ => {}
+            if *s2 == self.spp.zero {
+                return self.mk_spp(self.spp.zero);
+            }
         }
 
         // (a; b); c = a; (b; c)
@@ -621,7 +614,7 @@ impl Aut {
         }
         // Find the union of all the spp's in the transitions
         let mut union_spp = self.spp.zero;
-        for (_, &spp) in &st.transitions {
+        for &spp in st.transitions.values() {
             union_spp = self.spp.union(union_spp, spp);
         }
         // Add a transition from the complement of the union to the Top state
@@ -863,8 +856,7 @@ impl Aut {
         let mut todo = vec![(state, self.spp.sp.one)];
         // Hashmap of SPs for each state reachable from the given state
         let mut sp_map = HashMap::new();
-        while !todo.is_empty() {
-            let (state, sp) = todo.pop().unwrap();
+        while let Some((state, sp)) = todo.pop() {
             // Union the SPP into the map
             let original_sp = sp_map.entry(state).or_insert(self.spp.sp.zero);
             let to_add = self.spp.sp.difference(sp, *original_sp);
@@ -910,7 +902,7 @@ impl Aut {
             let u = q[head];
             head += 1;
 
-            for (v_state, _) in self.delta(u).get_transitions() {
+            for v_state in self.delta(u).get_transitions().keys() {
                 if !visited_states.contains(v_state) {
                     visited_states.insert(*v_state);
                     q.push_back(*v_state);
@@ -1040,7 +1032,7 @@ impl Aut {
 
     pub fn random_packet_pair(&mut self, state: State) -> Option<(Vec<bool>, Vec<bool>)> {
         let epsilon = self.epsilon(state);
-        return self.spp.random_packet_pair(epsilon);
+        self.spp.random_packet_pair(epsilon)
     }
 
     // pub fn random_packet(&self) -> Vec<bool> {
@@ -1069,7 +1061,7 @@ impl Aut {
             let epsilon = self.epsilon(current_state);
             // Or transitioned from the current state
             let deltas = self.delta_pruned(current_state);
-            let deltas_vec = deltas.get_transitions().into_iter().collect::<Vec<_>>();
+            let deltas_vec = deltas.get_transitions().iter().collect::<Vec<_>>();
             loop {
                 // Pick randomly among outputting the current packet or taking one of the transitions
                 // i.e. a random number between 0 and 1 + the number of transitions

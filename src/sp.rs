@@ -280,7 +280,7 @@ impl SPstore {
 
     /// Enumerates all possible SPs with `num_vars` fields
     pub fn all(&mut self) -> Vec<SP> {
-        return self.all_helper(self.num_vars);
+        self.all_helper(self.num_vars)
     }
 
     /// Helper function for `all`: enumerates all SPs with `depth` fields
