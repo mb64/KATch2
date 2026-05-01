@@ -2,8 +2,8 @@
 #![allow(unused_imports)]
 #![allow(non_snake_case)]
 
-use clap::{Parser, Subcommand};
 use crate::expr::Expr;
+use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -52,7 +52,11 @@ async fn main() -> std::io::Result<()> {
 
             // Ensure the base output directory exists
             if let Err(e) = fs::create_dir_all(&out_dir) {
-                eprintln!("Error: Could not create output directory \"{}\": {}", out_dir.display(), e);
+                eprintln!(
+                    "Error: Could not create output directory \"{}\": {}",
+                    out_dir.display(),
+                    e
+                );
                 std::process::exit(1);
             }
 
@@ -100,31 +104,50 @@ fn process_file(file_path: &Path, out_dir: &Path) {
                     if expressions.is_empty() {
                         println!("No expressions found or parsed in {}.", file_path.display());
                     } else {
-                        println!("Parsed {} expressions from {}.", expressions.len(), file_path.display());
-                        
+                        println!(
+                            "Parsed {} expressions from {}.",
+                            expressions.len(),
+                            file_path.display()
+                        );
+
                         // Desugar all expressions
                         let mut desugared_expressions = Vec::new();
                         for (i, expr) in expressions.iter().enumerate() {
                             match crate::desugar::desugar(expr) {
                                 Ok(desugared) => desugared_expressions.push(desugared),
                                 Err(e) => {
-                                    eprintln!("  Error desugaring expression {} in {}: {}", i + 1, file_path.display(), e);
+                                    eprintln!(
+                                        "  Error desugaring expression {} in {}: {}",
+                                        i + 1,
+                                        file_path.display(),
+                                        e
+                                    );
                                     // Skip this expression but continue with others
                                 }
                             }
                         }
-                        
+
                         if desugared_expressions.is_empty() {
-                            println!("No valid expressions after desugaring in {}.", file_path.display());
+                            println!(
+                                "No valid expressions after desugaring in {}.",
+                                file_path.display()
+                            );
                         } else {
                             let source_file_name = file_path
                                 .file_name()
                                 .unwrap_or_else(|| std::ffi::OsStr::new("unknown.k2"))
                                 .to_string_lossy();
-                            
+
                             println!("Generating static site for {}...", source_file_name);
-                            if let Err(e) = crate::ui::generate_static_site(&desugared_expressions, &source_file_name, out_dir) {
-                                eprintln!("  Error generating static site for {}: {}", source_file_name, e);
+                            if let Err(e) = crate::ui::generate_static_site(
+                                &desugared_expressions,
+                                &source_file_name,
+                                out_dir,
+                            ) {
+                                eprintln!(
+                                    "  Error generating static site for {}: {}",
+                                    source_file_name, e
+                                );
                             }
                         }
                     }

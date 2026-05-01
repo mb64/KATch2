@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::fmt;
 
-
 use rand::seq::SliceRandom;
 
 /// We use indices into the SP store to represent SPs.
@@ -253,7 +252,6 @@ impl SPstore {
         }
     }
 
-
     /// Generates a random packet accepted by this SP
     pub fn random_packet(&mut self, sp: SP) -> Option<Vec<bool>> {
         self.random_packet_helper(sp)
@@ -379,22 +377,22 @@ mod tests {
     #[test]
     fn test_is_zero() {
         let mut s = SPstore::new(N);
-        
+
         // Test base cases
         assert!(s.is_zero(s.zero));
         assert!(!s.is_zero(s.one));
-        
+
         // Test that zero built at any depth is detected as zero
         let mut zero_depth_2 = SP::new(0);
         for _ in 0..2 {
             zero_depth_2 = s.mk(zero_depth_2, zero_depth_2);
         }
         assert!(s.is_zero(zero_depth_2));
-        
+
         // Test a non-zero SP
         let non_zero = s.mk(s.zero, s.one);
         assert!(!s.is_zero(non_zero));
-        
+
         // Test all SPs
         let all = s.all();
         for sp in all {

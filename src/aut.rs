@@ -447,17 +447,37 @@ impl Aut {
                 self.intern(AExpr::LtlUntil(aexp1, aexp2))
             }
             Expr::End => self.mk_spp(self.spp.top),
-            Expr::TestNegation(_) => panic!("TestNegation should have been eliminated during desugaring"),
-            Expr::IfThenElse(_, _, _) => panic!("IfThenElse should have been eliminated during desugaring"),
+            Expr::TestNegation(_) => {
+                panic!("TestNegation should have been eliminated during desugaring")
+            }
+            Expr::IfThenElse(_, _, _) => {
+                panic!("IfThenElse should have been eliminated during desugaring")
+            }
             Expr::Var(_) => panic!("Variables should have been eliminated during desugaring"),
-            Expr::Let(_, _, _) => panic!("Let expressions should have been eliminated during desugaring"),
-            Expr::LetBitRange(_, _, _, _) => panic!("LetBitRange expressions should have been eliminated during desugaring"),
-            Expr::VarAssign(_, _) => panic!("VarAssign expressions should have been eliminated during desugaring"),
-            Expr::VarTest(_, _) => panic!("VarTest expressions should have been eliminated during desugaring"),
-            Expr::BitRangeAssign(_, _, _) => panic!("BitRangeAssign should have been eliminated during desugaring"),
-            Expr::BitRangeTest(_, _, _) => panic!("BitRangeTest should have been eliminated during desugaring"),
-            Expr::BitRangeMatch(_, _, _) => panic!("BitRangeMatch should have been eliminated during desugaring"),
-            Expr::VarMatch(_, _) => panic!("VarMatch should have been eliminated during desugaring"),
+            Expr::Let(_, _, _) => {
+                panic!("Let expressions should have been eliminated during desugaring")
+            }
+            Expr::LetBitRange(_, _, _, _) => {
+                panic!("LetBitRange expressions should have been eliminated during desugaring")
+            }
+            Expr::VarAssign(_, _) => {
+                panic!("VarAssign expressions should have been eliminated during desugaring")
+            }
+            Expr::VarTest(_, _) => {
+                panic!("VarTest expressions should have been eliminated during desugaring")
+            }
+            Expr::BitRangeAssign(_, _, _) => {
+                panic!("BitRangeAssign should have been eliminated during desugaring")
+            }
+            Expr::BitRangeTest(_, _, _) => {
+                panic!("BitRangeTest should have been eliminated during desugaring")
+            }
+            Expr::BitRangeMatch(_, _, _) => {
+                panic!("BitRangeMatch should have been eliminated during desugaring")
+            }
+            Expr::VarMatch(_, _) => {
+                panic!("VarMatch should have been eliminated during desugaring")
+            }
         }
     }
 
@@ -830,7 +850,7 @@ impl Aut {
     pub fn spp_store(&self) -> &spp::SPPstore {
         &self.spp
     }
-    
+
     /// Returns a mutable reference to the internal SPPstore
     pub fn spp_store_mut(&mut self) -> &mut spp::SPPstore {
         &mut self.spp
@@ -897,7 +917,7 @@ impl Aut {
                 }
             }
         }
-        
+
         let all_reachable_states: Vec<State> = visited_states.into_iter().collect();
 
         // Phase 2: Construct initial graph for Kleene's algorithm
@@ -907,10 +927,17 @@ impl Aut {
 
         let mut edges: HashMap<(NodeRepr, NodeRepr), spp::SPP> = HashMap::new();
 
-        let get_edge = |edge_map: &HashMap<(NodeRepr, NodeRepr), spp::SPP>, from_node: NodeRepr, to_node: NodeRepr, zero_spp: spp::SPP| -> spp::SPP {
-            edge_map.get(&(from_node, to_node)).cloned().unwrap_or(zero_spp)
+        let get_edge = |edge_map: &HashMap<(NodeRepr, NodeRepr), spp::SPP>,
+                        from_node: NodeRepr,
+                        to_node: NodeRepr,
+                        zero_spp: spp::SPP|
+         -> spp::SPP {
+            edge_map
+                .get(&(from_node, to_node))
+                .cloned()
+                .unwrap_or(zero_spp)
         };
-        
+
         // Edge from synthetic start (implicit) into the initial_state, represented as END_NODE -> initial_state
         edges.insert((END_NODE, Some(initial_state)), self.spp.one);
 
@@ -922,7 +949,10 @@ impl Aut {
             for (v_state, spp_uv) in self.delta(u_state).get_transitions() {
                 let v_node_repr = Some(*v_state);
                 let current_spp = get_edge(&edges, u_node_repr, v_node_repr, self.spp.zero);
-                edges.insert((u_node_repr, v_node_repr), self.spp.union(current_spp, *spp_uv));
+                edges.insert(
+                    (u_node_repr, v_node_repr),
+                    self.spp.union(current_spp, *spp_uv),
+                );
             }
 
             // Epsilon transitions: u -> END_NODE
@@ -934,32 +964,41 @@ impl Aut {
         }
 
         // Phase 3: State Elimination
-        let mut nodes_for_kleene: Vec<NodeRepr> = all_reachable_states.iter().map(|&s| Some(s)).collect();
+        let mut nodes_for_kleene: Vec<NodeRepr> =
+            all_reachable_states.iter().map(|&s| Some(s)).collect();
         nodes_for_kleene.push(END_NODE);
 
-
-        for &k_to_eliminate_state in &all_reachable_states { // Iterate through original states to eliminate
+        for &k_to_eliminate_state in &all_reachable_states {
+            // Iterate through original states to eliminate
             let k_node = Some(k_to_eliminate_state);
-            
+
             let r_kk = get_edge(&edges, k_node, k_node, self.spp.zero);
             let r_kk_star = self.spp.star(r_kk);
 
             for &i_node in &nodes_for_kleene {
-                if i_node == k_node { continue; }
+                if i_node == k_node {
+                    continue;
+                }
 
                 let r_ik = get_edge(&edges, i_node, k_node, self.spp.zero);
-                if r_ik == self.spp.zero { continue; }
+                if r_ik == self.spp.zero {
+                    continue;
+                }
 
                 for &j_node in &nodes_for_kleene {
-                    if j_node == k_node { continue; } 
-                    
+                    if j_node == k_node {
+                        continue;
+                    }
+
                     let r_kj = get_edge(&edges, k_node, j_node, self.spp.zero);
-                    if r_kj == self.spp.zero { continue; }
+                    if r_kj == self.spp.zero {
+                        continue;
+                    }
 
                     // Ensure mutable borrows of self.spp are clearly separated
                     let temp_seq = self.spp.sequence(r_ik, r_kk_star);
                     let path_spp = self.spp.sequence(temp_seq, r_kj);
-                    
+
                     if path_spp != self.spp.zero {
                         let current_r_ij = get_edge(&edges, i_node, j_node, self.spp.zero);
                         let new_edge_val = self.spp.union(current_r_ij, path_spp);
@@ -968,7 +1007,7 @@ impl Aut {
                 }
             }
         }
-        
+
         // Phase 4: Result is the self-loop on END_NODE
         let result_spp = get_edge(&edges, END_NODE, END_NODE, self.spp.zero);
 
@@ -991,7 +1030,7 @@ impl Aut {
             if intersected_spp != self.spp.zero {
                 // Avoid adding transitions to a "zero" state if such a concept is distinctly represented.
                 // self.mk_spp(self.spp.zero) gives the state representing the zero SPP.
-                if target_state != self.mk_spp(self.spp.zero) { 
+                if target_state != self.mk_spp(self.spp.zero) {
                     new_transitions.insert(target_state, intersected_spp);
                 }
             }
@@ -1012,7 +1051,11 @@ impl Aut {
     //     packet
     // }
 
-    pub fn random_trace(&mut self, state: State, max_length: usize) -> Option<(Vec<Vec<bool>>, Option<Vec<bool>>)> {
+    pub fn random_trace(
+        &mut self,
+        state: State,
+        max_length: usize,
+    ) -> Option<(Vec<Vec<bool>>, Option<Vec<bool>>)> {
         let mut trace = vec![];
         let dup_spp = self.eliminate_dup(state);
         if dup_spp == self.spp.zero {
@@ -1034,7 +1077,10 @@ impl Aut {
                 if choice < deltas_vec.len() {
                     // Try to take transition `choice`
                     let (target_state, spp) = deltas_vec[choice];
-                    if let Some(next_packet) = self.spp.random_output_packet_from_input(*spp, current_packet.clone()) {
+                    if let Some(next_packet) = self
+                        .spp
+                        .random_output_packet_from_input(*spp, current_packet.clone())
+                    {
                         current_state = *target_state;
                         current_packet = next_packet;
                         break;
@@ -1043,7 +1089,10 @@ impl Aut {
                     }
                 } else {
                     // Try and output the current packet
-                    if let Some(out_packet) = self.spp.random_output_packet_from_input(epsilon, current_packet.clone()) {
+                    if let Some(out_packet) = self
+                        .spp
+                        .random_output_packet_from_input(epsilon, current_packet.clone())
+                    {
                         return Some((trace, Some(out_packet)));
                     } else {
                         continue; // Try again

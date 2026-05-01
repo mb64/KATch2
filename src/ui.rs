@@ -1,8 +1,8 @@
 use crate::{aut::Aut, expr::Expr, parser, viz};
+use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::{Error as IoError, ErrorKind as IoErrorKind, Write as IoWrite};
 use std::path::Path;
-use std::fmt::Write as FmtWrite;
 
 /// Generates a static HTML site with visualization reports for a set of NetKAT expressions.
 ///
@@ -21,10 +21,7 @@ pub fn generate_static_site(
 ) -> std::io::Result<()> {
     let site_dir_name = Path::new(source_file_name)
         .file_stem()
-        .map_or_else(
-            || std::ffi::OsStr::new("unknown_source"),
-            |stem| stem,
-        )
+        .map_or_else(|| std::ffi::OsStr::new("unknown_source"), |stem| stem)
         .to_string_lossy();
 
     let site_specific_output_dir = base_output_dir.join(site_dir_name.as_ref());
@@ -53,21 +50,45 @@ pub fn generate_static_site(
     <h1>NetKAT Expression Reports for: <em>{}</em></h1>
     <ul>"#,
         source_file_name, source_file_name
-    ).map_err(|e| IoError::new(IoErrorKind::Other, format!("Failed to write HTML head: {}", e)))?;
+    )
+    .map_err(|e| {
+        IoError::new(
+            IoErrorKind::Other,
+            format!("Failed to write HTML head: {}", e),
+        )
+    })?;
 
     if expressions.is_empty() {
-        writeln!(index_html_content, "        <li>No expressions found to generate reports for.</li>")
-            .map_err(|e| IoError::new(IoErrorKind::Other, format!("Failed to write empty message: {}", e)))?;
+        writeln!(
+            index_html_content,
+            "        <li>No expressions found to generate reports for.</li>"
+        )
+        .map_err(|e| {
+            IoError::new(
+                IoErrorKind::Other,
+                format!("Failed to write empty message: {}", e),
+            )
+        })?;
     } else {
         for (i, expr) in expressions.iter().enumerate() {
             let expr_report_subdir_name = format!("expr_{}", i + 1);
             let expr_report_full_path = site_specific_output_dir.join(&expr_report_subdir_name);
 
             if let Err(e) = fs::create_dir_all(&expr_report_full_path) {
-                let error_msg = format!("Failed to create directory for expression {}: {}", i + 1, e);
+                let error_msg =
+                    format!("Failed to create directory for expression {}: {}", i + 1, e);
                 eprintln!("{}", error_msg);
-                writeln!(index_html_content, "        <li class=\"error\">{}</li>", error_msg)
-                    .map_err(|e_fmt| IoError::new(IoErrorKind::Other, format!("Failed to write error li: {}", e_fmt)))?;
+                writeln!(
+                    index_html_content,
+                    "        <li class=\"error\">{}</li>",
+                    error_msg
+                )
+                .map_err(|e_fmt| {
+                    IoError::new(
+                        IoErrorKind::Other,
+                        format!("Failed to write error li: {}", e_fmt),
+                    )
+                })?;
                 continue;
             }
 
@@ -82,20 +103,40 @@ pub fn generate_static_site(
                         "        <li><a href=\"{}\">Report for Expression {}</a></li>",
                         report_link,
                         i + 1
-                    ).map_err(|e| IoError::new(IoErrorKind::Other, format!("Failed to write success li: {}", e)))?;
+                    )
+                    .map_err(|e| {
+                        IoError::new(
+                            IoErrorKind::Other,
+                            format!("Failed to write success li: {}", e),
+                        )
+                    })?;
                 }
                 Err(e) => {
-                    let error_msg = format!("Error generating report for Expression {}: {}", i + 1, e);
+                    let error_msg =
+                        format!("Error generating report for Expression {}: {}", i + 1, e);
                     eprintln!("{}", error_msg);
-                    writeln!(index_html_content, "        <li class=\"error\">{}</li>", error_msg)
-                        .map_err(|e_fmt| IoError::new(IoErrorKind::Other, format!("Failed to write error li (render fail): {}", e_fmt)))?;
+                    writeln!(
+                        index_html_content,
+                        "        <li class=\"error\">{}</li>",
+                        error_msg
+                    )
+                    .map_err(|e_fmt| {
+                        IoError::new(
+                            IoErrorKind::Other,
+                            format!("Failed to write error li (render fail): {}", e_fmt),
+                        )
+                    })?;
                 }
             }
         }
     }
 
-    writeln!(index_html_content, "    </ul>\n</body>\n</html>")
-        .map_err(|e| IoError::new(IoErrorKind::Other, format!("Failed to write HTML foot: {}", e)))?;
+    writeln!(index_html_content, "    </ul>\n</body>\n</html>").map_err(|e| {
+        IoError::new(
+            IoErrorKind::Other,
+            format!("Failed to write HTML foot: {}", e),
+        )
+    })?;
 
     let index_file_path = site_specific_output_dir.join("index.html");
     let mut file = fs::File::create(&index_file_path)?;

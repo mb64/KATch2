@@ -5,8 +5,7 @@
 
 use rand::seq::SliceRandom;
 
-use crate::sp::{SPnode, SPstore, SP};
-#[allow(non_snake_case)]
+use crate::sp::{SP, SPnode, SPstore};
 use std::collections::HashMap;
 
 /// We use indices into the SPP store to represent SPPs.
@@ -556,11 +555,19 @@ impl SPPstore {
         None
     }
 
-    pub fn random_output_packet_from_input(&mut self, spp: SPP, input: Vec<bool>) -> Option<Vec<bool>> {
+    pub fn random_output_packet_from_input(
+        &mut self,
+        spp: SPP,
+        input: Vec<bool>,
+    ) -> Option<Vec<bool>> {
         return self.random_output_packet_from_input_helper(spp, input);
     }
-    
-    fn random_output_packet_from_input_helper(&mut self, spp: SPP, input: Vec<bool>) -> Option<Vec<bool>> {
+
+    fn random_output_packet_from_input_helper(
+        &mut self,
+        spp: SPP,
+        input: Vec<bool>,
+    ) -> Option<Vec<bool>> {
         if self.is_zero(spp) {
             return None;
         } else if spp == SPP::new(1) {
@@ -591,7 +598,6 @@ impl SPPstore {
         }
         None
     }
-
 
     /// Enumerates all possible SPPs with `num_vars` fields
     #[cfg(test)]
@@ -651,7 +657,7 @@ impl SPPstore {
         }
         result
     }
-    
+
     /// Returns the number of nodes in the SPP store
     pub fn num_nodes(&self) -> usize {
         self.nodes.len()
@@ -823,23 +829,23 @@ mod tests {
     #[test]
     fn test_is_zero() {
         let mut s = SPPstore::new(N);
-        
+
         // Test base cases
         assert!(s.is_zero(s.zero));
         assert!(!s.is_zero(s.one));
         assert!(!s.is_zero(s.top));
-        
+
         // Test that zero built at any depth is detected as zero
         let mut zero_depth_2 = SPP::new(0);
         for _ in 0..2 {
             zero_depth_2 = s.mk(zero_depth_2, zero_depth_2, zero_depth_2, zero_depth_2);
         }
         assert!(s.is_zero(zero_depth_2));
-        
+
         // Test a non-zero SPP
         let non_zero = s.mk(s.zero, s.one, s.zero, s.zero);
         assert!(!s.is_zero(non_zero));
-        
+
         // Test all SPPs
         let all = s.all();
         for spp in all {

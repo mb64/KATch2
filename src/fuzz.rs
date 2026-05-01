@@ -104,11 +104,7 @@ fn get_distinct_fields(k: u32) -> (Field, Field) {
 /// (Helper function used in `genax` below)
 fn flip_equality_rand(lhs: Exp, rhs: Exp) -> (Exp, Exp) {
     let b = rand::random::<bool>();
-    if b {
-        (rhs, lhs)
-    } else {
-        (lhs, rhs)
-    }
+    if b { (rhs, lhs) } else { (lhs, rhs) }
 }
 
 // --- Main Fuzzing Function ---
@@ -741,8 +737,8 @@ mod tests {
     use crate::aut::Aut;
 
     use super::*;
-    use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     #[test]
     fn print_random_genax() {
@@ -963,7 +959,10 @@ mod tests {
         let num_fields = 3;
         let max_trials = 3000; // Increased number of random expressions to test
 
-        println!("Starting fuzz_test_is_empty_vs_eliminate_dup ({} trials)...", max_trials);
+        println!(
+            "Starting fuzz_test_is_empty_vs_eliminate_dup ({} trials)...",
+            max_trials
+        );
 
         for i in 0..max_trials {
             let expr = gen_random_expr(num_fields, expr_depth);
@@ -973,7 +972,7 @@ mod tests {
 
             // Method 1: Direct is_empty check
             let is_empty_direct = aut.is_empty(state);
-            
+
             let mut aut_for_elim_dup = Aut::new(num_fields); // Use a fresh aut to avoid interference
             let state_for_elim_dup = aut_for_elim_dup.expr_to_state(&expr);
             let eliminated_spp = aut_for_elim_dup.eliminate_dup(state_for_elim_dup);
@@ -984,11 +983,16 @@ mod tests {
                 is_empty_direct,
                 is_empty_via_elim_dup,
                 "Mismatch on trial {}/{}: is_empty and eliminate_dup for expression: {}. is_empty: {}, elim_dup_empty: {}",
-                i + 1, max_trials, expr,
+                i + 1,
+                max_trials,
+                expr,
                 is_empty_direct,
                 is_empty_via_elim_dup
             );
         }
-        println!("fuzz_test_is_empty_vs_eliminate_dup finished successfully after {} trials.", max_trials);
+        println!(
+            "fuzz_test_is_empty_vs_eliminate_dup finished successfully after {} trials.",
+            max_trials
+        );
     }
 }

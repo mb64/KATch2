@@ -248,10 +248,13 @@ fn generate_specific_automaton_dot(
     let spp_pattern = regex::Regex::new(r"SPP\((\d+)\)").unwrap();
 
     for state_idx in visited_states {
-        let epsilon_spp = epsilon_spps_map.get(state_idx).cloned().unwrap_or_else(|| aut.spp_store().zero ); // Fallback, though should always exist
+        let epsilon_spp = epsilon_spps_map
+            .get(state_idx)
+            .cloned()
+            .unwrap_or_else(|| aut.spp_store().zero); // Fallback, though should always exist
         let unknown_expr = String::from("Unknown Expression");
         let expr_str = state_expressions.get(state_idx).unwrap_or(&unknown_expr);
-        
+
         let html_safe_expr = html_escape(expr_str);
         let expr_with_links = spp_pattern.replace_all(&html_safe_expr, |caps: &regex::Captures| {
             let spp_id_val = &caps[1];
@@ -286,7 +289,11 @@ fn generate_specific_automaton_dot(
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(Error::new(
             ErrorKind::Other,
-            format!("Graphviz 'dot' command failed for {}: {}", dot_filename, stderr.trim()),
+            format!(
+                "Graphviz 'dot' command failed for {}: {}",
+                dot_filename,
+                stderr.trim()
+            ),
         ));
     }
     Ok(())
@@ -302,14 +309,20 @@ fn generate_state_table_body_html(
 ) -> String {
     let mut body_html = String::new();
     for state_idx in visited_states_sorted {
-        let epsilon_spp = epsilon_spps_map.get(state_idx).cloned().unwrap_or_else(|| aut.spp_store().zero);
+        let epsilon_spp = epsilon_spps_map
+            .get(state_idx)
+            .cloned()
+            .unwrap_or_else(|| aut.spp_store().zero);
         let unknown_expr = String::from("Unknown Expression");
         let expr_str = state_expressions.get(state_idx).unwrap_or(&unknown_expr);
         let expr_with_links = make_spp_clickable(expr_str);
 
         let ed_spp_html = if let Some(ed_map) = eliminate_dup_spps_map {
             if let Some(s) = ed_map.get(state_idx) {
-                format!("<span class=\"spp-reference\" data-spp=\"{}\">{}</span>", s, s)
+                format!(
+                    "<span class=\"spp-reference\" data-spp=\"{}\">{}</span>",
+                    s, s
+                )
             } else {
                 String::from("-")
             }
@@ -363,14 +376,14 @@ pub fn render_aut(root_state: usize, aut: &mut Aut, output_dir: &Path) -> Result
 
     while let Some(state) = main_states_to_process.pop() {
         if !main_visited_states.insert(state) {
-            continue; 
+            continue;
         }
         let expr_string = aut.state_to_string(state);
         main_state_expressions.insert(state, expr_string);
 
         let epsilon_spp = aut.epsilon(state);
         spp_ids.insert(epsilon_spp);
-        main_epsilon_spps_map.insert(state, epsilon_spp); 
+        main_epsilon_spps_map.insert(state, epsilon_spp);
 
         let ed_spp = aut.eliminate_dup(state);
         spp_ids.insert(ed_spp);
@@ -399,7 +412,7 @@ pub fn render_aut(root_state: usize, aut: &mut Aut, output_dir: &Path) -> Result
         if !pruned_visited_states.insert(state) {
             continue;
         }
-        // For expressions and epsilon SPPs, we can re-use data from the main exploration 
+        // For expressions and epsilon SPPs, we can re-use data from the main exploration
         // if the state ID implies the same underlying expression properties.
         // However, to be safe and decoupled, we can re-fetch or copy. Here, we copy for simplicity.
         if let Some(expr_str) = main_state_expressions.get(&state) {
@@ -409,7 +422,7 @@ pub fn render_aut(root_state: usize, aut: &mut Aut, output_dir: &Path) -> Result
             pruned_epsilon_spps_map.insert(state, *eps_spp);
             spp_ids.insert(*eps_spp); // Ensure it's in the global set
         }
-        
+
         // Ensure SPPs from the expression itself are in the global set (if not already from main exploration)
         aut.collect_spps(state, &mut spp_ids);
 
@@ -774,7 +787,7 @@ pub fn render_aut(root_state: usize, aut: &mut Aut, output_dir: &Path) -> Result
         &main_state_vec,
         &main_state_expressions,
         &main_epsilon_spps_map,
-        &Some(main_eliminate_dup_spps_map) // Pass the map for the main automaton
+        &Some(main_eliminate_dup_spps_map), // Pass the map for the main automaton
     );
     html_content.push_str(&state_table_body_html);
 
@@ -800,7 +813,8 @@ pub fn render_aut(root_state: usize, aut: &mut Aut, output_dir: &Path) -> Result
     // Add transition rows
     let mut sorted_main_transitions = main_transitions.clone();
     sorted_main_transitions.sort_by_key(|(src, dst, _)| (*src, *dst));
-    let main_transitions_table_body_html = generate_transitions_table_body_html(&sorted_main_transitions);
+    let main_transitions_table_body_html =
+        generate_transitions_table_body_html(&sorted_main_transitions);
     html_content.push_str(&main_transitions_table_body_html);
 
     html_content.push_str(
@@ -829,7 +843,7 @@ pub fn render_aut(root_state: usize, aut: &mut Aut, output_dir: &Path) -> Result
         &pruned_state_vec,
         &pruned_state_expressions,
         &pruned_epsilon_spps_map,
-        &None // No eliminate_dup for pruned view in this table
+        &None, // No eliminate_dup for pruned view in this table
     );
     html_content.push_str(&pruned_state_table_body_html);
     html_content.push_str(
@@ -852,7 +866,8 @@ pub fn render_aut(root_state: usize, aut: &mut Aut, output_dir: &Path) -> Result
     );
     let mut sorted_pruned_transitions = pruned_transitions.clone();
     sorted_pruned_transitions.sort_by_key(|(src, dst, _)| (*src, *dst));
-    let pruned_transitions_table_body_html = generate_transitions_table_body_html(&sorted_pruned_transitions);
+    let pruned_transitions_table_body_html =
+        generate_transitions_table_body_html(&sorted_pruned_transitions);
     html_content.push_str(&pruned_transitions_table_body_html);
     html_content.push_str(
         r#"                </tbody>
