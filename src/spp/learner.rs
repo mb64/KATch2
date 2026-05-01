@@ -6,6 +6,11 @@
 //! `None` (wildcard).  An abstract example is a pair of abstract packets plus a
 //! polarity: *positive* means the pair is in the SPP, *negative* means it is not.
 //!
+//! **Correlated wildcards**: when the same field is `None` in *both* packets of a
+//! pair, it expands only to `(0, 0)` and `(1, 1)` — the input and output bits
+//! take the same value.  If only one side is `None`, the two bits vary
+//! independently.
+//!
 //! [`Learner`] accumulates abstract examples in a compact, hash-consed evidence
 //! DAG and can extract an [`SPP`] consistent with all of them:
 //!
@@ -166,7 +171,7 @@ impl EvidStore {
             (Some(true), None) => &[(true, false), (true, true)],
             (None, Some(false)) => &[(false, false), (true, false)],
             (None, Some(true)) => &[(false, true), (true, true)],
-            (None, None) => &[(false, false), (false, true), (true, false), (true, true)],
+            (None, None) => &[(false, false), (true, true)],
         };
 
         for &(v1, v2) in pairs {
@@ -381,21 +386,27 @@ mod tests {
         cur == SPP::new(1)
     }
 
-    /// Expand an abstract packet into all concrete packets it represents.
-    fn expand_abstract(ap: &AbstractPacket) -> Vec<Vec<bool>> {
-        let mut result = vec![vec![]];
-        for &bit in ap {
-            let vals: Vec<bool> = match bit {
-                Some(b) => vec![b],
-                None => vec![false, true],
+    /// Expand a pair of abstract packets into all concrete pairs they represent,
+    /// respecting correlated-wildcard semantics: when both fields are `None` at
+    /// the same position, they expand only to `(false, false)` and `(true, true)`.
+    fn expand_pair(ap1: &AbstractPacket, ap2: &AbstractPacket) -> Vec<(Vec<bool>, Vec<bool>)> {
+        let mut result: Vec<(Vec<bool>, Vec<bool>)> = vec![(vec![], vec![])];
+        for (&b1, &b2) in ap1.iter().zip(ap2.iter()) {
+            let pairs: Vec<(bool, bool)> = match (b1, b2) {
+                (Some(v1), Some(v2)) => vec![(v1, v2)],
+                (Some(v1), None) => vec![(v1, false), (v1, true)],
+                (None, Some(v2)) => vec![(false, v2), (true, v2)],
+                (None, None) => vec![(false, false), (true, true)],
             };
             result = result
                 .into_iter()
-                .flat_map(|prefix| {
-                    vals.iter().map(move |&b| {
-                        let mut p = prefix.clone();
-                        p.push(b);
-                        p
+                .flat_map(|(p1, p2)| {
+                    pairs.iter().map(move |&(v1, v2)| {
+                        let mut np1 = p1.clone();
+                        let mut np2 = p2.clone();
+                        np1.push(v1);
+                        np2.push(v2);
+                        (np1, np2)
                     })
                 })
                 .collect();
@@ -454,15 +465,13 @@ mod tests {
         learner.add_example(ap1.clone(), ap2.clone(), true).unwrap();
         let spp = learner.extract(&mut store);
         // All concrete instances must be accepted
-        for c1 in expand_abstract(&ap1) {
-            for c2 in expand_abstract(&ap2) {
-                assert!(
-                    spp_accepts(&store, spp, &c1, &c2),
-                    "SPP should accept ({:?}, {:?})",
-                    c1,
-                    c2
-                );
-            }
+        for (c1, c2) in expand_pair(&ap1, &ap2) {
+            assert!(
+                spp_accepts(&store, spp, &c1, &c2),
+                "SPP should accept ({:?}, {:?})",
+                c1,
+                c2
+            );
         }
     }
 
@@ -514,27 +523,23 @@ mod tests {
         }
         let spp = learner.extract(&mut store);
         for &(ap1, ap2) in positives {
-            for c1 in expand_abstract(&ap1.to_vec()) {
-                for c2 in expand_abstract(&ap2.to_vec()) {
-                    assert!(
-                        spp_accepts(&store, spp, &c1, &c2),
-                        "positive example ({:?},{:?}) should be accepted",
-                        c1,
-                        c2
-                    );
-                }
+            for (c1, c2) in expand_pair(&ap1.to_vec(), &ap2.to_vec()) {
+                assert!(
+                    spp_accepts(&store, spp, &c1, &c2),
+                    "positive example ({:?},{:?}) should be accepted",
+                    c1,
+                    c2
+                );
             }
         }
         for &(ap1, ap2) in negatives {
-            for c1 in expand_abstract(&ap1.to_vec()) {
-                for c2 in expand_abstract(&ap2.to_vec()) {
-                    assert!(
-                        !spp_accepts(&store, spp, &c1, &c2),
-                        "negative example ({:?},{:?}) should be rejected",
-                        c1,
-                        c2
-                    );
-                }
+            for (c1, c2) in expand_pair(&ap1.to_vec(), &ap2.to_vec()) {
+                assert!(
+                    !spp_accepts(&store, spp, &c1, &c2),
+                    "negative example ({:?},{:?}) should be rejected",
+                    c1,
+                    c2
+                );
             }
         }
     }
@@ -585,27 +590,23 @@ mod tests {
             let spp = learner.extract(&mut store);
 
             for (ap1, ap2) in &positives {
-                for c1 in expand_abstract(ap1) {
-                    for c2 in expand_abstract(ap2) {
-                        assert!(
-                            spp_accepts(&store, spp, &c1, &c2),
-                            "positive ({:?},{:?}) rejected",
-                            c1,
-                            c2
-                        );
-                    }
+                for (c1, c2) in expand_pair(ap1, ap2) {
+                    assert!(
+                        spp_accepts(&store, spp, &c1, &c2),
+                        "positive ({:?},{:?}) rejected",
+                        c1,
+                        c2
+                    );
                 }
             }
             for (ap1, ap2) in &negatives {
-                for c1 in expand_abstract(ap1) {
-                    for c2 in expand_abstract(ap2) {
-                        assert!(
-                            !spp_accepts(&store, spp, &c1, &c2),
-                            "negative ({:?},{:?}) accepted",
-                            c1,
-                            c2
-                        );
-                    }
+                for (c1, c2) in expand_pair(ap1, ap2) {
+                    assert!(
+                        !spp_accepts(&store, spp, &c1, &c2),
+                        "negative ({:?},{:?}) accepted",
+                        c1,
+                        c2
+                    );
                 }
             }
         }
