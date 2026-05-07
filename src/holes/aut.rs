@@ -163,8 +163,42 @@ pub trait DFA: NFA {
     }
 }
 
+// ---- Reference impls -------------------------------------------------------
+
+// Blanket impls so that `&T` is itself an ENFA / NFA / DFA whenever `T` is.
+// Lets callers borrow automata into wrappers (`Complement<&T>`, `Union<&A, &B>`,
+// etc.) instead of cloning them.
+
+impl<T: ENFA> ENFA for &T {
+    type State = T::State;
+
+    fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, Self::State)> {
+        <T as ENFA>::start(*self, store)
+    }
+
+    fn is_visible(&self, store: &mut spp::SPPstore, q: &Self::State) -> bool {
+        <T as ENFA>::is_visible(*self, store, q)
+    }
+
+    fn transitions(
+        &self,
+        store: &mut spp::SPPstore,
+        q: &Self::State,
+    ) -> Vec<(spp::SPP, Self::State)> {
+        <T as ENFA>::transitions(*self, store, q)
+    }
+
+    fn output(&self, store: &mut spp::SPPstore, q: &Self::State) -> spp::SPP {
+        <T as ENFA>::output(*self, store, q)
+    }
+}
+
+impl<T: NFA> NFA for &T {}
+impl<T: DFA> DFA for &T {}
+
 // ---- Memo<T> ----------------------------------------------------------------
 
+#[derive(Clone)]
 struct MemoData<S: Clone + Eq + Hash> {
     state_to_id: HashMap<S, usize>,
     id_to_state: Vec<S>,
@@ -205,6 +239,7 @@ impl<S: Clone + Eq + Hash> MemoData<S> {
 /// ID; subsequent lookups return the same ID.  All trait method results are
 /// cached on that ID, so expensive computations in `T` are performed at most
 /// once per state.
+#[derive(Clone)]
 pub struct Memo<T: ENFA> {
     inner: T,
     data: RefCell<MemoData<T::State>>,
@@ -278,6 +313,7 @@ impl<T: DFA> DFA for Memo<T> {}
 /// queried at *visible* states of the underlying ENFA -- invisible states are
 /// the ones that `epsilon_closure` walks through to produce the NFA's
 /// transitions and outputs.
+#[derive(Clone)]
 pub struct EpsilonClosure<T: ENFA> {
     inner: T,
     memo: RefCell<HashMap<T::State, Vec<(spp::SPP, T::State)>>>,
@@ -310,16 +346,43 @@ impl<T: ENFA> EpsilonClosure<T> {
         &self.inner
     }
 
+    /// Given a trace through the closure NFA -- a sequence of
+    /// `(visible_state, packet)` pairs -- elaborate it into the full path
+    /// through the underlying ENFA `T`, splicing in the invisible states
+    /// the closure abstracted away.  The returned vector starts with
+    /// `visible_path[0]` and ends with `visible_path.last()`; each
+    /// consecutive pair is bridged by [`elaborate_step`].
+    pub fn elaborate_trace(
+        &self,
+        store: &mut spp::SPPstore,
+        visible_path: &[(T::State, Vec<bool>)],
+    ) -> Vec<(T::State, Vec<bool>)> {
+        let mut full: Vec<(T::State, Vec<bool>)> = Vec::new();
+        if let Some(first) = visible_path.first() {
+            full.push(first.clone());
+        }
+        for w in visible_path.windows(2) {
+            let (q_curr, p_curr) = &w[0];
+            let (q_next, p_next) = &w[1];
+            let step = elaborate_step(self.inner(), store, q_curr, p_curr, q_next, p_next);
+            full.extend(step);
+        }
+        full
+    }
+
     /// Returns the ε-closure of `q`: a list of `(spp, p)` pairs where `p` is
-    /// any state reachable from `q` along a path whose intermediate states
-    /// (i.e., all but the last) are invisible.  `p` itself can be visible
-    /// (in which case the path's last step is a "consumption" into a visible
-    /// state) or invisible (a pure ε-path).  `(one, q)` is always included
-    /// for the length-zero path.
+    /// `q` itself (with `spp = one`) or any *invisible* state reachable from
+    /// `q` along an invisible-only path; `spp` is the composition of SPPs
+    /// along that path.  Visible states other than `q` itself are
+    /// deliberately not included -- reaching them would require a real
+    /// "consumption" transition, which lies outside ε-closure.
     ///
-    /// This closure is an internal helper; the trait methods filter it to
-    /// the appropriate visibility for their needs (visible-only for
-    /// transitions and start, invisible-only for the extra term in output).
+    /// Used internally to drive `start`, `transitions`, and `output`:
+    ///   * `start` filters this closure to visible (just `q` if visible);
+    ///   * `transitions` "pre-closes" the source `q`, then takes one inner
+    ///     transition into a visible target;
+    ///   * `output` sums `inner.output(q)` with the closure's invisible-end
+    ///     contributions.
     ///
     /// Results are memoized per state.
     fn epsilon_closure(
@@ -363,14 +426,12 @@ impl<T: ENFA> EpsilonClosure<T> {
 
         // For each node `s_i` in our subgraph:
         //  * `consts[i]` starts with the self-entry `(one, s_i)` (length-zero
-        //    path), and also absorbs:
-        //    - direct visible neighbours `(spp, q_next_visible)` — those are
-        //      length-1 paths ending with one consumption;
-        //    - the spliced closures of any already-memoized invisible
-        //      neighbours.
+        //    path) and absorbs the spliced closures of any already-memoized
+        //    invisible neighbours.
         //  * `edges[i][j]` is the SPP coefficient on the ε-edge from `s_i`
         //    to the unknown invisible neighbour `s_j`, unioned across
         //    multiple inner transitions.
+        // Visible neighbours are skipped: they aren't part of the ε-closure.
         let mut consts: Vec<HashMap<T::State, spp::SPP>> = vec![HashMap::new(); n];
         let mut edges: Vec<Vec<spp::SPP>> = vec![vec![store.zero; n]; n];
         for i in 0..n {
@@ -378,7 +439,7 @@ impl<T: ENFA> EpsilonClosure<T> {
             union_into(&mut consts[i], store, s_i.clone(), store.one);
             for (spp, q_next) in self.inner.transitions(store, &s_i) {
                 if self.inner.is_visible(store, &q_next) {
-                    union_into(&mut consts[i], store, q_next, spp);
+                    continue;
                 } else if let Some(memoized) = self.memo.borrow().get(&q_next).cloned() {
                     for (spp_inner, v) in memoized {
                         let combined = store.sequence(spp, spp_inner);
@@ -486,22 +547,23 @@ impl<T: ENFA> ENFA for EpsilonClosure<T> {
         true
     }
 
-    /// For a visible `q`: take one underlying transition, ε-close the target,
-    /// and discard non-visible states.  The combined SPP is the relational
-    /// composition of the transition and the closure path.
+    /// For a visible `q`: pre-close `q` to bring its ε-reachable invisibles
+    /// into scope, then take one inner transition out of each, keeping only
+    /// transitions that land on a visible target (the "consumption" step).
+    /// The combined SPP is the closure path composed with the transition's.
     fn transitions(&self, store: &mut spp::SPPstore, q: &T::State) -> Vec<(spp::SPP, T::State)> {
         debug_assert!(
             self.inner.is_visible(store, q),
             "EpsilonClosure::transitions only accepts visible states",
         );
         let mut result: HashMap<T::State, spp::SPP> = HashMap::new();
-        for (spp_t, q_next) in self.inner.transitions(store, q) {
-            for (path, v) in self.epsilon_closure(store, &q_next) {
-                if !self.inner.is_visible(store, &v) {
+        for (path, p) in self.epsilon_closure(store, q) {
+            for (spp_t, q_next) in self.inner.transitions(store, &p) {
+                if !self.inner.is_visible(store, &q_next) {
                     continue;
                 }
-                let combined = store.sequence(spp_t, path);
-                union_into(&mut result, store, v, combined);
+                let combined = store.sequence(path, spp_t);
+                union_into(&mut result, store, q_next, combined);
             }
         }
         result.into_iter().map(|(v, s)| (s, v)).collect()
@@ -547,6 +609,7 @@ impl<T: ENFA> NFA for EpsilonClosure<T> {}
 ///
 /// Requires `T::State: Ord` so the subset can be canonicalized as a
 /// `BTreeSet`, which is what makes the `Hash + Eq` `State` key well-defined.
+#[derive(Clone)]
 pub struct SubsetDfa<T: NFA>
 where
     T::State: Ord,
@@ -661,12 +724,252 @@ where
 impl<T: NFA> NFA for SubsetDfa<T> where T::State: Ord {}
 impl<T: NFA> DFA for SubsetDfa<T> where T::State: Ord {}
 
+// ---- ops module ------------------------------------------------------------
+
+/// Boolean operations on automata.
+///
+/// Each operation is a wrapper type that defers all real work to its
+/// constituent automata; nothing is materialized eagerly.
+pub mod ops {
+    use super::*;
+
+    // ---- Complement ------------------------------------------------------
+
+    /// State of [`Complement`]: either an inner state, or a synthesized sink
+    /// reached when the inner DFA's transitions don't cover the current
+    /// `(in, out)` packet pair.  The sink loops to itself with `top` and has
+    /// `top` as its output, so any packet pair in any extension of the trace
+    /// is accepted by the complement once it's reached.
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    pub enum CompState<S> {
+        Inner(S),
+        Sink,
+    }
+
+    /// Complement of a DFA: accepts exactly the triples the inner DFA rejects.
+    /// Implements `DFA` (single start, disjoint transitions, total).
+    #[derive(Clone)]
+    pub struct Complement<T: DFA> {
+        inner: T,
+    }
+
+    /// Build the complement of a DFA.
+    pub fn complement<T: DFA>(inner: T) -> Complement<T> {
+        Complement { inner }
+    }
+
+    impl<T: DFA> ENFA for Complement<T> {
+        type State = CompState<T::State>;
+
+        fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, Self::State)> {
+            self.inner
+                .start(store)
+                .into_iter()
+                .map(|(spp, q)| (spp, CompState::Inner(q)))
+                .collect()
+        }
+
+        fn is_visible(&self, _store: &mut spp::SPPstore, _q: &Self::State) -> bool {
+            true
+        }
+
+        fn transitions(
+            &self,
+            store: &mut spp::SPPstore,
+            q: &Self::State,
+        ) -> Vec<(spp::SPP, Self::State)> {
+            match q {
+                CompState::Inner(s) => {
+                    let inner_trans = self.inner.transitions(store, s);
+                    let mut covered = store.zero;
+                    let mut result: Vec<(spp::SPP, Self::State)> =
+                        Vec::with_capacity(inner_trans.len() + 1);
+                    for (spp, q_next) in inner_trans {
+                        covered = store.union(covered, spp);
+                        result.push((spp, CompState::Inner(q_next)));
+                    }
+                    let missing = store.difference(store.top, covered);
+                    if missing != store.zero {
+                        result.push((missing, CompState::Sink));
+                    }
+                    result
+                }
+                CompState::Sink => vec![(store.top, CompState::Sink)],
+            }
+        }
+
+        fn output(&self, store: &mut spp::SPPstore, q: &Self::State) -> spp::SPP {
+            match q {
+                CompState::Inner(s) => {
+                    let inner_out = self.inner.output(store, s);
+                    store.complement(inner_out)
+                }
+                CompState::Sink => store.top,
+            }
+        }
+    }
+
+    impl<T: DFA> NFA for Complement<T> {}
+    impl<T: DFA> DFA for Complement<T> {}
+
+    // ---- Union -----------------------------------------------------------
+
+    /// State of [`Union`]: tagged inner state from either `Left` or `Right`.
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    pub enum UnionState<L, R> {
+        Left(L),
+        Right(R),
+    }
+
+    /// Union of two NFAs: accepts triples accepted by either side.  The
+    /// "branch" choice is encoded in the start list (a tagged concatenation
+    /// of the two underlying starts), so no synthetic ε-state is needed.
+    #[derive(Clone)]
+    pub struct Union<A: NFA, B: NFA> {
+        left: A,
+        right: B,
+    }
+
+    /// Build the union of two NFAs.
+    pub fn union<A: NFA, B: NFA>(left: A, right: B) -> Union<A, B> {
+        Union { left, right }
+    }
+
+    impl<A: NFA, B: NFA> ENFA for Union<A, B> {
+        type State = UnionState<A::State, B::State>;
+
+        fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, Self::State)> {
+            let mut out: Vec<(spp::SPP, Self::State)> = self
+                .left
+                .start(store)
+                .into_iter()
+                .map(|(spp, q)| (spp, UnionState::Left(q)))
+                .collect();
+            out.extend(
+                self.right
+                    .start(store)
+                    .into_iter()
+                    .map(|(spp, q)| (spp, UnionState::Right(q))),
+            );
+            out
+        }
+
+        fn is_visible(&self, store: &mut spp::SPPstore, q: &Self::State) -> bool {
+            match q {
+                UnionState::Left(s) => self.left.is_visible(store, s),
+                UnionState::Right(s) => self.right.is_visible(store, s),
+            }
+        }
+
+        fn transitions(
+            &self,
+            store: &mut spp::SPPstore,
+            q: &Self::State,
+        ) -> Vec<(spp::SPP, Self::State)> {
+            match q {
+                UnionState::Left(s) => self
+                    .left
+                    .transitions(store, s)
+                    .into_iter()
+                    .map(|(spp, q)| (spp, UnionState::Left(q)))
+                    .collect(),
+                UnionState::Right(s) => self
+                    .right
+                    .transitions(store, s)
+                    .into_iter()
+                    .map(|(spp, q)| (spp, UnionState::Right(q)))
+                    .collect(),
+            }
+        }
+
+        fn output(&self, store: &mut spp::SPPstore, q: &Self::State) -> spp::SPP {
+            match q {
+                UnionState::Left(s) => self.left.output(store, s),
+                UnionState::Right(s) => self.right.output(store, s),
+            }
+        }
+    }
+
+    // ---- Intersection ----------------------------------------------------
+
+    /// Intersection of two NFAs via the product construction: each state is
+    /// a pair `(q_a, q_b)`, transitions are SPP-intersections of paired
+    /// transitions, and output is SPP-intersection of paired outputs.
+    /// Implements `NFA` always, and `DFA` when both inputs are `DFA`s
+    /// (since the product preserves "single start" and "disjoint
+    /// transitions").
+    #[derive(Clone)]
+    pub struct Intersection<A: NFA, B: NFA> {
+        left: A,
+        right: B,
+    }
+
+    /// Build the intersection of two NFAs.
+    pub fn intersection<A: NFA, B: NFA>(left: A, right: B) -> Intersection<A, B> {
+        Intersection { left, right }
+    }
+
+    impl<A: NFA, B: NFA> ENFA for Intersection<A, B> {
+        type State = (A::State, B::State);
+
+        fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, Self::State)> {
+            let starts_a = self.left.start(store);
+            let starts_b = self.right.start(store);
+            let mut out: Vec<(spp::SPP, Self::State)> =
+                Vec::with_capacity(starts_a.len() * starts_b.len());
+            for (spp_a, q_a) in &starts_a {
+                for (spp_b, q_b) in &starts_b {
+                    let combined = store.intersect(*spp_a, *spp_b);
+                    if combined != store.zero {
+                        out.push((combined, (q_a.clone(), q_b.clone())));
+                    }
+                }
+            }
+            out
+        }
+
+        fn is_visible(&self, _store: &mut spp::SPPstore, _q: &Self::State) -> bool {
+            true
+        }
+
+        fn transitions(
+            &self,
+            store: &mut spp::SPPstore,
+            q: &Self::State,
+        ) -> Vec<(spp::SPP, Self::State)> {
+            let trans_a = self.left.transitions(store, &q.0);
+            let trans_b = self.right.transitions(store, &q.1);
+            let mut out: Vec<(spp::SPP, Self::State)> =
+                Vec::with_capacity(trans_a.len() * trans_b.len());
+            for (spp_a, q_a_next) in &trans_a {
+                for (spp_b, q_b_next) in &trans_b {
+                    let combined = store.intersect(*spp_a, *spp_b);
+                    if combined != store.zero {
+                        out.push((combined, (q_a_next.clone(), q_b_next.clone())));
+                    }
+                }
+            }
+            out
+        }
+
+        fn output(&self, store: &mut spp::SPPstore, q: &Self::State) -> spp::SPP {
+            let out_a = self.left.output(store, &q.0);
+            let out_b = self.right.output(store, &q.1);
+            store.intersect(out_a, out_b)
+        }
+    }
+
+    impl<A: NFA, B: NFA> NFA for Intersection<A, B> {}
+    impl<A: DFA, B: DFA> DFA for Intersection<A, B> {}
+}
+
 // ---- ExplicitDFA -----------------------------------------------------------
 
 /// A DFA stored as flat tables: `transitions[i]` and `outputs[i]` describe
 /// state `i`, indexed by dense `usize`.  As a true DFA there is exactly one
 /// start state (with implicit identity start SPP).  Fields are public so
 /// callers can avoid going through the trait when raw access is needed.
+#[derive(Clone)]
 pub struct ExplicitDFA {
     pub start: usize,
     pub transitions: Vec<Vec<(spp::SPP, usize)>>,
@@ -1017,7 +1320,7 @@ fn reconstruct_trace<A: ENFA>(
     states_back.reverse();
     let path: Vec<(A::State, Vec<bool>)> = states_back
         .into_iter()
-        .zip(packets_back.into_iter())
+        .zip(packets_back)
         .collect();
     (input, path, out_pkt)
 }
@@ -1175,29 +1478,63 @@ mod tests {
     use super::*;
 
     /// Test-only ENFA wrapper that overlays explicit visibility flags on an
-    /// `ExplicitDFA` (whose states are normally all visible).
-    struct RandomVisibility<'a> {
-        inner: &'a ExplicitDFA,
+    /// inner automaton whose `State` is `usize`.  Owns the inner so the
+    /// wrapper can be moved/cloned freely.
+    #[derive(Clone)]
+    struct RandomVisibility<T> {
+        inner: T,
         visible: Vec<bool>,
     }
 
-    impl<'a> ENFA for RandomVisibility<'a> {
+    impl<T> ENFA for RandomVisibility<T>
+    where
+        T: ENFA<State = usize>,
+    {
         type State = usize;
         fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, usize)> {
-            vec![(store.one, self.inner.start)]
+            self.inner.start(store)
         }
         fn is_visible(&self, _store: &mut spp::SPPstore, q: &usize) -> bool {
             self.visible[*q]
         }
-        fn transitions(&self, _store: &mut spp::SPPstore, q: &usize) -> Vec<(spp::SPP, usize)> {
-            self.inner.transitions[*q].clone()
+        fn transitions(&self, store: &mut spp::SPPstore, q: &usize) -> Vec<(spp::SPP, usize)> {
+            self.inner.transitions(store, q)
         }
-        fn output(&self, _store: &mut spp::SPPstore, q: &usize) -> spp::SPP {
-            self.inner.outputs[*q]
+        fn output(&self, store: &mut spp::SPPstore, q: &usize) -> spp::SPP {
+            self.inner.output(store, q)
         }
     }
 
-    impl<'a> NFA for RandomVisibility<'a> {}
+    /// Generate a random ExplicitDFA from a fuzzed expression.  The DFA's
+    /// states are dense `usize` indices; SPPs live in `aut`'s shared store,
+    /// so multiple DFAs from the same `aut` interoperate freely.
+    fn random_dfa(aut: &mut crate::aut::Aut, expr_depth: usize, num_fields: u32) -> ExplicitDFA {
+        let (expr, _) = crate::fuzz::genax(0, expr_depth, num_fields);
+        let state = aut.expr_to_state(&expr);
+        aut_to_dfa(aut, state)
+    }
+
+    /// Generate a random NFA: a [`random_dfa`] with random visibility flags
+    /// (start kept visible) wrapped in [`EpsilonClosure`].  The closure
+    /// makes it a real NFA (every wrapper state visible) over the same
+    /// `usize` state space.
+    fn random_nfa(
+        aut: &mut crate::aut::Aut,
+        expr_depth: usize,
+        num_fields: u32,
+    ) -> EpsilonClosure<RandomVisibility<ExplicitDFA>> {
+        let dfa = random_dfa(aut, expr_depth, num_fields);
+        let n = dfa.num_states();
+        let mut visible: Vec<bool> = (0..n).map(|_| rand::random::<bool>()).collect();
+        if n > 0 {
+            visible[dfa.start] = true;
+        }
+        let wrapper = RandomVisibility {
+            inner: dfa,
+            visible,
+        };
+        EpsilonClosure::new(wrapper)
+    }
 
     #[test]
     fn fuzz_epsilon_closure_emptiness() {
@@ -1210,32 +1547,16 @@ mod tests {
         let max_trials = 500;
 
         for trial in 0..max_trials {
-            let (expr, _) = crate::fuzz::genax(0, expr_depth, num_fields);
-
             let mut aut = crate::aut::Aut::new(num_fields);
-            let state = aut.expr_to_state(&expr);
-
-            let dfa = aut_to_dfa(&mut aut, state);
-
-            let original_empty = is_empty(&dfa, aut.spp_store_mut());
-
-            let n = dfa.num_states();
-            let mut visible: Vec<bool> = (0..n).map(|_| rand::random::<bool>()).collect();
-            // Keep the start state visible so the wrapper presents a valid NFA.
-            visible[dfa.start] = true;
-
-            let wrapper = RandomVisibility {
-                inner: &dfa,
-                visible,
-            };
-            let closure = EpsilonClosure::new(wrapper);
-
-            let closure_empty = is_empty(&closure, aut.spp_store_mut());
-
+            let nfa = random_nfa(&mut aut, expr_depth, num_fields);
+            // The underlying ExplicitDFA is two `inner()` hops down; reach in
+            // through the field on `RandomVisibility`.
+            let dfa_empty = is_empty(&nfa.inner().inner, aut.spp_store_mut());
+            let closure_empty = is_empty(&nfa, aut.spp_store_mut());
             assert_eq!(
-                original_empty, closure_empty,
-                "emptiness mismatch on trial {} for expr {}: original={}, closure={}",
-                trial, expr, original_empty, closure_empty
+                dfa_empty, closure_empty,
+                "emptiness mismatch on trial {}: dfa={}, closure={}",
+                trial, dfa_empty, closure_empty
             );
         }
     }
@@ -1249,27 +1570,11 @@ mod tests {
         // which must be a valid `inner.transitions` step.
         let expr_depth = 4;
         let num_fields = 3;
-        let max_trials = 200;
+        let max_trials = 500;
 
         for trial in 0..max_trials {
-            let (expr, _) = crate::fuzz::genax(0, expr_depth, num_fields);
-
             let mut aut = crate::aut::Aut::new(num_fields);
-            let state = aut.expr_to_state(&expr);
-            let dfa = aut_to_dfa(&mut aut, state);
-
-            let n = dfa.num_states();
-            if n == 0 {
-                continue;
-            }
-            let mut visible: Vec<bool> = (0..n).map(|_| rand::random::<bool>()).collect();
-            visible[dfa.start] = true;
-
-            let wrapper = RandomVisibility {
-                inner: &dfa,
-                visible,
-            };
-            let closure = EpsilonClosure::new(wrapper);
+            let closure = random_nfa(&mut aut, expr_depth, num_fields);
 
             if is_empty(&closure, aut.spp_store_mut()) {
                 continue;
@@ -1279,21 +1584,7 @@ mod tests {
                 .expect("non-empty closure should yield a trace");
             let (_input, visible_path, _output_pkt) = trace;
 
-            // Elaborate each consecutive pair in the visible path.
-            let mut full_path: Vec<(usize, Vec<bool>)> = vec![visible_path[0].clone()];
-            for w in visible_path.windows(2) {
-                let (q_curr, p_curr) = &w[0];
-                let (q_next, p_next) = &w[1];
-                let step_path = elaborate_step(
-                    closure.inner(),
-                    aut.spp_store_mut(),
-                    q_curr,
-                    p_curr,
-                    q_next,
-                    p_next,
-                );
-                full_path.extend(step_path);
-            }
+            let full_path = closure.elaborate_trace(aut.spp_store_mut(), &visible_path);
 
             // Every consecutive `(q, p) -> (q', p')` in the elaborated path
             // must be backed by a real inner transition matching the packets.
@@ -1310,8 +1601,8 @@ mod tests {
                 }
                 assert!(
                     found,
-                    "trial {} expr {}: elaborated step #{} ({}, {:?}) -> ({}, {:?}) is not a valid inner transition",
-                    trial, expr, i, q_a, p_a, q_b, p_b,
+                    "trial {}: elaborated step #{} ({}, {:?}) -> ({}, {:?}) is not a valid inner transition",
+                    trial, i, q_a, p_a, q_b, p_b,
                 );
             }
 
@@ -1335,35 +1626,19 @@ mod tests {
         //     underlying NFA's nfa_accepts.
         let expr_depth = 4;
         let num_fields = 3;
-        let max_trials = 200;
+        let max_trials = 500;
 
         for trial in 0..max_trials {
-            let (expr, _) = crate::fuzz::genax(0, expr_depth, num_fields);
-
             let mut aut = crate::aut::Aut::new(num_fields);
-            let state = aut.expr_to_state(&expr);
-            let dfa = aut_to_dfa(&mut aut, state);
-
-            let n = dfa.num_states();
-            if n == 0 {
-                continue;
-            }
-            let mut visible: Vec<bool> = (0..n).map(|_| rand::random::<bool>()).collect();
-            visible[dfa.start] = true;
-
-            let wrapper = RandomVisibility {
-                inner: &dfa,
-                visible,
-            };
-            let nfa = EpsilonClosure::new(wrapper);
+            let nfa = random_nfa(&mut aut, expr_depth, num_fields);
             let subset = SubsetDfa::new(nfa);
 
             let nfa_empty = is_empty(subset.inner(), aut.spp_store_mut());
             let subset_empty = is_empty(&subset, aut.spp_store_mut());
             assert_eq!(
                 nfa_empty, subset_empty,
-                "trial {} expr {}: emptiness mismatch (nfa={}, subset={})",
-                trial, expr, nfa_empty, subset_empty
+                "trial {}: emptiness mismatch (nfa={}, subset={})",
+                trial, nfa_empty, subset_empty
             );
 
             // dfa_start must succeed (single start invariant).
@@ -1375,17 +1650,179 @@ mod tests {
                 let (input, t, output) = trace;
                 assert!(
                     subset.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
-                    "trial {} expr {}: subset DFA rejects its own trace",
+                    "trial {}: subset DFA rejects its own trace",
                     trial,
-                    expr,
                 );
                 assert!(
                     subset
                         .inner()
                         .nfa_accepts(aut.spp_store_mut(), &input, &t, &output),
-                    "trial {} expr {}: underlying NFA rejects the subset DFA's trace",
+                    "trial {}: underlying NFA rejects the subset DFA's trace",
                     trial,
-                    expr,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_complement() {
+        // For a DFA `D` and any concrete triple `(input, trace, output)`:
+        //   D.dfa_accepts(triple) iff NOT complement(D).dfa_accepts(triple).
+        // Verify with a triple from each side (when non-empty).
+        let expr_depth = 4;
+        let num_fields = 3;
+        let max_trials = 500;
+
+        for trial in 0..max_trials {
+            let mut aut = crate::aut::Aut::new(num_fields);
+            let dfa = random_dfa(&mut aut, expr_depth, num_fields);
+            let comp = ops::complement(&dfa);
+
+            // A trace accepted by the original is rejected by the complement.
+            if let Some((input, t, output)) = get_any_trace(&dfa, aut.spp_store_mut()) {
+                assert!(
+                    dfa.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    "trial {}: dfa rejects its own trace",
+                    trial
+                );
+                assert!(
+                    !comp.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    "trial {}: complement accepts a trace the DFA accepts",
+                    trial
+                );
+            }
+
+            // A trace accepted by the complement is rejected by the original.
+            if let Some((input, t, output)) = get_any_trace(&comp, aut.spp_store_mut()) {
+                assert!(
+                    comp.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    "trial {}: complement rejects its own trace",
+                    trial
+                );
+                assert!(
+                    !dfa.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    "trial {}: dfa accepts a trace the complement accepts",
+                    trial
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_union() {
+        // Property: union(A, B) accepts a triple iff A or B accepts it.
+        // Forward: if A or B accepts a triple, union should too.
+        // Reverse: any triple union accepts must be accepted by A or B.
+        let expr_depth = 4;
+        let num_fields = 3;
+        let max_trials = 500;
+
+        for trial in 0..max_trials {
+            let mut aut = crate::aut::Aut::new(num_fields);
+            let nfa1 = random_nfa(&mut aut, expr_depth, num_fields);
+            let nfa2 = random_nfa(&mut aut, expr_depth, num_fields);
+
+            // Build the union (an ENFA) and run it through EpsilonClosure to
+            // get a queryable NFA -- the union has no real ε states under
+            // our list-based start, so the closure is a thin pass-through.
+            let union_enfa = ops::union(&nfa1, &nfa2);
+            let union_nfa = EpsilonClosure::new(union_enfa);
+
+            // Forward: trace from nfa1 is accepted by union.
+            if let Some((input, t, output)) = get_any_trace(&nfa1, aut.spp_store_mut()) {
+                assert!(
+                    union_nfa.nfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    "trial {}: union rejects a trace nfa1 accepts",
+                    trial
+                );
+            }
+            // Forward: trace from nfa2 is accepted by union.
+            if let Some((input, t, output)) = get_any_trace(&nfa2, aut.spp_store_mut()) {
+                assert!(
+                    union_nfa.nfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    "trial {}: union rejects a trace nfa2 accepts",
+                    trial
+                );
+            }
+            // Reverse: trace from union is accepted by nfa1 or nfa2.
+            if let Some((input, t, output)) = get_any_trace(&union_nfa, aut.spp_store_mut()) {
+                let in1 = nfa1.nfa_accepts(aut.spp_store_mut(), &input, &t, &output);
+                let in2 = nfa2.nfa_accepts(aut.spp_store_mut(), &input, &t, &output);
+                assert!(
+                    in1 || in2,
+                    "trial {}: union accepts a trace neither nfa1 nor nfa2 accepts",
+                    trial,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_intersection() {
+        // Property: intersection(A, B) accepts a triple iff both A and B do.
+        // Tests both the NFA case and the DFA-DFA case (where the result is
+        // a real DFA via the conditional `impl<A: DFA, B: DFA> DFA for ...`).
+        let expr_depth = 4;
+        let num_fields = 3;
+        let max_trials = 500;
+
+        for trial in 0..max_trials {
+            let mut aut = crate::aut::Aut::new(num_fields);
+
+            // NFA-NFA case.
+            let nfa1 = random_nfa(&mut aut, expr_depth, num_fields);
+            let nfa2 = random_nfa(&mut aut, expr_depth, num_fields);
+            let inter = ops::intersection(&nfa1, &nfa2);
+
+            // Reverse: any trace from intersection is accepted by both.
+            if let Some((input, t, output)) = get_any_trace(&inter, aut.spp_store_mut()) {
+                assert!(
+                    nfa1.nfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    "trial {}: nfa1 rejects a trace from the intersection",
+                    trial
+                );
+                assert!(
+                    nfa2.nfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    "trial {}: nfa2 rejects a trace from the intersection",
+                    trial
+                );
+            }
+
+            // Forward (best-effort): if a trace from nfa1 is also accepted by
+            // nfa2, the intersection must accept it.
+            if let Some((input, t, output)) = get_any_trace(&nfa1, aut.spp_store_mut())
+                && nfa2.nfa_accepts(aut.spp_store_mut(), &input, &t, &output)
+            {
+                assert!(
+                    inter.nfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    "trial {}: intersection rejects a trace accepted by both nfa1 and nfa2",
+                    trial
+                );
+            }
+
+            // DFA-DFA case: result is a DFA.
+            let dfa1 = random_dfa(&mut aut, expr_depth, num_fields);
+            let dfa2 = random_dfa(&mut aut, expr_depth, num_fields);
+            let inter_dfa = ops::intersection(&dfa1, &dfa2);
+
+            // Single-start invariant.
+            let _ = inter_dfa.dfa_start(aut.spp_store_mut());
+
+            if let Some((input, t, output)) = get_any_trace(&inter_dfa, aut.spp_store_mut()) {
+                assert!(
+                    dfa1.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    "trial {}: dfa1 rejects a trace from the DFA intersection",
+                    trial
+                );
+                assert!(
+                    dfa2.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    "trial {}: dfa2 rejects a trace from the DFA intersection",
+                    trial
+                );
+                assert!(
+                    inter_dfa.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    "trial {}: DFA intersection rejects its own trace",
+                    trial
                 );
             }
         }

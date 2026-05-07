@@ -25,7 +25,7 @@ enum AExpr {
 // A State is an index into the Aut's expression table.
 type State = usize;
 
-/// Symbolic transitions ST<T>.           
+/// Symbolic transitions `ST<T>`.
 /// Symbolic transitions represent, for each T, a set of packet pairs that can transition to T. These are represented as a finite map from T to SPP's.
 /// A symbolic transition can be deterministic or nondeterministic, depending on whether the SPPs associated with different T's are disjoint. We typically keep ST's in deterministic form.
 #[derive(Debug, Clone, PartialEq, Eq)]
