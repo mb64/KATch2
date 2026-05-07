@@ -2,8 +2,10 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 pub mod aut;
+pub mod holes;
 pub mod desugar;
 pub mod expr;
+pub mod fuzz;
 pub mod parser;
 pub mod pre;
 pub mod sp;
