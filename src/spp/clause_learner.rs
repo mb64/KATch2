@@ -277,10 +277,10 @@ impl ApPairTrie {
         }
 
         // Correlated-wildcard branch: pattern (None, None) — matches when b1 == b2.
-        if b1 == b2 {
-            if let Some(child) = node.nn.as_deref() {
-                Self::lookup_rec(child, p1, p2, depth + 1, num_vars, result);
-            }
+        if b1 == b2
+            && let Some(child) = node.nn.as_deref()
+        {
+            Self::lookup_rec(child, p1, p2, depth + 1, num_vars, result);
         }
     }
 }
@@ -523,7 +523,7 @@ impl ClauseLearner {
                     TernaryVal::DontCare => continue,
                 };
                 let (gen_ap1, gen_ap2) = self.generalize(p1, p2);
-                if let Err(_) = learner.add_example(gen_ap1, gen_ap2, polarity) {
+                if learner.add_example(gen_ap1, gen_ap2, polarity).is_err() {
                     assert!(false, "SAT model should be consistent by construction");
                 }
             }

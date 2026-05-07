@@ -194,8 +194,7 @@ impl<T: DFA> Memo<T> {
 
             let already_cached = {
                 let data = self.data.borrow();
-                data.transitions_cache.contains_key(&i)
-                    && data.output_cache.contains_key(&i)
+                data.transitions_cache.contains_key(&i) && data.output_cache.contains_key(&i)
             };
             if !already_cached {
                 let state = self.data.borrow().id_to_state[i].clone();
@@ -503,9 +502,7 @@ fn reconstruct_trace<A: ENFA>(
 
         let (j, p_j) = match found {
             Some(x) => x,
-            None => unreachable!(
-                "non-start step has no predecessor producing the current packet"
-            ),
+            None => unreachable!("non-start step has no predecessor producing the current packet"),
         };
         packets_back.push(p_j.clone());
         current_idx = j;
@@ -536,12 +533,7 @@ fn singleton_sp(store: &mut spp::SPPstore, packet: &[bool]) -> sp::SP {
 }
 
 /// True iff `(input, output)` is a packet pair related by `spp`.
-fn spp_accepts(
-    store: &mut spp::SPPstore,
-    spp: spp::SPP,
-    input: &[bool],
-    output: &[bool],
-) -> bool {
+fn spp_accepts(store: &mut spp::SPPstore, spp: spp::SPP, input: &[bool], output: &[bool]) -> bool {
     let sp_in = singleton_sp(store, input);
     let pushed = store.push(sp_in, spp);
     let sp_out = singleton_sp(store, output);
@@ -585,8 +577,7 @@ mod tests {
                     expr
                 );
                 let (input, trace_pkts, output) = trace.unwrap();
-                let accepted =
-                    dfa.dfa_accepts(aut.spp_store_mut(), &input, &trace_pkts, &output);
+                let accepted = dfa.dfa_accepts(aut.spp_store_mut(), &input, &trace_pkts, &output);
                 assert!(
                     accepted,
                     "trace not accepted by DFA on trial {} for expr {}: input={:?}, trace={:?}, output={:?}",

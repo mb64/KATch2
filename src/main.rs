@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 mod aut;
-mod holes;
 mod desugar;
 mod expr;
 mod fuzz;
+mod holes;
 mod parser;
 mod pre;
 mod sp;
