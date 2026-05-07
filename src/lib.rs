@@ -4,6 +4,7 @@ use wasm_bindgen::prelude::*;
 pub mod aut;
 pub mod desugar;
 pub mod expr;
+#[cfg(test)]
 pub mod fuzz;
 pub mod holes;
 pub mod parser;

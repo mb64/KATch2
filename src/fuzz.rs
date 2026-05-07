@@ -736,8 +736,6 @@ mod tests {
     use crate::aut::Aut;
 
     use super::*;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
 
     #[test]
     fn print_random_genax() {

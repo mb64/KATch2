@@ -364,28 +364,6 @@ impl Learner {
 mod tests {
     use super::*;
 
-    /// Check whether a concrete packet pair (pk1, pk2) is accepted by an SPP.
-    /// Traverses the BDD, following the (input_bit, output_bit) path.
-    fn spp_accepts(spp_store: &SPPstore, spp: SPP, pk1: &[bool], pk2: &[bool]) -> bool {
-        let mut cur = spp;
-        for (&b1, &b2) in pk1.iter().zip(pk2.iter()) {
-            if cur == SPP::new(0) {
-                return false;
-            }
-            if cur == SPP::new(1) {
-                return true;
-            }
-            let node = spp_store.get(cur);
-            cur = match (b1, b2) {
-                (false, false) => node.x00,
-                (false, true) => node.x01,
-                (true, false) => node.x10,
-                (true, true) => node.x11,
-            };
-        }
-        cur == SPP::new(1)
-    }
-
     /// Expand a pair of abstract packets into all concrete pairs they represent,
     /// respecting correlated-wildcard semantics: when both fields are `None` at
     /// the same position, they expand only to `(false, false)` and `(true, true)`.
@@ -436,7 +414,7 @@ mod tests {
         // The extracted SPP must accept the positive example
         let c1 = vec![false, true];
         let c2 = vec![true, false];
-        assert!(spp_accepts(&store, spp, &c1, &c2));
+        assert!(store.accepts(spp, &c1, &c2));
     }
 
     #[test]
@@ -452,7 +430,7 @@ mod tests {
         // The extracted SPP must reject the negative example
         let c1 = vec![false, false];
         let c2 = vec![false, false];
-        assert!(!spp_accepts(&store, spp, &c1, &c2));
+        assert!(!store.accepts(spp, &c1, &c2));
     }
 
     #[test]
@@ -467,7 +445,7 @@ mod tests {
         // All concrete instances must be accepted
         for (c1, c2) in expand_pair(&ap1, &ap2) {
             assert!(
-                spp_accepts(&store, spp, &c1, &c2),
+                store.accepts(spp, &c1, &c2),
                 "SPP should accept ({:?}, {:?})",
                 c1,
                 c2
@@ -486,7 +464,7 @@ mod tests {
             .add_example(ap1.clone(), ap2.clone(), false)
             .unwrap();
         let spp = learner.extract(&mut store);
-        assert!(!spp_accepts(&store, spp, &[true, true], &[true, true]));
+        assert!(!store.accepts(spp, &[true, true], &[true, true]));
     }
 
     #[test]
@@ -525,7 +503,7 @@ mod tests {
         for &(ap1, ap2) in positives {
             for (c1, c2) in expand_pair(&ap1.to_vec(), &ap2.to_vec()) {
                 assert!(
-                    spp_accepts(&store, spp, &c1, &c2),
+                    store.accepts(spp, &c1, &c2),
                     "positive example ({:?},{:?}) should be accepted",
                     c1,
                     c2
@@ -535,7 +513,7 @@ mod tests {
         for &(ap1, ap2) in negatives {
             for (c1, c2) in expand_pair(&ap1.to_vec(), &ap2.to_vec()) {
                 assert!(
-                    !spp_accepts(&store, spp, &c1, &c2),
+                    !store.accepts(spp, &c1, &c2),
                     "negative example ({:?},{:?}) should be rejected",
                     c1,
                     c2
@@ -592,7 +570,7 @@ mod tests {
             for (ap1, ap2) in &positives {
                 for (c1, c2) in expand_pair(ap1, ap2) {
                     assert!(
-                        spp_accepts(&store, spp, &c1, &c2),
+                        store.accepts(spp, &c1, &c2),
                         "positive ({:?},{:?}) rejected",
                         c1,
                         c2
@@ -602,7 +580,7 @@ mod tests {
             for (ap1, ap2) in &negatives {
                 for (c1, c2) in expand_pair(ap1, ap2) {
                     assert!(
-                        !spp_accepts(&store, spp, &c1, &c2),
+                        !store.accepts(spp, &c1, &c2),
                         "negative ({:?},{:?}) accepted",
                         c1,
                         c2

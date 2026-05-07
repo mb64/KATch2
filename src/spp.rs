@@ -206,7 +206,7 @@ impl SPPstore {
         result
     }
 
-    /// Computes the SPP corresponding to the `sp` returned by `bwd`.            
+    /// Computes the SPP corresponding to the `sp` returned by `bwd`.
     /// - `ibwd` is the left inverse of `bwd`, i.e. `ibwd ∘ bwd = id`
     pub fn ibwd(&mut self, sp: SP) -> SPP {
         let spp = self.ifwd(sp);
@@ -226,6 +226,32 @@ impl SPPstore {
         self.nodes.push(node);
         self.hc.insert(node, spp);
         spp
+    }
+
+    /// Does the SPP accept the pair (p1,p2)?
+    pub fn accepts(&self, x: SPP, p1: &[bool], p2: &[bool]) -> bool {
+        assert_eq!(
+            p1.len(),
+            self.num_vars as usize,
+            "wrong number of fields in p1"
+        );
+        assert_eq!(
+            p2.len(),
+            self.num_vars as usize,
+            "wrong number of fields in p2"
+        );
+        let mut x = x;
+        for (&l, &r) in p1.iter().zip(p2.iter()) {
+            let SPPnode { x00, x01, x10, x11 } = self.get(x);
+            match (l, r) {
+                (false, false) => x = x00,
+                (false, true) => x = x01,
+                (true, false) => x = x10,
+                (true, true) => x = x11,
+            }
+        }
+        debug_assert!(x.as_u32() <= 1);
+        x.as_u32() == 1
     }
 
     fn zero(&mut self) -> SPP {

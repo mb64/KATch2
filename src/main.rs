@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 mod aut;
 mod desugar;
 mod expr;
+#[cfg(test)]
 mod fuzz;
 mod holes;
 mod parser;
