@@ -21,7 +21,7 @@ pub fn generate_static_site(
 ) -> std::io::Result<()> {
     let site_dir_name = Path::new(source_file_name)
         .file_stem()
-        .map_or_else(|| std::ffi::OsStr::new("unknown_source"), |stem| stem)
+        .unwrap_or_else(|| std::ffi::OsStr::new("unknown_source"))
         .to_string_lossy();
 
     let site_specific_output_dir = base_output_dir.join(site_dir_name.as_ref());

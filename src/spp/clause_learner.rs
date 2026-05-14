@@ -523,9 +523,9 @@ impl ClauseLearner {
                     TernaryVal::DontCare => continue,
                 };
                 let (gen_ap1, gen_ap2) = self.generalize(p1, p2);
-                if learner.add_example(gen_ap1, gen_ap2, polarity).is_err() {
-                    assert!(false, "SAT model should be consistent by construction");
-                }
+                learner
+                    .add_example(gen_ap1, gen_ap2, polarity)
+                    .expect("SAT model should be consistent by construction")
             }
 
             // Step 4: Extract SPP from learner.

@@ -1318,10 +1318,7 @@ fn reconstruct_trace<A: ENFA>(
 
     packets_back.reverse();
     states_back.reverse();
-    let path: Vec<(A::State, Vec<bool>)> = states_back
-        .into_iter()
-        .zip(packets_back)
-        .collect();
+    let path: Vec<(A::State, Vec<bool>)> = states_back.into_iter().zip(packets_back).collect();
     (input, path, out_pkt)
 }
 
