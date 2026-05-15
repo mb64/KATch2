@@ -87,6 +87,50 @@ pub trait NFA: ENFA {
         }
         false
     }
+
+    fn reachable_from_trace<'a>(
+        &self,
+        store: &mut spp::SPPstore,
+        input: &'a [bool],
+        trace: &'a [Vec<bool>],
+    ) -> Vec<(Self::State, &'a [bool])> {
+        let mut result: Vec<(Self::State, &'a [bool])> = Vec::new();
+        let mut seen: HashSet<(Self::State, usize)> = HashSet::new();
+
+        let mut frontier: Vec<(spp::SPP, Self::State)> = self.start(store);
+        for (_, q) in &frontier {
+            if seen.insert((q.clone(), 0)) {
+                result.push((q.clone(), input));
+            }
+        }
+
+        let one = store.one;
+        let mut current_pkt: &[bool] = input;
+
+        for (i, next_pkt) in trace.iter().enumerate() {
+            let mut new_frontier: Vec<(spp::SPP, Self::State)> = Vec::new();
+            let mut step_seen: HashSet<Self::State> = HashSet::new();
+            for (spp_pre, q) in &frontier {
+                for (spp_t, q_next) in self.transitions(store, q) {
+                    let composed = store.sequence(*spp_pre, spp_t);
+                    if store.accepts(composed, current_pkt, next_pkt)
+                        && step_seen.insert(q_next.clone())
+                    {
+                        new_frontier.push((one, q_next));
+                    }
+                }
+            }
+            frontier = new_frontier;
+            for (_, q) in &frontier {
+                if seen.insert((q.clone(), i + 1)) {
+                    result.push((q.clone(), &next_pkt[..]));
+                }
+            }
+            current_pkt = &next_pkt[..];
+        }
+
+        result
+    }
 }
 
 /// Deterministic symbolic NetKAT automaton.
@@ -1656,6 +1700,49 @@ mod tests {
                         .nfa_accepts(aut.spp_store_mut(), &input, &t, &output),
                     "trial {}: underlying NFA rejects the subset DFA's trace",
                     trial,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_reachable_from_trace() {
+        // A trace produced by `get_any_trace_with_states` records, for each
+        // step after the start, the `(state, current_packet)` pair the trace
+        // visits.  Feeding the bare packet trace plus the input back through
+        // `reachable_from_trace` must reach at least all of those pairs --
+        // it explores the full nondeterministic frontier, which is a
+        // superset of any one accepting path.
+        let expr_depth = 4;
+        let num_fields = 3;
+        let max_trials = 500;
+
+        for trial in 0..max_trials {
+            let mut aut = crate::aut::Aut::new(num_fields);
+            let nfa = random_nfa(&mut aut, expr_depth, num_fields);
+
+            if is_empty(&nfa, aut.spp_store_mut()) {
+                continue;
+            }
+
+            let (input, path, _output) = get_any_trace_with_states(&nfa, aut.spp_store_mut())
+                .expect("non-empty NFA should yield a trace");
+            let trace_pkts: Vec<Vec<bool>> = path.iter().skip(1).map(|(_, p)| p.clone()).collect();
+
+            let reachable = nfa.reachable_from_trace(aut.spp_store_mut(), &input, &trace_pkts);
+            let reachable_set: HashSet<(_, Vec<bool>)> = reachable
+                .into_iter()
+                .map(|(q, p)| (q, p.to_vec()))
+                .collect();
+
+            for (i, (q, p)) in path.iter().enumerate() {
+                assert!(
+                    reachable_set.contains(&(q.clone(), p.clone())),
+                    "trial {}: path step {} ({:?}, {:?}) missing from reachable_from_trace result",
+                    trial,
+                    i,
+                    q,
+                    p,
                 );
             }
         }
