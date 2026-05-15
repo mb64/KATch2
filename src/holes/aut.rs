@@ -6,8 +6,14 @@ use std::hash::Hash;
 
 /// Nondeterministic symbolic NetKAT automaton with epsilon transitions.
 ///
-/// States are either *visible* (consume a packet from the trace when entered)
-/// or *invisible* (epsilon states that do not advance the trace position).
+/// Every automaton has a single distinguished start state.  The first packet
+/// of any accepted trace is the carry-on packet at the start state -- so
+/// the start state is treated as visible at trace position 0 regardless of
+/// `is_visible(start)`.  At later trace positions, if the run returns to
+/// `start` and `is_visible(start)` is false, it is bypassed like any other
+/// invisible state.  Non-start states obey `is_visible` as usual: visible
+/// states consume one trace packet on entry, invisible (epsilon) states do
+/// not advance the trace position.
 ///
 /// All trait methods take an explicit `&mut spp::SPPstore`, which the
 /// underlying automaton may use to compute SPPs on demand.  Implementations
@@ -15,13 +21,12 @@ use std::hash::Hash;
 pub trait ENFA {
     type State: Clone + Eq + Hash;
 
-    /// The start: a list of `(spp, state)` pairs.  Operationally, the run
-    /// begins by nondeterministically picking some `(spp, q)` and starting
-    /// at `q` with current packet `p` chosen so that `(input, p) ∈ spp`.
-    fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, Self::State)>;
+    /// The unique start state.
+    fn start(&self, store: &mut spp::SPPstore) -> Self::State;
 
     /// True for visible states (entering them consumes one packet from the trace);
-    /// false for invisible (epsilon) states.
+    /// false for invisible (epsilon) states.  See the trait docs for how this
+    /// interacts with the start state.
     fn is_visible(&self, store: &mut spp::SPPstore, q: &Self::State) -> bool;
 
     /// Outgoing transitions from `q`: each entry is a (packet_program, next_state) pair.
@@ -40,32 +45,24 @@ pub trait ENFA {
 ///
 /// Every state is visible; `is_visible` must always return `true`.
 pub trait NFA: ENFA {
-    /// Returns `true` iff the concrete trace `(input, trace, output)` is
-    /// accepted by *some* path through the NFA.
-    ///
-    /// Tracks the set of states reachable so far, broadening it at each step
-    /// by every transition whose SPP relates the current packet to the next.
-    fn nfa_accepts(
-        &self,
-        store: &mut spp::SPPstore,
-        input: &[bool],
-        trace: &[Vec<bool>],
-        output: &[bool],
-    ) -> bool {
-        // Track `(spp_pre, q)` pairs where `spp_pre` relates `current_pkt` to
-        // the current packet at `q`.  Initially `current_pkt = input` and the
-        // pre-SPPs are the start SPPs; after the first consumption they all
-        // collapse to identity since `current_pkt` from then on is exactly
-        // the previously-consumed trace element.
-        let mut frontier: Vec<(spp::SPP, Self::State)> = self.start(store);
-        let mut current_pkt: Vec<bool> = input.to_vec();
+    /// Returns `true` iff the concrete `(trace, output)` pair is accepted by
+    /// *some* path through the NFA.  `trace` must be non-empty: `trace[0]`
+    /// is the carry-on packet at the start state, and each subsequent
+    /// `trace[i]` is the packet at the next visited state.
+    fn nfa_accepts(&self, store: &mut spp::SPPstore, trace: &[Vec<bool>], output: &[bool]) -> bool {
+        if trace.is_empty() {
+            return false;
+        }
 
-        for next_pkt in trace {
+        let mut frontier: HashSet<Self::State> = HashSet::new();
+        frontier.insert(self.start(store));
+        let mut current_pkt: &[bool] = &trace[0];
+
+        for next_pkt in &trace[1..] {
             let mut new_states: HashSet<Self::State> = HashSet::new();
-            for (spp_pre, q) in &frontier {
+            for q in &frontier {
                 for (spp_t, q_next) in self.transitions(store, q) {
-                    let composed = store.sequence(*spp_pre, spp_t);
-                    if store.accepts(composed, &current_pkt, next_pkt) {
+                    if store.accepts(spp_t, current_pkt, next_pkt) {
                         new_states.insert(q_next);
                     }
                 }
@@ -73,59 +70,59 @@ pub trait NFA: ENFA {
             if new_states.is_empty() {
                 return false;
             }
-            let one = store.one;
-            frontier = new_states.into_iter().map(|q| (one, q)).collect();
-            current_pkt = next_pkt.clone();
+            frontier = new_states;
+            current_pkt = next_pkt;
         }
 
-        for (spp_pre, q) in &frontier {
+        for q in &frontier {
             let out_spp = self.output(store, q);
-            let composed = store.sequence(*spp_pre, out_spp);
-            if store.accepts(composed, &current_pkt, output) {
+            if store.accepts(out_spp, current_pkt, output) {
                 return true;
             }
         }
         false
     }
 
+    /// Returns every `(state, packet)` pair reachable by walking some prefix
+    /// of `trace` from the start.  `trace[0]` is the carry-on packet at the
+    /// start state, and at trace position `i` the packet is `trace[i]`.
+    /// Pairs are deduped by `(state, position)`.  An empty `trace` yields
+    /// an empty result.
     fn reachable_from_trace<'a>(
         &self,
         store: &mut spp::SPPstore,
-        input: &'a [bool],
         trace: &'a [Vec<bool>],
     ) -> Vec<(Self::State, &'a [bool])> {
+        if trace.is_empty() {
+            return Vec::new();
+        }
+
         let mut result: Vec<(Self::State, &'a [bool])> = Vec::new();
         let mut seen: HashSet<(Self::State, usize)> = HashSet::new();
 
-        let mut frontier: Vec<(spp::SPP, Self::State)> = self.start(store);
-        for (_, q) in &frontier {
-            if seen.insert((q.clone(), 0)) {
-                result.push((q.clone(), input));
-            }
+        let q_start = self.start(store);
+        let mut frontier: Vec<Self::State> = vec![q_start.clone()];
+        if seen.insert((q_start.clone(), 0)) {
+            result.push((q_start, &trace[0][..]));
         }
+        let mut current_pkt: &[bool] = &trace[0];
 
-        let one = store.one;
-        let mut current_pkt: &[bool] = input;
-
-        for (i, next_pkt) in trace.iter().enumerate() {
-            let mut new_frontier: Vec<(spp::SPP, Self::State)> = Vec::new();
+        for (i, next_pkt) in trace[1..].iter().enumerate() {
             let mut step_seen: HashSet<Self::State> = HashSet::new();
-            for (spp_pre, q) in &frontier {
+            for q in &frontier {
                 for (spp_t, q_next) in self.transitions(store, q) {
-                    let composed = store.sequence(*spp_pre, spp_t);
-                    if store.accepts(composed, current_pkt, next_pkt)
-                        && step_seen.insert(q_next.clone())
-                    {
-                        new_frontier.push((one, q_next));
+                    if store.accepts(spp_t, current_pkt, next_pkt) {
+                        step_seen.insert(q_next);
                     }
                 }
             }
-            frontier = new_frontier;
-            for (_, q) in &frontier {
+            let new_frontier: Vec<Self::State> = step_seen.into_iter().collect();
+            for q in &new_frontier {
                 if seen.insert((q.clone(), i + 1)) {
                     result.push((q.clone(), &next_pkt[..]));
                 }
             }
+            frontier = new_frontier;
             current_pkt = &next_pkt[..];
         }
 
@@ -137,44 +134,21 @@ pub trait NFA: ENFA {
 ///
 /// For each state, the SPPs labeling outgoing transitions are pairwise disjoint.
 pub trait DFA: NFA {
-    /// Returns `true` iff the concrete trace `(input, trace, output)` is
-    /// accepted: starting at `start()` with packet `input`, each `trace[i]`
-    /// is reachable from the previous packet via some transition SPP, and
-    /// the final state's output SPP relates the last packet to `output`.
-    fn dfa_accepts(
-        &self,
-        store: &mut spp::SPPstore,
-        input: &[bool],
-        trace: &[Vec<bool>],
-        output: &[bool],
-    ) -> bool {
-        let (spp_start, q_start) = self.dfa_start(store);
-
+    /// Returns `true` iff the concrete `(trace, output)` pair is accepted.
+    /// `trace` must be non-empty: `trace[0]` is the packet at the start
+    /// state, and each transition consumes the next packet.
+    fn dfa_accepts(&self, store: &mut spp::SPPstore, trace: &[Vec<bool>], output: &[bool]) -> bool {
         if trace.is_empty() {
-            let out_spp = self.output(store, &q_start);
-            let composed = store.sequence(spp_start, out_spp);
-            return store.accepts(composed, input, output);
+            return false;
         }
 
-        let next_pkt = &trace[0];
-        let mut found: Option<Self::State> = None;
-        for (spp_t, q_next) in self.transitions(store, &q_start) {
-            let composed = store.sequence(spp_start, spp_t);
-            if store.accepts(composed, input, next_pkt) {
-                found = Some(q_next);
-                break;
-            }
-        }
-        let mut current_state = match found {
-            Some(q) => q,
-            None => return false,
-        };
-        let mut current_pkt: Vec<bool> = next_pkt.clone();
+        let mut current_state = self.start(store);
+        let mut current_pkt: &[bool] = &trace[0];
 
         for next_pkt in &trace[1..] {
             let mut next_state = None;
             for (spp, q_next) in self.transitions(store, &current_state) {
-                if store.accepts(spp, &current_pkt, next_pkt) {
+                if store.accepts(spp, current_pkt, next_pkt) {
                     next_state = Some(q_next);
                     break;
                 }
@@ -182,28 +156,14 @@ pub trait DFA: NFA {
             match next_state {
                 Some(q) => {
                     current_state = q;
-                    current_pkt = next_pkt.clone();
+                    current_pkt = next_pkt;
                 }
                 None => return false,
             }
         }
 
         let out_spp = self.output(store, &current_state);
-        store.accepts(out_spp, &current_pkt, output)
-    }
-
-    /// The unique `(start_spp, start_state)` of a DFA.  Panics if `start`
-    /// returns anything other than exactly one entry: a DFA must have a
-    /// single deterministic starting point or it is not really a DFA.
-    fn dfa_start(&self, store: &mut spp::SPPstore) -> (spp::SPP, Self::State) {
-        let mut starts = self.start(store);
-        assert_eq!(
-            starts.len(),
-            1,
-            "DFA must have exactly one start; found {}",
-            starts.len()
-        );
-        starts.pop().unwrap()
+        store.accepts(out_spp, current_pkt, output)
     }
 }
 
@@ -216,7 +176,7 @@ pub trait DFA: NFA {
 impl<T: ENFA> ENFA for &T {
     type State = T::State;
 
-    fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, Self::State)> {
+    fn start(&self, store: &mut spp::SPPstore) -> Self::State {
         <T as ENFA>::start(*self, store)
     }
 
@@ -301,12 +261,9 @@ impl<T: ENFA> Memo<T> {
 impl<T: ENFA> ENFA for Memo<T> {
     type State = usize;
 
-    fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, usize)> {
+    fn start(&self, store: &mut spp::SPPstore) -> usize {
         let raw = self.inner.start(store);
-        let mut data = self.data.borrow_mut();
-        raw.into_iter()
-            .map(|(spp, s)| (spp, data.get_or_insert(s)))
-            .collect()
+        self.data.borrow_mut().get_or_insert(raw)
     }
 
     fn is_visible(&self, store: &mut spp::SPPstore, id: &usize) -> bool {
@@ -570,21 +527,12 @@ impl<T: ENFA> EpsilonClosure<T> {
 impl<T: ENFA> ENFA for EpsilonClosure<T> {
     type State = T::State;
 
-    /// Initial states: the ε-closure of every underlying initial state,
-    /// filtered to visible.  Invisible states are kept out of the interface.
-    fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, T::State)> {
-        let inner_starts = self.inner.start(store);
-        let mut result: HashMap<T::State, spp::SPP> = HashMap::new();
-        for (spp, q) in inner_starts {
-            for (path, p) in self.epsilon_closure(store, &q) {
-                if !self.inner.is_visible(store, &p) {
-                    continue;
-                }
-                let combined = store.sequence(spp, path);
-                union_into(&mut result, store, p, combined);
-            }
-        }
-        result.into_iter().map(|(v, s)| (s, v)).collect()
+    /// The wrapper's start is the inner's start, treated as visible at
+    /// trace position 0 regardless of `inner.is_visible(start)` (per the
+    /// new ENFA semantics).  Outgoing transitions and output absorb the
+    /// ε-closure machinery for non-start invisibles.
+    fn start(&self, store: &mut spp::SPPstore) -> T::State {
+        self.inner.start(store)
     }
 
     fn is_visible(&self, _store: &mut spp::SPPstore, _q: &T::State) -> bool {
@@ -680,19 +628,10 @@ where
 {
     type State = BTreeSet<(spp::SPP, T::State)>;
 
-    fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, Self::State)> {
-        // Dedupe the inner start by NFA state, unioning the SPPs of duplicate
-        // entries -- the DFA's start is then a single (one, set) pair.
-        let inner_starts = self.inner.start(store);
-        let zero = store.zero;
-        let mut by_state: HashMap<T::State, spp::SPP> = HashMap::new();
-        for (spp, q) in inner_starts {
-            let entry = by_state.entry(q).or_insert(zero);
-            *entry = store.union(*entry, spp);
-        }
-        let s: BTreeSet<(spp::SPP, T::State)> =
-            by_state.into_iter().map(|(q, spp)| (spp, q)).collect();
-        vec![(store.one, s)]
+    fn start(&self, store: &mut spp::SPPstore) -> Self::State {
+        let one = store.one;
+        let q = self.inner.start(store);
+        BTreeSet::from([(one, q)])
     }
 
     fn is_visible(&self, _store: &mut spp::SPPstore, _q: &Self::State) -> bool {
@@ -805,12 +744,8 @@ pub mod ops {
     impl<T: DFA> ENFA for Complement<T> {
         type State = CompState<T::State>;
 
-        fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, Self::State)> {
-            self.inner
-                .start(store)
-                .into_iter()
-                .map(|(spp, q)| (spp, CompState::Inner(q)))
-                .collect()
+        fn start(&self, store: &mut spp::SPPstore) -> Self::State {
+            CompState::Inner(self.inner.start(store))
         }
 
         fn is_visible(&self, _store: &mut spp::SPPstore, _q: &Self::State) -> bool {
@@ -858,16 +793,18 @@ pub mod ops {
 
     // ---- Union -----------------------------------------------------------
 
-    /// State of [`Union`]: tagged inner state from either `Left` or `Right`.
+    /// State of [`Union`]: a fresh `Start` that fans out into either side's
+    /// start, plus tagged inner states.
     #[derive(Clone, PartialEq, Eq, Hash)]
     pub enum UnionState<L, R> {
+        Start,
         Left(L),
         Right(R),
     }
 
-    /// Union of two NFAs: accepts triples accepted by either side.  The
-    /// "branch" choice is encoded in the start list (a tagged concatenation
-    /// of the two underlying starts), so no synthetic ε-state is needed.
+    /// Union of two NFAs: accepts traces accepted by either side.  A fresh
+    /// start state has the disjoint union of the two constituents' start
+    /// states' transitions, plus the union of their outputs.
     #[derive(Clone)]
     pub struct Union<A: NFA, B: NFA> {
         left: A,
@@ -882,24 +819,13 @@ pub mod ops {
     impl<A: NFA, B: NFA> ENFA for Union<A, B> {
         type State = UnionState<A::State, B::State>;
 
-        fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, Self::State)> {
-            let mut out: Vec<(spp::SPP, Self::State)> = self
-                .left
-                .start(store)
-                .into_iter()
-                .map(|(spp, q)| (spp, UnionState::Left(q)))
-                .collect();
-            out.extend(
-                self.right
-                    .start(store)
-                    .into_iter()
-                    .map(|(spp, q)| (spp, UnionState::Right(q))),
-            );
-            out
+        fn start(&self, _store: &mut spp::SPPstore) -> Self::State {
+            UnionState::Start
         }
 
         fn is_visible(&self, store: &mut spp::SPPstore, q: &Self::State) -> bool {
             match q {
+                UnionState::Start => true,
                 UnionState::Left(s) => self.left.is_visible(store, s),
                 UnionState::Right(s) => self.right.is_visible(store, s),
             }
@@ -911,6 +837,23 @@ pub mod ops {
             q: &Self::State,
         ) -> Vec<(spp::SPP, Self::State)> {
             match q {
+                UnionState::Start => {
+                    let l_start = self.left.start(store);
+                    let r_start = self.right.start(store);
+                    let mut out: Vec<(spp::SPP, Self::State)> = self
+                        .left
+                        .transitions(store, &l_start)
+                        .into_iter()
+                        .map(|(spp, q)| (spp, UnionState::Left(q)))
+                        .collect();
+                    out.extend(
+                        self.right
+                            .transitions(store, &r_start)
+                            .into_iter()
+                            .map(|(spp, q)| (spp, UnionState::Right(q))),
+                    );
+                    out
+                }
                 UnionState::Left(s) => self
                     .left
                     .transitions(store, s)
@@ -928,6 +871,13 @@ pub mod ops {
 
         fn output(&self, store: &mut spp::SPPstore, q: &Self::State) -> spp::SPP {
             match q {
+                UnionState::Start => {
+                    let l_start = self.left.start(store);
+                    let r_start = self.right.start(store);
+                    let l_out = self.left.output(store, &l_start);
+                    let r_out = self.right.output(store, &r_start);
+                    store.union(l_out, r_out)
+                }
                 UnionState::Left(s) => self.left.output(store, s),
                 UnionState::Right(s) => self.right.output(store, s),
             }
@@ -956,20 +906,8 @@ pub mod ops {
     impl<A: NFA, B: NFA> ENFA for Intersection<A, B> {
         type State = (A::State, B::State);
 
-        fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, Self::State)> {
-            let starts_a = self.left.start(store);
-            let starts_b = self.right.start(store);
-            let mut out: Vec<(spp::SPP, Self::State)> =
-                Vec::with_capacity(starts_a.len() * starts_b.len());
-            for (spp_a, q_a) in &starts_a {
-                for (spp_b, q_b) in &starts_b {
-                    let combined = store.intersect(*spp_a, *spp_b);
-                    if combined != store.zero {
-                        out.push((combined, (q_a.clone(), q_b.clone())));
-                    }
-                }
-            }
-            out
+        fn start(&self, store: &mut spp::SPPstore) -> Self::State {
+            (self.left.start(store), self.right.start(store))
         }
 
         fn is_visible(&self, _store: &mut spp::SPPstore, _q: &Self::State) -> bool {
@@ -1029,8 +967,8 @@ impl ExplicitDFA {
 impl ENFA for ExplicitDFA {
     type State = usize;
 
-    fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, usize)> {
-        vec![(store.one, self.start)]
+    fn start(&self, _store: &mut spp::SPPstore) -> usize {
+        self.start
     }
 
     fn is_visible(&self, _store: &mut spp::SPPstore, _q: &usize) -> bool {
@@ -1115,22 +1053,13 @@ pub fn is_empty_with_reachable<A: ENFA>(
     store: &mut spp::SPPstore,
     reachable: &mut HashMap<A::State, sp::SP>,
 ) -> bool {
-    let starts = aut.start(store);
+    let q_start = aut.start(store);
     let mut todo: HashMap<A::State, sp::SP> = HashMap::new();
     let mut worklist: Vec<A::State> = Vec::new();
 
-    for (spp, q) in starts {
-        let init_sp = store.push(store.sp.one, spp);
-        if init_sp == store.sp.zero {
-            continue;
-        }
-        let prev = todo.get(&q).copied().unwrap_or(store.sp.zero);
-        let new_val = store.sp.union(prev, init_sp);
-        if new_val != prev {
-            todo.insert(q.clone(), new_val);
-            worklist.push(q);
-        }
-    }
+    // The start state is reachable with any input packet.
+    todo.insert(q_start.clone(), store.sp.one);
+    worklist.push(q_start);
 
     while let Some(q) = worklist.pop() {
         let Some(todo_q) = todo.remove(&q) else {
@@ -1174,57 +1103,37 @@ struct Step<S> {
     predecessors: Vec<usize>,
 }
 
-/// Returns one concrete `(input, trace, output)` triple accepted by `aut`,
-/// or `None` if the automaton is empty.
-///
-/// `trace` is the sequence of current packets at each state visited after
-/// the start state, ending with the current packet at the accepting state.
+/// Returns one concrete `(trace, output)` pair accepted by `aut`, or `None`
+/// if the automaton is empty.  `trace[0]` is the carry-on packet at the
+/// start state and the trace is non-empty when `Some`.
 pub fn get_any_trace<A: ENFA>(
     aut: &A,
     store: &mut spp::SPPstore,
-) -> Option<(Vec<bool>, Vec<Vec<bool>>, Vec<bool>)> {
-    get_any_trace_with_states(aut, store).map(|(input, path, out)| {
-        let trace: Vec<Vec<bool>> = path.into_iter().skip(1).map(|(_, p)| p).collect();
-        (input, trace, out)
+) -> Option<(Vec<Vec<bool>>, Vec<bool>)> {
+    get_any_trace_with_states(aut, store).map(|(path, out)| {
+        let trace: Vec<Vec<bool>> = path.into_iter().map(|(_, p)| p).collect();
+        (trace, out)
     })
 }
 
-/// Like [`get_any_trace`] but the middle component is the full sequence of
+/// Like [`get_any_trace`] but returns the full sequence of
 /// `(state, current_packet)` pairs visited, starting with the start state.
-/// `path[0]` is `(q_start, p_start)` (no consumption yet), and each later
-/// `path[i]` is `(q_i, p_i)` reached after consuming the i-th trace packet.
-/// The packet trace returned by `get_any_trace` is `path[1..].iter().map(|(_, p)| p)`.
+/// `path[0]` is `(q_start, p_start)` and `path[i]` is `(q_i, p_i)` reached
+/// after consuming the i-th trace packet.  The packet trace returned by
+/// `get_any_trace` is `path.iter().map(|(_, p)| p)`.
 pub fn get_any_trace_with_states<A: ENFA>(
     aut: &A,
     store: &mut spp::SPPstore,
-) -> Option<(Vec<bool>, Vec<(A::State, Vec<bool>)>, Vec<bool>)> {
-    let starts = aut.start(store);
+) -> Option<(Vec<(A::State, Vec<bool>)>, Vec<bool>)> {
+    let q_start = aut.start(store);
     let mut todo: HashMap<A::State, sp::SP> = HashMap::new();
     let mut done: HashMap<A::State, sp::SP> = HashMap::new();
     let mut worklist: Vec<A::State> = Vec::new();
     let mut additions: HashMap<A::State, Vec<usize>> = HashMap::new();
     let mut steps: Vec<Step<A::State>> = Vec::new();
 
-    // For each start state, track the union of start SPPs leading there;
-    // used during trace reconstruction to recover an input.
-    let mut start_spps: HashMap<A::State, spp::SPP> = HashMap::new();
-    for (spp, q) in &starts {
-        let entry = start_spps.entry(q.clone()).or_insert(store.zero);
-        *entry = store.union(*entry, *spp);
-    }
-
-    for (spp, q) in starts {
-        let init_sp = store.push(store.sp.one, spp);
-        if init_sp == store.sp.zero {
-            continue;
-        }
-        let prev = todo.get(&q).copied().unwrap_or(store.sp.zero);
-        let new_val = store.sp.union(prev, init_sp);
-        if new_val != prev {
-            todo.insert(q.clone(), new_val);
-            worklist.push(q);
-        }
-    }
+    todo.insert(q_start.clone(), store.sp.one);
+    worklist.push(q_start);
 
     while let Some(q) = worklist.pop() {
         let preds = additions.remove(&q).unwrap_or_default();
@@ -1249,14 +1158,7 @@ pub fn get_any_trace_with_states<A: ENFA>(
         let output_spp = aut.output(store, &q);
         let output_sp = store.push(diff, output_spp);
         if output_sp != store.sp.zero {
-            return Some(reconstruct_trace(
-                &steps,
-                step_idx,
-                aut,
-                store,
-                output_spp,
-                &start_spps,
-            ));
+            return Some(reconstruct_trace(&steps, step_idx, aut, store, output_spp));
         }
 
         for (spp, q_next) in aut.transitions(store, &q) {
@@ -1286,8 +1188,7 @@ fn reconstruct_trace<A: ENFA>(
     aut: &A,
     store: &mut spp::SPPstore,
     output_spp: spp::SPP,
-    start_spps: &HashMap<A::State, spp::SPP>,
-) -> (Vec<bool>, Vec<(A::State, Vec<bool>)>, Vec<bool>) {
+) -> (Vec<(A::State, Vec<bool>)>, Vec<bool>) {
     // At the accepting step, pick a current packet that's in the accepting
     // step's diff AND has at least one output through `output_spp`, then
     // sample one matching output packet for it.
@@ -1307,8 +1208,7 @@ fn reconstruct_trace<A: ENFA>(
     let mut current_idx = accepting_idx;
     let mut current_pkt = acc_pkt;
 
-    // Walk back until we reach an init step (one with no predecessors --
-    // those are exactly the steps popped from the initial worklist).
+    // Walk back until we reach the init step (no predecessors).
     while !steps[current_idx].predecessors.is_empty() {
         let preds = steps[current_idx].predecessors.clone();
         let target = steps[current_idx].state.clone();
@@ -1346,24 +1246,10 @@ fn reconstruct_trace<A: ENFA>(
         current_pkt = p_j;
     }
 
-    // We're at an init step: `current_pkt` is the packet at the start state
-    // after the start SPP was applied.  Recover an input that maps to this
-    // current packet via the start SPP.
-    let q_start = steps[current_idx].state.clone();
-    let spp_start = *start_spps
-        .get(&q_start)
-        .expect("init step's state must be a start state");
-    let current_pkt_sp = singleton_sp(store, &current_pkt);
-    let inputs = store.pull(spp_start, current_pkt_sp);
-    let input = store
-        .sp
-        .random_packet(inputs)
-        .expect("packet at start state must have an input via spp_start");
-
     packets_back.reverse();
     states_back.reverse();
     let path: Vec<(A::State, Vec<bool>)> = states_back.into_iter().zip(packets_back).collect();
-    (input, path, out_pkt)
+    (path, out_pkt)
 }
 
 fn singleton_sp(store: &mut spp::SPPstore, packet: &[bool]) -> sp::SP {
@@ -1418,38 +1304,62 @@ fn filter_input_spp(store: &mut spp::SPPstore, packet: &[bool]) -> spp::SPP {
     allow
 }
 
-/// One-step ENFA helper used by [`elaborate_step`]: wraps an inner ENFA so
-/// every state is *visible* (forcing each transition to consume a packet),
-/// pins the start to a single `(spp, q_source)` pair, and gives a non-zero
-/// output only at `q_dest` (filtered to `p_dest`).
+/// One-step ENFA helper used by [`elaborate_step`].  Wraps an inner ENFA so
+/// every state is *visible* and adds a synthetic `PreStart` whose single
+/// transition pins the inner source packet to `p_source` via
+/// `force_output_spp(p_source)`.  Output is non-zero only at `q_dest`
+/// (filtered to `p_dest`).
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum HelperState<S> {
+    PreStart,
+    Inner(S),
+}
+
 struct ElaborateStepHelper<'a, T: ENFA> {
     inner: &'a T,
-    start_list: Vec<(spp::SPP, T::State)>,
+    /// `force_output_spp(p_source)`: relates anything to `p_source`.
+    pre_to_source_spp: spp::SPP,
+    source: T::State,
     end: T::State,
     end_output: spp::SPP,
     zero_spp: spp::SPP,
 }
 
 impl<'a, T: ENFA> ENFA for ElaborateStepHelper<'a, T> {
-    type State = T::State;
+    type State = HelperState<T::State>;
 
-    fn start(&self, _store: &mut spp::SPPstore) -> Vec<(spp::SPP, T::State)> {
-        self.start_list.clone()
+    fn start(&self, _store: &mut spp::SPPstore) -> Self::State {
+        HelperState::PreStart
     }
 
-    fn is_visible(&self, _store: &mut spp::SPPstore, _q: &T::State) -> bool {
+    fn is_visible(&self, _store: &mut spp::SPPstore, _q: &Self::State) -> bool {
         true
     }
 
-    fn transitions(&self, store: &mut spp::SPPstore, q: &T::State) -> Vec<(spp::SPP, T::State)> {
-        self.inner.transitions(store, q)
+    fn transitions(
+        &self,
+        store: &mut spp::SPPstore,
+        q: &Self::State,
+    ) -> Vec<(spp::SPP, Self::State)> {
+        match q {
+            HelperState::PreStart => vec![(
+                self.pre_to_source_spp,
+                HelperState::Inner(self.source.clone()),
+            )],
+            HelperState::Inner(s) => self
+                .inner
+                .transitions(store, s)
+                .into_iter()
+                .map(|(spp, q_next)| (spp, HelperState::Inner(q_next)))
+                .collect(),
+        }
     }
 
-    fn output(&self, _store: &mut spp::SPPstore, q: &T::State) -> spp::SPP {
-        if *q == self.end {
-            self.end_output
-        } else {
-            self.zero_spp
+    fn output(&self, _store: &mut spp::SPPstore, q: &Self::State) -> spp::SPP {
+        match q {
+            HelperState::PreStart => self.zero_spp,
+            HelperState::Inner(s) if *s == self.end => self.end_output,
+            HelperState::Inner(_) => self.zero_spp,
         }
     }
 }
@@ -1480,7 +1390,8 @@ pub fn elaborate_step<T: ENFA>(
 
     let helper = ElaborateStepHelper {
         inner,
-        start_list: vec![(start_spp, q_source.clone())],
+        pre_to_source_spp: start_spp,
+        source: q_source.clone(),
         end: q_dest.clone(),
         end_output: output_spp,
         zero_spp,
@@ -1488,7 +1399,10 @@ pub fn elaborate_step<T: ENFA>(
 
     let trace_result = get_any_trace(&helper, store)
         .expect("elaborate_step: no inner ENFA path between source and dest");
-    let (_input, pkt_trace, _output_pkt) = trace_result;
+    let (pkt_trace_full, _output_pkt) = trace_result;
+    // pkt_trace_full[0] is the (arbitrary) packet at PreStart; pkt_trace_full[1]
+    // is `p_source` at `Inner(q_source)`; the rest are the inner-state packets.
+    let pkt_trace: Vec<Vec<bool>> = pkt_trace_full.into_iter().skip(2).collect();
 
     let mut path: Vec<(T::State, Vec<bool>)> = Vec::new();
     let mut state = q_source.clone();
@@ -1532,7 +1446,7 @@ mod tests {
         T: ENFA<State = usize>,
     {
         type State = usize;
-        fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, usize)> {
+        fn start(&self, store: &mut spp::SPPstore) -> usize {
             self.inner.start(store)
         }
         fn is_visible(&self, _store: &mut spp::SPPstore, q: &usize) -> bool {
@@ -1623,7 +1537,7 @@ mod tests {
 
             let trace = get_any_trace_with_states(&closure, aut.spp_store_mut())
                 .expect("non-empty closure should yield a trace");
-            let (_input, visible_path, _output_pkt) = trace;
+            let (visible_path, _output_pkt) = trace;
 
             let full_path = closure.elaborate_trace(aut.spp_store_mut(), &visible_path);
 
@@ -1682,22 +1596,20 @@ mod tests {
                 trial, nfa_empty, subset_empty
             );
 
-            // dfa_start must succeed (single start invariant).
-            let _ = subset.dfa_start(aut.spp_store_mut());
+            // Single-start invariant.
+            let _ = subset.start(aut.spp_store_mut());
 
             if !subset_empty {
                 let trace = get_any_trace(&subset, aut.spp_store_mut())
                     .expect("non-empty subset DFA should yield a trace");
-                let (input, t, output) = trace;
+                let (t, output) = trace;
                 assert!(
-                    subset.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    subset.dfa_accepts(aut.spp_store_mut(), &t, &output),
                     "trial {}: subset DFA rejects its own trace",
                     trial,
                 );
                 assert!(
-                    subset
-                        .inner()
-                        .nfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    subset.inner().nfa_accepts(aut.spp_store_mut(), &t, &output),
                     "trial {}: underlying NFA rejects the subset DFA's trace",
                     trial,
                 );
@@ -1725,11 +1637,11 @@ mod tests {
                 continue;
             }
 
-            let (input, path, _output) = get_any_trace_with_states(&nfa, aut.spp_store_mut())
+            let (path, _output) = get_any_trace_with_states(&nfa, aut.spp_store_mut())
                 .expect("non-empty NFA should yield a trace");
-            let trace_pkts: Vec<Vec<bool>> = path.iter().skip(1).map(|(_, p)| p.clone()).collect();
+            let trace_pkts: Vec<Vec<bool>> = path.iter().map(|(_, p)| p.clone()).collect();
 
-            let reachable = nfa.reachable_from_trace(aut.spp_store_mut(), &input, &trace_pkts);
+            let reachable = nfa.reachable_from_trace(aut.spp_store_mut(), &trace_pkts);
             let reachable_set: HashSet<(_, Vec<bool>)> = reachable
                 .into_iter()
                 .map(|(q, p)| (q, p.to_vec()))
@@ -1763,28 +1675,28 @@ mod tests {
             let comp = ops::complement(&dfa);
 
             // A trace accepted by the original is rejected by the complement.
-            if let Some((input, t, output)) = get_any_trace(&dfa, aut.spp_store_mut()) {
+            if let Some((t, output)) = get_any_trace(&dfa, aut.spp_store_mut()) {
                 assert!(
-                    dfa.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    dfa.dfa_accepts(aut.spp_store_mut(), &t, &output),
                     "trial {}: dfa rejects its own trace",
                     trial
                 );
                 assert!(
-                    !comp.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    !comp.dfa_accepts(aut.spp_store_mut(), &t, &output),
                     "trial {}: complement accepts a trace the DFA accepts",
                     trial
                 );
             }
 
             // A trace accepted by the complement is rejected by the original.
-            if let Some((input, t, output)) = get_any_trace(&comp, aut.spp_store_mut()) {
+            if let Some((t, output)) = get_any_trace(&comp, aut.spp_store_mut()) {
                 assert!(
-                    comp.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    comp.dfa_accepts(aut.spp_store_mut(), &t, &output),
                     "trial {}: complement rejects its own trace",
                     trial
                 );
                 assert!(
-                    !dfa.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    !dfa.dfa_accepts(aut.spp_store_mut(), &t, &output),
                     "trial {}: dfa accepts a trace the complement accepts",
                     trial
                 );
@@ -1813,25 +1725,25 @@ mod tests {
             let union_nfa = EpsilonClosure::new(union_enfa);
 
             // Forward: trace from nfa1 is accepted by union.
-            if let Some((input, t, output)) = get_any_trace(&nfa1, aut.spp_store_mut()) {
+            if let Some((t, output)) = get_any_trace(&nfa1, aut.spp_store_mut()) {
                 assert!(
-                    union_nfa.nfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    union_nfa.nfa_accepts(aut.spp_store_mut(), &t, &output),
                     "trial {}: union rejects a trace nfa1 accepts",
                     trial
                 );
             }
             // Forward: trace from nfa2 is accepted by union.
-            if let Some((input, t, output)) = get_any_trace(&nfa2, aut.spp_store_mut()) {
+            if let Some((t, output)) = get_any_trace(&nfa2, aut.spp_store_mut()) {
                 assert!(
-                    union_nfa.nfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    union_nfa.nfa_accepts(aut.spp_store_mut(), &t, &output),
                     "trial {}: union rejects a trace nfa2 accepts",
                     trial
                 );
             }
             // Reverse: trace from union is accepted by nfa1 or nfa2.
-            if let Some((input, t, output)) = get_any_trace(&union_nfa, aut.spp_store_mut()) {
-                let in1 = nfa1.nfa_accepts(aut.spp_store_mut(), &input, &t, &output);
-                let in2 = nfa2.nfa_accepts(aut.spp_store_mut(), &input, &t, &output);
+            if let Some((t, output)) = get_any_trace(&union_nfa, aut.spp_store_mut()) {
+                let in1 = nfa1.nfa_accepts(aut.spp_store_mut(), &t, &output);
+                let in2 = nfa2.nfa_accepts(aut.spp_store_mut(), &t, &output);
                 assert!(
                     in1 || in2,
                     "trial {}: union accepts a trace neither nfa1 nor nfa2 accepts",
@@ -1859,14 +1771,14 @@ mod tests {
             let inter = ops::intersection(&nfa1, &nfa2);
 
             // Reverse: any trace from intersection is accepted by both.
-            if let Some((input, t, output)) = get_any_trace(&inter, aut.spp_store_mut()) {
+            if let Some((t, output)) = get_any_trace(&inter, aut.spp_store_mut()) {
                 assert!(
-                    nfa1.nfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    nfa1.nfa_accepts(aut.spp_store_mut(), &t, &output),
                     "trial {}: nfa1 rejects a trace from the intersection",
                     trial
                 );
                 assert!(
-                    nfa2.nfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    nfa2.nfa_accepts(aut.spp_store_mut(), &t, &output),
                     "trial {}: nfa2 rejects a trace from the intersection",
                     trial
                 );
@@ -1874,11 +1786,11 @@ mod tests {
 
             // Forward (best-effort): if a trace from nfa1 is also accepted by
             // nfa2, the intersection must accept it.
-            if let Some((input, t, output)) = get_any_trace(&nfa1, aut.spp_store_mut())
-                && nfa2.nfa_accepts(aut.spp_store_mut(), &input, &t, &output)
+            if let Some((t, output)) = get_any_trace(&nfa1, aut.spp_store_mut())
+                && nfa2.nfa_accepts(aut.spp_store_mut(), &t, &output)
             {
                 assert!(
-                    inter.nfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    inter.nfa_accepts(aut.spp_store_mut(), &t, &output),
                     "trial {}: intersection rejects a trace accepted by both nfa1 and nfa2",
                     trial
                 );
@@ -1889,22 +1801,22 @@ mod tests {
             let dfa2 = random_dfa(&mut aut, expr_depth, num_fields);
             let inter_dfa = ops::intersection(&dfa1, &dfa2);
 
-            // Single-start invariant.
-            let _ = inter_dfa.dfa_start(aut.spp_store_mut());
+            // Single-start invariant (always trivially holds now).
+            let _ = inter_dfa.start(aut.spp_store_mut());
 
-            if let Some((input, t, output)) = get_any_trace(&inter_dfa, aut.spp_store_mut()) {
+            if let Some((t, output)) = get_any_trace(&inter_dfa, aut.spp_store_mut()) {
                 assert!(
-                    dfa1.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    dfa1.dfa_accepts(aut.spp_store_mut(), &t, &output),
                     "trial {}: dfa1 rejects a trace from the DFA intersection",
                     trial
                 );
                 assert!(
-                    dfa2.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    dfa2.dfa_accepts(aut.spp_store_mut(), &t, &output),
                     "trial {}: dfa2 rejects a trace from the DFA intersection",
                     trial
                 );
                 assert!(
-                    inter_dfa.dfa_accepts(aut.spp_store_mut(), &input, &t, &output),
+                    inter_dfa.dfa_accepts(aut.spp_store_mut(), &t, &output),
                     "trial {}: DFA intersection rejects its own trace",
                     trial
                 );
@@ -1943,20 +1855,18 @@ mod tests {
                     trial,
                     expr
                 );
-                let (input, trace_pkts, output) = trace.unwrap();
-                let accepted_dfa =
-                    dfa.dfa_accepts(aut.spp_store_mut(), &input, &trace_pkts, &output);
+                let (trace_pkts, output) = trace.unwrap();
+                let accepted_dfa = dfa.dfa_accepts(aut.spp_store_mut(), &trace_pkts, &output);
                 assert!(
                     accepted_dfa,
-                    "trace not accepted by dfa_accepts on trial {} for expr {}: input={:?}, trace={:?}, output={:?}",
-                    trial, expr, input, trace_pkts, output
+                    "trace not accepted by dfa_accepts on trial {} for expr {}: trace={:?}, output={:?}",
+                    trial, expr, trace_pkts, output
                 );
-                let accepted_nfa =
-                    dfa.nfa_accepts(aut.spp_store_mut(), &input, &trace_pkts, &output);
+                let accepted_nfa = dfa.nfa_accepts(aut.spp_store_mut(), &trace_pkts, &output);
                 assert!(
                     accepted_nfa,
-                    "trace not accepted by nfa_accepts on trial {} for expr {}: input={:?}, trace={:?}, output={:?}",
-                    trial, expr, input, trace_pkts, output
+                    "trace not accepted by nfa_accepts on trial {} for expr {}: trace={:?}, output={:?}",
+                    trial, expr, trace_pkts, output
                 );
             }
         }

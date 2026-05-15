@@ -54,8 +54,7 @@ impl Instantiate {
         let complement_ub = ops::complement(upper_bound);
         let product = ops::intersection(&self_nfa, &complement_ub);
 
-        let Some((_input, visible_path, output_pkt)) = get_any_trace_with_states(&product, store)
-        else {
+        let Some((visible_path, output_pkt)) = get_any_trace_with_states(&product, store) else {
             return Ok(());
         };
 
@@ -137,8 +136,8 @@ impl Instantiate {
 impl ENFA for Instantiate {
     type State = State;
 
-    fn start(&self, store: &mut spp::SPPstore) -> Vec<(spp::SPP, Self::State)> {
-        vec![(store.one, self.start)]
+    fn start(&self, _store: &mut spp::SPPstore) -> Self::State {
+        self.start
     }
 
     fn is_visible(&self, _store: &mut spp::SPPstore, q: &Self::State) -> bool {
@@ -193,10 +192,7 @@ mod tests {
         let mut store = mk_store();
         let top = store.top;
         let inst = build_inst(&mut store, &Expr::spp(top), HashMap::new());
-        let starts = inst.start(&mut store);
-        assert_eq!(starts.len(), 1);
-        let (spp_start, q) = starts[0];
-        assert_eq!(spp_start, store.one);
+        let q = inst.start(&mut store);
         assert!(inst.is_visible(&mut store, &q));
         assert_eq!(inst.transitions(&mut store, &q), vec![]);
         assert_eq!(inst.output(&mut store, &q), top);
@@ -209,7 +205,7 @@ mod tests {
         let mut holes = HashMap::new();
         holes.insert(Hole(0), top);
         let inst = build_inst(&mut store, &Expr::hole(Hole(0)), holes);
-        let q = inst.start(&mut store)[0].1;
+        let q = inst.start(&mut store);
         // Hole(0) → top, and there are no other summands, so output == top.
         assert_eq!(inst.output(&mut store, &q), top);
         assert_eq!(inst.transitions(&mut store, &q), vec![]);
@@ -229,7 +225,7 @@ mod tests {
             &Expr::union(Expr::spp(top), Expr::hole(Hole(0))),
             holes,
         );
-        let q = inst.start(&mut store)[0].1;
+        let q = inst.start(&mut store);
         let want = store.union(top, one);
         assert_eq!(inst.output(&mut store, &q), want);
     }
@@ -251,7 +247,7 @@ mod tests {
             ),
             holes,
         );
-        let q = inst.start(&mut store)[0].1;
+        let q = inst.start(&mut store);
         let trans = inst.transitions(&mut store, &q);
         assert_eq!(trans.len(), 1);
         let (spp, target) = trans[0];
@@ -297,7 +293,7 @@ mod tests {
         // trace element and land in a visible "1" state with output one.
         let mut store = mk_store();
         let inst = build_inst(&mut store, &Expr::dup(), HashMap::new());
-        let q = inst.start(&mut store)[0].1;
+        let q = inst.start(&mut store);
         assert_eq!(inst.output(&mut store, &q), store.zero);
         let trans = inst.transitions(&mut store, &q);
         assert_eq!(trans.len(), 1);
@@ -414,7 +410,7 @@ mod tests {
     fn panics_on_missing_hole() {
         let mut store = mk_store();
         let inst = build_inst(&mut store, &Expr::hole(Hole(42)), HashMap::new());
-        let q = inst.start(&mut store)[0].1;
+        let q = inst.start(&mut store);
         // Reaching the hole forces a resolution -> panic.
         let _ = inst.output(&mut store, &q);
     }
