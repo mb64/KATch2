@@ -347,6 +347,14 @@ impl<T: ENFA> EpsilonClosure<T> {
         &self.inner
     }
 
+    /// The only states that should surface in the public API of `EpsilonClosure<T>` are:
+    ///
+    /// * The start state
+    /// * The visible states
+    pub fn assert_is_valid_state(&self, store: &mut spp::SPPstore, state: &T::State) {
+        debug_assert!(self.inner.is_visible(store, state) || state == &self.start(store));
+    }
+
     /// Given a trace through the closure NFA -- a sequence of
     /// `(visible_state, packet)` pairs -- elaborate it into the full path
     /// through the underlying ENFA `T`, splicing in the invisible states
@@ -544,10 +552,7 @@ impl<T: ENFA> ENFA for EpsilonClosure<T> {
     /// transitions that land on a visible target (the "consumption" step).
     /// The combined SPP is the closure path composed with the transition's.
     fn transitions(&self, store: &mut spp::SPPstore, q: &T::State) -> Vec<(spp::SPP, T::State)> {
-        debug_assert!(
-            self.inner.is_visible(store, q),
-            "EpsilonClosure::transitions only accepts visible states",
-        );
+        self.assert_is_valid_state(store, q);
         let mut result: HashMap<T::State, spp::SPP> = HashMap::new();
         for (path, p) in self.epsilon_closure(store, q) {
             for (spp_t, q_next) in self.inner.transitions(store, &p) {
@@ -566,10 +571,7 @@ impl<T: ENFA> ENFA for EpsilonClosure<T> {
     /// `spp ; inner.output(q_inv)`.  Captures both terminating directly at
     /// `q` and ε-walking to an invisible state and terminating there.
     fn output(&self, store: &mut spp::SPPstore, q: &T::State) -> spp::SPP {
-        debug_assert!(
-            self.inner.is_visible(store, q),
-            "EpsilonClosure::output only accepts visible states",
-        );
+        self.assert_is_valid_state(store, q);
         let mut result = self.inner.output(store, q);
         for (spp, p) in self.epsilon_closure(store, q) {
             if self.inner.is_visible(store, &p) {
@@ -1480,13 +1482,9 @@ mod tests {
     ) -> EpsilonClosure<RandomVisibility<ExplicitDFA>> {
         let dfa = random_dfa(aut, expr_depth, num_fields);
         let n = dfa.num_states();
-        let mut visible: Vec<bool> = (0..n).map(|_| rand::random::<bool>()).collect();
-        if n > 0 {
-            visible[dfa.start] = true;
-        }
         let wrapper = RandomVisibility {
             inner: dfa,
-            visible,
+            visible: (0..n).map(|_| rand::random::<bool>()).collect(),
         };
         EpsilonClosure::new(wrapper)
     }
