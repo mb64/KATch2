@@ -1306,6 +1306,129 @@ fn filter_input_spp(store: &mut spp::SPPstore, packet: &[bool]) -> spp::SPP {
     allow
 }
 
+/// Backward reachability through `aut` for a fixed `(trace, output)` pair.
+///
+/// Returns a map `back[(q, i)] = sp`, where every entry is a non-empty SP
+/// of packets `pkt` such that, if execution were to arrive at state `q`
+/// carrying packet `pkt` at trace position `i`, the remainder of the trace
+/// (`trace[i+1..]`) and the final output packet are still reachable from
+/// there.
+///
+/// Concretely, `F(pkt, q, i)` (membership in `back[(q, i)]`) holds when:
+///
+/// * `q` is visible and `pkt = trace[i]` (a visible state pins the carry
+///   packet), or `q` is invisible (no constraint on `pkt` from the trace), AND
+/// * either
+///   - `i == trace.len() - 1` and `q.output` accepts `(pkt, output)`, or
+///   - there is a transition `q --s--> q'` with `s.accepts(pkt, pkt')` such
+///     that `F(pkt', q', i')` holds, where `i' = i + 1` if `q'` is visible
+///     (only valid when `i + 1 < trace.len()`) and `i' = i` otherwise.
+///
+/// The algorithm enumerates every state forward-reachable from `aut.start()`
+/// and then runs a round-robin fixed-point over `(state, position)`,
+/// computing each entry as the union of its termination contribution
+/// (when `i == n - 1`) and the `pull`-back of every outgoing transition's
+/// target entry.
+///
+/// `trace` must be non-empty.
+pub fn backward_reachable<A: ENFA>(
+    aut: &A,
+    store: &mut spp::SPPstore,
+    trace: &[Vec<bool>],
+    output: &[bool],
+) -> HashMap<(A::State, usize), sp::SP> {
+    assert!(!trace.is_empty(), "trace must be non-empty");
+    let n = trace.len();
+
+    // 1. Forward BFS: enumerate reachable states and cache their structure.
+    let start = aut.start(store);
+    let mut reachable: HashSet<A::State> = HashSet::new();
+    let mut order: Vec<A::State> = Vec::new();
+    let mut adj: HashMap<A::State, Vec<(spp::SPP, A::State)>> = HashMap::new();
+    let mut outputs: HashMap<A::State, spp::SPP> = HashMap::new();
+    let mut visible: HashMap<A::State, bool> = HashMap::new();
+
+    reachable.insert(start.clone());
+    order.push(start.clone());
+    let mut stack = vec![start];
+    while let Some(q) = stack.pop() {
+        let trans = aut.transitions(store, &q);
+        outputs.insert(q.clone(), aut.output(store, &q));
+        visible.insert(q.clone(), aut.is_visible(store, &q));
+        for (_, qp) in &trans {
+            if reachable.insert(qp.clone()) {
+                order.push(qp.clone());
+                stack.push(qp.clone());
+            }
+        }
+        adj.insert(q, trans);
+    }
+
+    // 2. Concrete-packet SPs for the trace positions and the final output.
+    let trace_singletons: Vec<sp::SP> = trace.iter().map(|p| singleton_sp(store, p)).collect();
+    let output_singleton: sp::SP = singleton_sp(store, output);
+
+    // 3. Round-robin fixed-point iteration.
+    let sp_zero = store.sp.zero;
+    let mut back: HashMap<(A::State, usize), sp::SP> = HashMap::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for q in &order {
+            let q_visible = *visible.get(q).unwrap();
+            let q_output = *outputs.get(q).unwrap();
+            // Clone the transitions to release the borrow on `adj` while we
+            // mutably touch `store` inside the inner loop.
+            let trans = adj.get(q).unwrap().clone();
+            for (i, &trace_singleton) in trace_singletons.iter().enumerate() {
+                let mut new_sp = sp_zero;
+                // Termination contribution at the final trace position.
+                if i == n - 1 {
+                    let pre = store.pull(q_output, output_singleton);
+                    new_sp = store.sp.union(new_sp, pre);
+                }
+                // Transition contributions.
+                for (s, qp) in &trans {
+                    let qp_visible = *visible.get(qp).unwrap();
+                    let i_target = if qp_visible {
+                        if i + 1 >= n {
+                            continue;
+                        }
+                        i + 1
+                    } else {
+                        i
+                    };
+                    let sp_target = back
+                        .get(&(qp.clone(), i_target))
+                        .copied()
+                        .unwrap_or(sp_zero);
+                    if store.sp.is_zero(sp_target) {
+                        continue;
+                    }
+                    let pre = store.pull(*s, sp_target);
+                    new_sp = store.sp.union(new_sp, pre);
+                }
+                // Visible q pins the carry packet to trace[i].
+                if q_visible {
+                    new_sp = store.sp.intersect(new_sp, trace_singleton);
+                }
+                if store.sp.is_zero(new_sp) {
+                    continue;
+                }
+                let key = (q.clone(), i);
+                let old_sp = back.get(&key).copied().unwrap_or(sp_zero);
+                let combined = store.sp.union(old_sp, new_sp);
+                if combined != old_sp {
+                    back.insert(key, combined);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    back
+}
+
 /// One-step ENFA helper used by [`elaborate_step`].  Wraps an inner ENFA so
 /// every state is *visible* and adds a synthetic `PreStart` whose single
 /// transition pins the inner source packet to `p_source` via
@@ -1868,5 +1991,120 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── backward_reachable ────────────────────────────────────────────────
+
+    #[test]
+    fn backward_single_visible_accepting() {
+        // One visible state with output = top; trace of length 1.
+        // back[(0,0)] must be exactly {trace[0]} — visible pins the carry,
+        // and the top output allows any output packet.
+        let mut store = spp::SPPstore::new(3);
+        let top = store.top;
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![]],
+            outputs: vec![top],
+        };
+        let trace = vec![vec![true, false, true]];
+        let output = vec![false, true, false];
+        let back = backward_reachable(&dfa, &mut store, &trace, &output);
+
+        assert_eq!(back.len(), 1);
+        let expected = singleton_sp(&mut store, &trace[0]);
+        assert_eq!(back[&(0, 0)], expected);
+    }
+
+    #[test]
+    fn backward_no_output_is_empty() {
+        // One visible state with output = zero; nothing can terminate.
+        let mut store = spp::SPPstore::new(3);
+        let zero = store.zero;
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![]],
+            outputs: vec![zero],
+        };
+        let trace = vec![vec![true, false, true]];
+        let output = vec![false, true, false];
+        let back = backward_reachable(&dfa, &mut store, &trace, &output);
+        assert!(back.is_empty(), "got: {:?}", back);
+    }
+
+    #[test]
+    fn backward_linear_two_visible_states() {
+        // 0 --top--> 1, both visible.  output[0]=zero, output[1]=top.
+        // back[(1,1)] = {trace[1]}; back[(0,0)] = {trace[0]}; no others.
+        let mut store = spp::SPPstore::new(2);
+        let top = store.top;
+        let zero = store.zero;
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(top, 1)], vec![]],
+            outputs: vec![zero, top],
+        };
+        let trace = vec![vec![false, false], vec![true, true]];
+        let output = vec![true, false];
+        let back = backward_reachable(&dfa, &mut store, &trace, &output);
+
+        let s0 = singleton_sp(&mut store, &trace[0]);
+        let s1 = singleton_sp(&mut store, &trace[1]);
+        assert_eq!(back[&(0, 0)], s0);
+        assert_eq!(back[&(1, 1)], s1);
+        assert_eq!(back.len(), 2);
+    }
+
+    #[test]
+    fn backward_with_invisible_intermediate() {
+        // 0 (visible) --top--> 1 (invisible) --top--> 2 (visible).
+        // output[0]=output[1]=zero, output[2]=top.
+        // Trace length 2.  Expected entries:
+        //   (2, 1) → {trace[1]}   (visible, pinned)
+        //   (1, 0) → all packets  (invisible, transitions to (2,1) via top)
+        //   (0, 0) → {trace[0]}   (visible, transitions through 1 to 2)
+        let mut store = spp::SPPstore::new(2);
+        let top = store.top;
+        let zero = store.zero;
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(top, 1)], vec![(top, 2)], vec![]],
+            outputs: vec![zero, zero, top],
+        };
+        let wrap = RandomVisibility {
+            inner: dfa,
+            visible: vec![true, false, true],
+        };
+        let trace = vec![vec![false, false], vec![true, true]];
+        let output = vec![false, true];
+        let back = backward_reachable(&wrap, &mut store, &trace, &output);
+
+        let s0 = singleton_sp(&mut store, &trace[0]);
+        let s1 = singleton_sp(&mut store, &trace[1]);
+        let all = store.sp.one;
+        assert_eq!(back[&(2, 1)], s1);
+        assert_eq!(back[&(1, 0)], all);
+        assert_eq!(back[&(0, 0)], s0);
+        assert_eq!(back.len(), 3);
+    }
+
+    #[test]
+    fn backward_unreachable_output_pkt_is_empty() {
+        // Output SPP = `one` (identity: only (p, p) accepted).  If
+        // output_pkt = [false, false] but trace[0] = [true, true], the only
+        // way to terminate at state 0 is pkt = output_pkt = [false, false],
+        // but visibility pins pkt = trace[0] = [true, true].  Contradiction:
+        // back is empty.
+        let mut store = spp::SPPstore::new(2);
+        let one = store.one;
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![]],
+            outputs: vec![one],
+        };
+        let trace = vec![vec![true, true]];
+        let output = vec![false, false];
+        let back = backward_reachable(&dfa, &mut store, &trace, &output);
+        assert!(back.is_empty(), "got: {:?}", back);
     }
 }

@@ -43,41 +43,39 @@ pub enum CegisError {
     Infeasible,
 }
 
-/// Solve `lower_bound ⊆ expr[hole] ⊆ upper_bound` for a single hole.
+/// Solve `lower_bound ⊆ expr[holes] ⊆ upper_bound` for multiple holes.
 ///
 /// `aut` and `start` describe the hole-bearing expression as a
-/// [`crate::holes::nk_with_holes::AutWithHoles`] state machine; `hole` is the
-/// (single) hole label that appears in it.  Returns the synthesized SPP on
-/// success.
+/// [`crate::holes::nk_with_holes::AutWithHoles`] state machine; `holes` is
+/// the set of hole labels that may appear in it (every hole the expression
+/// reaches must be listed, otherwise [`Instantiate`] will panic when it
+/// hits an unmapped one).  On success, returns one synthesized SPP per
+/// hole.
 pub fn run<L: NFA, U: DFA>(
     aut: AutWithHoles,
     start: State,
-    hole: Hole,
+    holes: &[Hole],
     lower_bound: &L,
     upper_bound: &U,
     store: &mut spp::SPPstore,
-) -> Result<spp::SPP, CegisError> {
+) -> Result<HashMap<Hole, spp::SPP>, CegisError> {
     let mut learner = ExistentialLearner::new(store.num_vars());
 
-    // Allocate one SPP slot per hole.  Single-hole for now; trivially
-    // generalizes to many.
     let mut hole_to_var: HashMap<Hole, SppVar> = HashMap::new();
-    hole_to_var.insert(hole, learner.fresh_spp());
-
-    let candidates_to_holes_map = |cands: &HashMap<SppVar, spp::SPP>| -> HashMap<Hole, spp::SPP> {
-        hole_to_var.iter().map(|(&h, &v)| (h, cands[&v])).collect()
-    };
+    for &h in holes {
+        hole_to_var.insert(h, learner.fresh_spp());
+    }
 
     let mut cands = match learner.extract(store) {
         Ok(c) => c,
         Err(_) => return Err(CegisError::Infeasible),
     };
-    let mut inst = Instantiate::new(aut, start, candidates_to_holes_map(&cands));
+    let mut inst = Instantiate::new(aut, start, holes_map(&hole_to_var, &cands));
 
     loop {
         match inst.check_less_than(store, upper_bound) {
             Ok(()) => match inst.check_greater_than(store, lower_bound) {
-                Ok(()) => return Ok(cands[&hole_to_var[&hole]]),
+                Ok(()) => return Ok(holes_map(&hole_to_var, &cands)),
                 Err(cex) => add_lower_bound_clauses(cex, &mut learner),
             },
             Err(witnesses) => add_upper_bound_clause(witnesses, &hole_to_var, &mut learner),
@@ -91,6 +89,15 @@ pub fn run<L: NFA, U: DFA>(
             inst.set_hole(*h, cands[v]);
         }
     }
+}
+
+/// Project a `SppVar → SPP` candidate map back through `hole_to_var` to get
+/// a `Hole → SPP` map suitable for [`Instantiate`].
+fn holes_map(
+    hole_to_var: &HashMap<Hole, SppVar>,
+    cands: &HashMap<SppVar, spp::SPP>,
+) -> HashMap<Hole, spp::SPP> {
+    hole_to_var.iter().map(|(&h, &v)| (h, cands[&v])).collect()
 }
 
 /// Convert an upper-bound counterexample (a list of `(hole, (in, out))` pairs
@@ -170,11 +177,11 @@ mod tests {
         let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store);
-        let spp = run(aut, start, Hole(0), &lb, &ub, &mut store).unwrap();
-        assert_eq!(spp, store.zero);
+        let result = run(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
+        assert_eq!(result[&Hole(0)], store.zero);
     }
 
-    /// Expression is just a concrete `top`, no hole used.  With ub = zero,
+    /// Expression is just a concrete `top`, no holes used.  With ub = zero,
     /// the upper-bound check finds a *concrete* violation: witness is
     /// empty, which produces an empty clause, which makes the learner
     /// immediately UNSAT → `Infeasible`.
@@ -186,7 +193,7 @@ mod tests {
         let start = aut.expr_to_state(&mut store, &Expr::spp(top));
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
-        let err = run(aut, start, Hole(0), &lb, &ub, &mut store).unwrap_err();
+        let err = run(aut, start, &[], &lb, &ub, &mut store).unwrap_err();
         assert_eq!(err, CegisError::Infeasible);
     }
 
@@ -200,7 +207,43 @@ mod tests {
         let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
-        let spp = run(aut, start, Hole(0), &lb, &ub, &mut store).unwrap();
-        assert_eq!(spp, store.zero);
+        let result = run(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
+        assert_eq!(result[&Hole(0)], store.zero);
+    }
+
+    /// Two holes in `Hole(0) ∪ Hole(1)` with trivial bounds: the empty
+    /// candidate for both passes vacuously, returns a map with one entry
+    /// per hole.
+    #[test]
+    fn two_holes_trivial_bounds() {
+        let mut store = mk_store();
+        let mut aut = AutWithHoles::new();
+        let start = aut.expr_to_state(
+            &mut store,
+            &Expr::union(Expr::hole(Hole(0)), Expr::hole(Hole(1))),
+        );
+        let lb = zero_dfa(&store);
+        let ub = top_dfa(&store);
+        let result = run(aut, start, &[Hole(0), Hole(1)], &lb, &ub, &mut store).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[&Hole(0)], store.zero);
+        assert_eq!(result[&Hole(1)], store.zero);
+    }
+
+    /// Two holes with ub = zero: again the only valid assignment is
+    /// `zero, zero`.  Converges on the first iteration.
+    #[test]
+    fn two_holes_bounded_above_by_zero() {
+        let mut store = mk_store();
+        let mut aut = AutWithHoles::new();
+        let start = aut.expr_to_state(
+            &mut store,
+            &Expr::union(Expr::hole(Hole(0)), Expr::hole(Hole(1))),
+        );
+        let lb = zero_dfa(&store);
+        let ub = zero_dfa(&store);
+        let result = run(aut, start, &[Hole(0), Hole(1)], &lb, &ub, &mut store).unwrap();
+        assert_eq!(result[&Hole(0)], store.zero);
+        assert_eq!(result[&Hole(1)], store.zero);
     }
 }
