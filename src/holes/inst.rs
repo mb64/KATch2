@@ -5,7 +5,9 @@
 //! `&mut self`, but [`ENFA`]'s methods take `&self`; we bridge with a
 //! `RefCell`, the same trick `EpsilonClosure` uses for its memo table.
 
-use crate::holes::aut::{DFA, ENFA, EpsilonClosure, SubsetDfa, get_any_trace_with_states, ops};
+use crate::holes::aut::{
+    DFA, ENFA, EpsilonClosure, NFA, SubsetDfa, get_any_trace_with_states, ops,
+};
 use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Hole, State};
 use crate::spp;
 use std::cell::RefCell;
@@ -14,12 +16,17 @@ use std::collections::HashMap;
 /// Witness produced by [`Instantiate::check_greater_than`] when the lower
 /// bound is not contained in the instantiated automaton.
 ///
-/// **Stub**: this is a placeholder; the real structure will carry the trace
-/// (and the data needed to derive existential-variable clauses) once the
-/// lower-bound counterexample processing is implemented.
-#[derive(Debug)]
+/// A single trace accepted by the lower bound but not by `self`: a sequence
+/// of input packets visited between dup-crossings, plus the final output
+/// packet.  Converting this into clauses for the [`crate::spp::existential_learner`]
+/// is not yet implemented.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LowerBoundCounterexample {
-    _placeholder: (),
+    /// Packets visited along the trace (one per visible state, including
+    /// the start state).  Length ≥ 1.
+    pub trace: Vec<Vec<bool>>,
+    /// Final output packet produced by the lower bound's output summand.
+    pub output: Vec<bool>,
 }
 
 /// An [`AutWithHoles`] plus a concrete SPP assignment for each hole that
@@ -147,11 +154,16 @@ impl Instantiate {
     /// Otherwise returns a [`LowerBoundCounterexample`] capturing a trace
     /// `lower_bound` accepts that `self` does not.
     ///
-    /// **Partial**: the containment check itself is implemented (so trivial
-    /// lower bounds let the CEGIS loop run end-to-end), but extracting the
-    /// counterexample on failure is stubbed.  The loop will panic if it
-    /// ever needs to refine on a lower-bound failure.
-    pub fn check_greater_than<L: DFA>(
+    /// Check whether `lower_bound` is contained in this instantiated
+    /// automaton.  `lower_bound` may be any NFA (we determinize `self` so
+    /// we can complement it).
+    ///
+    /// Returns `Ok(())` if every triple accepted by `lower_bound` is also
+    /// accepted by `self`.  Otherwise returns a [`LowerBoundCounterexample`]
+    /// — a packet trace and final output that `lower_bound` accepts but
+    /// `self` does not.  Turning that into existential-variable clauses for
+    /// the learner is left to the CEGIS layer (and is not yet implemented).
+    pub fn check_greater_than<L: NFA>(
         &self,
         store: &mut spp::SPPstore,
         lower_bound: &L,
@@ -162,10 +174,11 @@ impl Instantiate {
         let complement_self = ops::complement(self_dfa);
         let product = ops::intersection(lower_bound, &complement_self);
 
-        if get_any_trace_with_states(&product, store).is_none() {
+        let Some((visible_path, output)) = get_any_trace_with_states(&product, store) else {
             return Ok(());
-        }
-        todo!("lower-bound counterexample → clause processing not yet implemented")
+        };
+        let trace: Vec<Vec<bool>> = visible_path.into_iter().map(|(_, p)| p).collect();
+        Err(LowerBoundCounterexample { trace, output })
     }
 
     fn resolve(&self, label: EdgeLabel) -> spp::SPP {

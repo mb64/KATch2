@@ -27,7 +27,7 @@
 
 use std::collections::HashMap;
 
-use crate::holes::aut::DFA;
+use crate::holes::aut::{DFA, NFA};
 use crate::holes::inst::Instantiate;
 use crate::holes::nk_with_holes::{AutWithHoles, Hole, State};
 use crate::spp;
@@ -47,7 +47,7 @@ pub enum CegisError {
 /// [`crate::holes::nk_with_holes::AutWithHoles`] state machine; `hole` is the
 /// (single) hole label that appears in it.  Returns the synthesized SPP on
 /// success.
-pub fn run<L: DFA, U: DFA>(
+pub fn run<L: NFA, U: DFA>(
     aut: AutWithHoles,
     start: State,
     hole: Hole,
