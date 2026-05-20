@@ -143,6 +143,10 @@ impl SPPstore {
         store
     }
 
+    pub fn num_vars(&self) -> Var {
+        self.num_vars
+    }
+
     /// Retrieves the SPPnode corresponding to a given SPP index.
     /// Panics if the index is 0, 1, or out of bounds.
     /// Assumes the caller ensures the index represents an internal node.

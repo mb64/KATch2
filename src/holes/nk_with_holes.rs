@@ -89,7 +89,7 @@ pub type AExprIdx = usize;
 /// visibility flag.  The same expression can appear with either visibility
 /// depending on whether it was reached via a within-segment edge or a
 /// dup-crossing edge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct State {
     pub aexpr: AExprIdx,
     pub visible: bool,
