@@ -473,8 +473,8 @@ impl<T: ENFA> EpsilonClosure<T> {
             }
 
             // edges[k][j] := l_star · edges[k][j] for j > k
-            for j in (k + 1)..n {
-                edges[k][j] = store.sequence(l_star, edges[k][j]);
+            for spp in &mut edges[k][(k + 1)..] {
+                *spp = store.sequence(l_star, *spp);
             }
 
             let consts_k_snap: Vec<(T::State, spp::SPP)> =
@@ -1647,7 +1647,7 @@ mod tests {
 
             for (i, (q, p)) in path.iter().enumerate() {
                 assert!(
-                    reachable_set.contains(&(q.clone(), p.clone())),
+                    reachable_set.contains(&(*q, p.clone())),
                     "trial {}: path step {} ({:?}, {:?}) missing from reachable_from_trace result",
                     trial,
                     i,

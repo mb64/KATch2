@@ -557,11 +557,12 @@ impl SPPstore {
             return Some((vec![], vec![]));
         }
         let spp_node = self.get(spp);
-        let mut options = vec![];
-        options.push((false, false, spp_node.x00));
-        options.push((false, true, spp_node.x01));
-        options.push((true, false, spp_node.x10));
-        options.push((true, true, spp_node.x11));
+        let mut options = vec![
+            (false, false, spp_node.x00),
+            (false, true, spp_node.x01),
+            (true, false, spp_node.x10),
+            (true, true, spp_node.x11),
+        ];
         // Shuffle the options
         options.shuffle(&mut rand::rng());
         for (b1, b2, child) in options {
@@ -633,7 +634,7 @@ impl SPPstore {
     /// Enumerates all possible SPPs with `num_vars` fields
     #[cfg(test)]
     pub fn all(&mut self) -> Vec<SPP> {
-        return self.all_helper(self.num_vars);
+        self.all_helper(self.num_vars)
     }
 
     /// Helper function for `all`: enumerates all SPPs with `depth` fields

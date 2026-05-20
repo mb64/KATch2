@@ -159,8 +159,8 @@ impl Aut {
                 AExpr::Union(nested) => {
                     let mut new_distributed_states = vec![];
                     for nested_state in nested.clone() {
-                        for i in 0..distributed_states.len() {
-                            let mut new_distributed_state = distributed_states[i].clone();
+                        for ds in &distributed_states {
+                            let mut new_distributed_state = ds.clone();
                             new_distributed_state.push(nested_state);
                             new_distributed_states.push(new_distributed_state);
                         }
@@ -168,8 +168,8 @@ impl Aut {
                     distributed_states = new_distributed_states;
                 }
                 _ => {
-                    for i in 0..distributed_states.len() {
-                        distributed_states[i].push(state);
+                    for ds in &mut distributed_states {
+                        ds.push(state);
                     }
                 }
             }

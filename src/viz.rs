@@ -715,8 +715,7 @@ pub fn render_aut(root_state: usize, aut: &mut Aut, output_dir: &Path) -> Result
         let start_idx = row_idx * CARDS_PER_ROW;
         let end_idx = std::cmp::min(start_idx + CARDS_PER_ROW, sorted_spps.len());
 
-        for i in start_idx..end_idx {
-            let spp_index = sorted_spps[i];
+        for &spp_index in &sorted_spps[start_idx..end_idx] {
             let spp_id_str = format!("SPP({})", spp_index.0); // For display and ID
             let spp_file_name = format!("spp_{}.svg", spp_index.0); // For file reference
 

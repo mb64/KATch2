@@ -2,6 +2,7 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
+#![allow(clippy::identity_op)]
 
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -732,7 +733,7 @@ mod perf_tests {
         // Test what happens when we do multiple push operations
         let start = Instant::now();
         let mut current_sp = sp_one;
-        for (_target_state, spp) in delta_st.get_transitions() {
+        for spp in delta_st.get_transitions().values() {
             current_sp = aut.spp_store_mut().push(current_sp, *spp);
             println!("  Push with SPP {:?} -> SP {:?}", spp, current_sp);
         }
@@ -930,13 +931,13 @@ mod perf_tests {
             // Parse the expression
             let start = Instant::now();
             let expressions = parser::parse_expressions(expr_str)
-                .expect(&format!("Failed to parse: {}", expr_str));
+                .unwrap_or_else(|_| panic!("Failed to parse: {}", expr_str));
             let parse_time = start.elapsed();
 
             // Desugar the expression
             let start = Instant::now();
             let desugared = desugar::desugar(&expressions[0])
-                .expect(&format!("Failed to desugar: {}", expr_str));
+                .unwrap_or_else(|_| panic!("Failed to desugar: {}", expr_str));
             let desugar_time = start.elapsed();
 
             // Count unions to verify efficiency

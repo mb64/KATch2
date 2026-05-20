@@ -802,7 +802,7 @@ mod tests {
                     println!("Success!\n");
                     num_trials += 1;
                 } else {
-                    assert!(false, "Failure!\n");
+                    panic!("Failure!\n");
                 }
             }
         }
@@ -844,11 +844,7 @@ mod tests {
                     println!("Success!\n");
                     num_trials += 1;
                 } else {
-                    assert!(
-                        false,
-                        "Failure for e1 <= e2!\n  e1 = {}\n  e2 = {}\n",
-                        e1, e2
-                    );
+                    panic!("Failure for e1 <= e2!\n  e1 = {}\n  e2 = {}\n", e1, e2);
                 }
             }
         }
@@ -936,8 +932,7 @@ mod tests {
             if !aut.is_empty(state) {
                 println!("Success!\n");
             } else {
-                assert!(
-                    false,
+                panic!(
                     "Failure! Expected XOR of {} and {} to be non-empty \n",
                     e1, e2
                 );

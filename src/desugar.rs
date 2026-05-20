@@ -1375,12 +1375,9 @@ mod tests {
         let desugared = desugar(expr).unwrap();
 
         // Expected: desugared bit range test for x[0..32] == 192.168.1.1
-        let mut ip_bits = vec![false; 32];
         let ip_num = 0xC0A80101u32; // 192.168.1.1 in hex
         // Generate LSB-first order to match ip_to_bits
-        for i in 0..32 {
-            ip_bits[i] = (ip_num >> i) & 1 == 1;
-        }
+        let ip_bits: Vec<bool> = (0..32).map(|i| (ip_num >> i) & 1 == 1).collect();
         let expected = desugar_bit_range_test(0, 32, &ip_bits).unwrap();
 
         assert_eq!(desugared, expected);
@@ -1474,8 +1471,8 @@ mod tests {
 
         // Expected: desugared sequence for (x[0..1] == 1) ; (x[0..1] := 0)
         let expected = Expr::sequence(
-            desugar_bit_range_test(0, 1, &vec![true]).unwrap(),
-            desugar_bit_range_assign(0, 1, &vec![false]).unwrap(),
+            desugar_bit_range_test(0, 1, &[true]).unwrap(),
+            desugar_bit_range_assign(0, 1, &[false]).unwrap(),
         );
 
         assert_eq!(desugared, expected);

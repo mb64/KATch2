@@ -2101,69 +2101,57 @@ pub fn parse_expressions(input: &str) -> Result<Vec<Exp>, ParseErrorDetails> {
     let mut parser = Parser::new(lexer);
     let mut expressions = Vec::new();
 
-    loop {
-        match parser.peek_kind() {
-            Ok(&TokenKind::Eof) => break,
-            Err(ref pe)
-                if pe.message.contains("Peeked beyond EOF")
-                    || pe.message.contains("Unexpected end of token stream") =>
-            {
-                break;
-            }
-            Err(pe) => return Err(convert_parse_error(pe.clone(), input)), // Cloned because pe is a reference
-            _ => {}
+    // Note: this parses at most one top-level expression. The `Vec<Exp>` return
+    // type and trailing peek-for-Eof are vestigial: every caller reads only
+    // `expressions[0]`, and any token after the first expression is reported
+    // as "Expected operator". The empty result is the "input was just
+    // whitespace/comments" case.
+    match parser.peek_kind() {
+        Ok(&TokenKind::Eof) => return Ok(expressions),
+        Err(ref pe)
+            if pe.message.contains("Peeked beyond EOF")
+                || pe.message.contains("Unexpected end of token stream") =>
+        {
+            return Ok(expressions);
         }
-
-        match parser.parse_single_expression() {
-            Ok(expr) => expressions.push(expr),
-            Err(pe) => return Err(convert_parse_error(pe, input)),
-        }
-
-        match parser.peek_kind() {
-            Ok(&TokenKind::Eof) => break,
-            Err(ref pe)
-                if pe.message.contains("Peeked beyond EOF")
-                    || pe.message.contains("Unexpected end of token stream") =>
-            {
-                break;
-            }
-            Ok(kind_from_first_peek) => {
-                // Immediately clone the kind to own it and release the borrow from peek_kind.
-                let owned_kind = kind_from_first_peek.clone();
-
-                // Now, separately get the span from a new peek_token call.
-                let span_for_error = match parser.peek_token() {
-                    Ok(token) => token.span,
-                    Err(_) => Default::default(), // Fallback if peeking full token fails
-                };
-
-                let err = ParseError::new(
-                    if matches!(owned_kind, TokenKind::Eq) {
-                        "The '==' operator is only supported for simple field tests like 'x0 == 1'. For other comparisons, use the '~' operator instead (e.g., 'port ~ 1024')".to_string()
-                    } else {
-                        format!(
-                            "Expected operator, but found {}",
-                            token_kind_to_user_string(&owned_kind)
-                        )
-                    },
-                    span_for_error,
-                );
-                return Err(convert_parse_error(err, input));
-            }
-            Err(pe) => return Err(convert_parse_error(pe.clone(), input)),
-        }
+        Err(pe) => return Err(convert_parse_error(pe.clone(), input)),
+        _ => {}
     }
 
-    if expressions.is_empty() && !input.trim().is_empty() {
-        // This path might indicate an issue if input was expected to produce expressions.
-        // However, the parser loop correctly handles empty valid inputs (like only comments).
-        // If an error occurred before any expressions were parsed, it would have been returned already.
-        // If the input is non-empty but yields no expressions (e.g., "end" or "end end"),
-        // it could be valid depending on grammar interpretation (e.g. zero expressions allowed).
-        // For now, we allow it to return an empty Vec. The caller (lib.rs) can decide how to treat it.
+    match parser.parse_single_expression() {
+        Ok(expr) => expressions.push(expr),
+        Err(pe) => return Err(convert_parse_error(pe, input)),
     }
 
-    Ok(expressions)
+    match parser.peek_kind() {
+        Ok(&TokenKind::Eof) => Ok(expressions),
+        Err(ref pe)
+            if pe.message.contains("Peeked beyond EOF")
+                || pe.message.contains("Unexpected end of token stream") =>
+        {
+            Ok(expressions)
+        }
+        Ok(kind_from_first_peek) => {
+            let owned_kind = kind_from_first_peek.clone();
+            let span_for_error = match parser.peek_token() {
+                Ok(token) => token.span,
+                Err(_) => Default::default(),
+            };
+            let err = ParseError::new(
+                if matches!(owned_kind, TokenKind::Eq) {
+                    "The '==' operator is only supported for simple field tests like 'x0 == 1'. For other comparisons, use the '~' operator instead (e.g., 'port ~ 1024')".to_string()
+                } else {
+                    format!(
+                        "Expected operator, but found {}",
+                        token_kind_to_user_string(&owned_kind)
+                    )
+                },
+                span_for_error,
+            );
+            Err(convert_parse_error(err, input))
+        }
+        Err(pe) => Err(convert_parse_error(pe.clone(), input)),
+    }
 }
 
 // Helper to convert internal ParseError to the lib's ParseErrorDetails
@@ -2453,7 +2441,6 @@ mod tests {
             }
         }
         println!("--- Finished Checking Syntax Error Messages ---");
-        assert!(true); // Dummy assertion
     }
 
     // ===== OPERATOR PRECEDENCE TESTS =====
@@ -2823,11 +2810,8 @@ mod tests {
         // IP addresses are converted in big-endian format: 192.168.1.1 = 0xC0A80101
         // But our bit vector is little-endian, so bit 0 is the LSB
         // 0xC0A80101 = 3232235777 in decimal
-        let mut ip_bits = vec![false; 32];
         let ip_num = 0xC0A80101u32;
-        for i in 0..32 {
-            ip_bits[i] = (ip_num >> i) & 1 == 1;
-        }
+        let ip_bits: Vec<bool> = (0..32).map(|i| (ip_num >> i) & 1 == 1).collect();
         assert_eq!(expr3, Expr::bit_range_assign(0, 32, ip_bits));
 
         // Test mixed formats in compound expression
@@ -3070,11 +3054,8 @@ mod tests {
         let expr = parse_single_unwrap("let ip = &x[0..32] in ip := 192.168.1.1");
         // IP address 192.168.1.1 in little-endian bit representation
         // Using the same conversion as in test_literal_formats
-        let mut ip_bits = vec![false; 32];
         let ip_num = 0xC0A80101u32; // 192.168.1.1 in hex
-        for i in 0..32 {
-            ip_bits[i] = (ip_num >> i) & 1 == 1;
-        }
+        let ip_bits: Vec<bool> = (0..32).map(|i| (ip_num >> i) & 1 == 1).collect();
         assert_eq!(
             expr,
             Expr::let_bit_range(
@@ -3102,18 +3083,11 @@ mod tests {
         let expr = parse_single_unwrap(
             "let src = &x[0..32] in let dst = &x[32..64] in src ~ 10.0.0.1 & dst ~ 10.0.0.2",
         );
-        let mut ip1_bits = vec![false; 32];
         let ip1_num = 0x0A000001u32; // 10.0.0.1 in hex
-        // Generate LSB-first order to match ip_to_bits
-        for i in 0..32 {
-            ip1_bits[i] = (ip1_num >> i) & 1 == 1;
-        }
-        let mut ip2_bits = vec![false; 32];
         let ip2_num = 0x0A000002u32; // 10.0.0.2 in hex
         // Generate LSB-first order to match ip_to_bits
-        for i in 0..32 {
-            ip2_bits[i] = (ip2_num >> i) & 1 == 1;
-        }
+        let ip1_bits: Vec<bool> = (0..32).map(|i| (ip1_num >> i) & 1 == 1).collect();
+        let ip2_bits: Vec<bool> = (0..32).map(|i| (ip2_num >> i) & 1 == 1).collect();
         assert_eq!(
             expr,
             Expr::let_bit_range(
@@ -3139,11 +3113,8 @@ mod tests {
         let expr = parse_single_unwrap(
             "let config = x0 := 1 in let ip = &x[0..32] in config ; ip := 192.168.1.1",
         );
-        let mut ip_bits = vec![false; 32];
         let ip_num = 0xC0A80101u32; // 192.168.1.1 in hex
-        for i in 0..32 {
-            ip_bits[i] = (ip_num >> i) & 1 == 1;
-        }
+        let ip_bits: Vec<bool> = (0..32).map(|i| (ip_num >> i) & 1 == 1).collect();
         assert_eq!(
             expr,
             Expr::let_in(
@@ -3187,12 +3158,9 @@ mod tests {
     fn test_alias_precedence() {
         // Alias in larger expression
         let expr = parse_single_unwrap("0 + let ip = &x[0..32] in ip ~ 10.0.0.1");
-        let mut ip_bits = vec![false; 32];
         let ip_num = 0x0A000001u32; // 10.0.0.1 in hex
         // Generate LSB-first order to match ip_to_bits
-        for i in 0..32 {
-            ip_bits[i] = (ip_num >> i) & 1 == 1;
-        }
+        let ip_bits: Vec<bool> = (0..32).map(|i| (ip_num >> i) & 1 == 1).collect();
         assert_eq!(
             expr,
             Expr::union(

@@ -264,9 +264,7 @@ impl SPstore {
             return Some(vec![]);
         }
         let node = self.get(sp);
-        let mut options = vec![];
-        options.push((false, node.x0));
-        options.push((true, node.x1));
+        let mut options = vec![(false, node.x0), (true, node.x1)];
         // Shuffle the options to randomize
         options.shuffle(&mut rand::rng());
         for (bit_value, child) in options {
