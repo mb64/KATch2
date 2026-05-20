@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && cargo fmt --quiet 2>/dev/null; if ! out=$(cargo clippy --lib --tests --quiet -- -D warnings 2>&1); then printf 'Fix fmt/clippy before stopping:\\n\\n%s\\n' \"$out\" >&2; exit 2; fi"
+          }
+        ]
+      }
+    ]
+  }
+}
