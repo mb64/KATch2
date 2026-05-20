@@ -32,6 +32,7 @@ serde-wasm-bindgen = "0.6.5"
 getrandom = { version = "0.3.2", features = ["wasm_js"] }
 rustsat = "0.7.5"
 rustsat-cadical = "0.7.5"
+z3 = "0.20.0"
 
 # Dependencies for non-WASM targets (e.g., your native binary that uses tokio)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

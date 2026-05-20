@@ -1,3 +1,8 @@
+#![allow(clippy::upper_case_acronyms)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::result_large_err)]
+#![allow(clippy::too_many_arguments)]
+
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 

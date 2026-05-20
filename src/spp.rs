@@ -5,6 +5,7 @@
 
 pub mod clause_learner;
 pub mod learner;
+pub mod quantified_learner;
 
 use rand::seq::SliceRandom;
 
