@@ -38,6 +38,7 @@ use z3::{
 
 use super::learner::{AbstractPacket as ConcretePacket, Learner};
 use super::{SPP, SPPstore, Var};
+use crate::sp::{SP, SPstore};
 
 use std::collections::HashMap;
 
@@ -163,6 +164,48 @@ impl ExistentialLearner {
             _ => Bool::or(&lits),
         };
         self.solver.assert(&body);
+    }
+
+    /// Constrain the bit-vector formed by `vars[0..n]` (where `n` matches the
+    /// SP's depth) to represent a packet that lies in `sp`.
+    ///
+    /// Implemented by recursively walking the SP BDD, building one Z3 Bool
+    /// AST per node (`ite(vars[depth], rec(x1), rec(x0))`), and asserting the
+    /// result.  Hash-consing on the SP plus a memo table over the recursion
+    /// keep the work proportional to the BDD size, not exponential.
+    ///
+    /// Asserting membership in an empty SP makes the solver immediately UNSAT;
+    /// membership in the full SP is a no-op.
+    pub fn add_sp_membership(&mut self, sp: SP, vars: &[Existential], sp_store: &SPstore) {
+        let mut memo: HashMap<SP, Bool> = HashMap::new();
+        let body = self.build_sp_bool(sp, vars, 0, sp_store, &mut memo);
+        self.solver.assert(&body);
+    }
+
+    fn build_sp_bool(
+        &self,
+        sp: SP,
+        vars: &[Existential],
+        depth: usize,
+        sp_store: &SPstore,
+        memo: &mut HashMap<SP, Bool>,
+    ) -> Bool {
+        if sp == SP::new(0) {
+            return Bool::from_bool(false);
+        }
+        if sp == SP::new(1) {
+            return Bool::from_bool(true);
+        }
+        if let Some(b) = memo.get(&sp) {
+            return b.clone();
+        }
+        let node = sp_store.get(sp);
+        let x0_b = self.build_sp_bool(node.x0, vars, depth + 1, sp_store, memo);
+        let x1_b = self.build_sp_bool(node.x1, vars, depth + 1, sp_store, memo);
+        let var_b = self.exist(vars[depth]);
+        let result = var_b.ite(&x1_b, &x0_b);
+        memo.insert(sp, result.clone());
+        result
     }
 
     /// Add an abstract clause.  The corresponding Z3 assertion is added
@@ -549,6 +592,71 @@ mod tests {
             &[false, false, false],
             &[false, false, false],
         ));
+    }
+
+    /// Singleton SP for a concrete packet (test helper, mirrors aut::singleton_sp).
+    fn singleton_sp_for_test(store: &mut SPPstore, pkt: &[bool]) -> SP {
+        let mut sp_val = SP::new(1);
+        let mut zero = SP::new(0);
+        for &b in pkt.iter().rev() {
+            let next = if b {
+                store.sp.mk(zero, sp_val)
+            } else {
+                store.sp.mk(sp_val, zero)
+            };
+            zero = store.sp.mk(zero, zero);
+            sp_val = next;
+        }
+        sp_val
+    }
+
+    #[test]
+    fn test_sp_membership_full_set_is_noop() {
+        // sp = full set; adding membership shouldn't change satisfiability.
+        let mut store = SPPstore::new(N);
+        let mut learner = ExistentialLearner::new(N);
+        let _s = learner.fresh_spp();
+        let e: Vec<Existential> = (0..N).map(|_| learner.fresh_existential()).collect();
+        learner.add_sp_membership(store.sp.one, &e, &store.sp);
+        assert!(learner.extract(&mut store).is_ok());
+    }
+
+    #[test]
+    fn test_sp_membership_empty_set_is_unsat() {
+        let mut store = SPPstore::new(N);
+        let mut learner = ExistentialLearner::new(N);
+        let _s = learner.fresh_spp();
+        let e: Vec<Existential> = (0..N).map(|_| learner.fresh_existential()).collect();
+        learner.add_sp_membership(store.sp.zero, &e, &store.sp);
+        assert!(learner.extract(&mut store).is_err());
+    }
+
+    #[test]
+    fn test_sp_membership_singleton_pins_existentials() {
+        // Constrain existentials to be a specific packet, then assert a
+        // literal that uses them; the resulting SPP must accept that pair.
+        let mut store = SPPstore::new(N);
+        let mut learner = ExistentialLearner::new(N);
+        let s = learner.fresh_spp();
+        let target = vec![true, false, true];
+        let e: Vec<Existential> = (0..N).map(|_| learner.fresh_existential()).collect();
+        let pkt_sp = singleton_sp_for_test(&mut store, &target);
+        learner.add_sp_membership(pkt_sp, &e, &store.sp);
+
+        // Literal: s accepts (existentials, [false, true, false]).  With
+        // existentials pinned to `target`, this forces (target, [false,true,false]) ∈ s.
+        let out = vec![false, true, false];
+        learner.add_clause(AbstractClause {
+            literals: vec![Literal {
+                spp: s,
+                ap1: e.iter().map(|&ev| AbstractBit::Exist(ev)).collect(),
+                ap2: out.iter().map(|&b| AbstractBit::Concrete(b)).collect(),
+                polarity: true,
+            }],
+        });
+
+        let result = learner.extract(&mut store).unwrap();
+        assert!(spp_accepts(&store, result[&s], &target, &out));
     }
 
     #[test]

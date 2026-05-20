@@ -57,6 +57,23 @@ impl Instantiate {
         self.holes.insert(hole, spp);
     }
 
+    /// Borrow the inner [`AutWithHoles`] mutably (via the interior `RefCell`).
+    /// Useful for walking the raw structure — `EdgeLabel::Abstract` vs
+    /// `Concrete` — which the ENFA-trait surface hides.
+    pub fn aut(&self) -> std::cell::RefMut<'_, AutWithHoles> {
+        self.aut.borrow_mut()
+    }
+
+    /// The pinned start state.
+    pub fn start_state(&self) -> State {
+        self.start
+    }
+
+    /// Read-only view of the current hole assignment.
+    pub fn holes(&self) -> &HashMap<Hole, spp::SPP> {
+        &self.holes
+    }
+
     /// Check whether this instantiated automaton is contained in `upper_bound`.
     ///
     /// Returns `Ok(())` if every triple accepted by `self` is also accepted by
@@ -149,7 +166,7 @@ impl Instantiate {
 
     /// Check whether `lower_bound` is contained in this instantiated automaton.
     ///
-    /// Symmetric counterpart of [`check_less_than`].  Returns `Ok(())` if
+    /// Symmetric counterpart of [`Self::check_less_than`].  Returns `Ok(())` if
     /// every triple accepted by `lower_bound` is also accepted by `self`.
     /// Otherwise returns a [`LowerBoundCounterexample`] capturing a trace
     /// `lower_bound` accepts that `self` does not.

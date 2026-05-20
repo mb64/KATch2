@@ -1254,7 +1254,7 @@ fn reconstruct_trace<A: ENFA>(
     (path, out_pkt)
 }
 
-fn singleton_sp(store: &mut spp::SPPstore, packet: &[bool]) -> sp::SP {
+pub(crate) fn singleton_sp(store: &mut spp::SPPstore, packet: &[bool]) -> sp::SP {
     // Build the BDD bottom-up.  At each step `sp_val` is the singleton at the
     // current depth and `zero` is the all-rejecting SP at the same depth;
     // both must have matching depth or downstream operations break.
@@ -1427,6 +1427,108 @@ pub fn backward_reachable<A: ENFA>(
     }
 
     back
+}
+
+/// Forward reachability through `aut` along a fixed `trace`.
+///
+/// Returns a map `forward[(q, i)] = sp`, where every entry is a non-empty
+/// SP of carry packets `pkt` such that there is a run from the start that
+/// reaches `(q, pkt)` having consumed the trace up to position `i`.
+///
+/// Mirror of [`backward_reachable`]: a forward fixed-point using
+/// [`spp::SPPstore::push`] instead of `pull`.  The start state is treated
+/// as visible at position 0 (matching the ENFA-trait convention), so
+/// `forward[(start, 0)]` is seeded with the singleton `{trace[0]}`
+/// regardless of `is_visible(start)`.
+///
+/// At every other `(q, i)`:
+///
+/// * visible `q` is restricted to the singleton `{trace[i]}` on entry, and
+/// * a transition `q --s--> q'` advances to position `i + 1` if `q'` is
+///   visible (skipped when `i + 1 >= trace.len()`), else stays at `i`.
+///
+/// `trace` must be non-empty.
+pub fn forward_reachable<A: ENFA>(
+    aut: &A,
+    store: &mut spp::SPPstore,
+    trace: &[Vec<bool>],
+) -> HashMap<(A::State, usize), sp::SP> {
+    assert!(!trace.is_empty(), "trace must be non-empty");
+    let n = trace.len();
+
+    // 1. Forward BFS: enumerate reachable states and cache their structure.
+    let start = aut.start(store);
+    let mut reachable: HashSet<A::State> = HashSet::new();
+    let mut order: Vec<A::State> = Vec::new();
+    let mut adj: HashMap<A::State, Vec<(spp::SPP, A::State)>> = HashMap::new();
+    let mut visible: HashMap<A::State, bool> = HashMap::new();
+
+    reachable.insert(start.clone());
+    order.push(start.clone());
+    let mut stack = vec![start.clone()];
+    while let Some(q) = stack.pop() {
+        let trans = aut.transitions(store, &q);
+        visible.insert(q.clone(), aut.is_visible(store, &q));
+        for (_, qp) in &trans {
+            if reachable.insert(qp.clone()) {
+                order.push(qp.clone());
+                stack.push(qp.clone());
+            }
+        }
+        adj.insert(q, trans);
+    }
+
+    // 2. Concrete-packet SPs for each trace position.
+    let trace_singletons: Vec<sp::SP> = trace.iter().map(|p| singleton_sp(store, p)).collect();
+
+    // 3. Seed: start carries trace[0] at position 0 (start treated as visible).
+    let sp_zero = store.sp.zero;
+    let mut forward: HashMap<(A::State, usize), sp::SP> = HashMap::new();
+    forward.insert((start, 0), trace_singletons[0]);
+
+    // 4. Round-robin fixed-point iteration.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for q in &order {
+            let trans = adj.get(q).unwrap().clone();
+            for (i, _) in trace_singletons.iter().enumerate() {
+                let sp_at_q_i = forward.get(&(q.clone(), i)).copied().unwrap_or(sp_zero);
+                if store.sp.is_zero(sp_at_q_i) {
+                    continue;
+                }
+                for (s, qp) in &trans {
+                    let qp_visible = *visible.get(qp).unwrap();
+                    let i_target = if qp_visible {
+                        if i + 1 >= n {
+                            continue;
+                        }
+                        i + 1
+                    } else {
+                        i
+                    };
+                    let pushed = store.push(sp_at_q_i, *s);
+                    let restricted = if qp_visible {
+                        store.sp.intersect(pushed, trace_singletons[i_target])
+                    } else {
+                        pushed
+                    };
+                    if store.sp.is_zero(restricted) {
+                        continue;
+                    }
+                    let key = (qp.clone(), i_target);
+                    let old = forward.get(&key).copied().unwrap_or(sp_zero);
+                    let combined = store.sp.union(old, restricted);
+                    if combined != old {
+                        forward.insert(key, combined);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    forward
 }
 
 /// One-step ENFA helper used by [`elaborate_step`].  Wraps an inner ENFA so
@@ -2086,6 +2188,92 @@ mod tests {
         assert_eq!(back[&(1, 0)], all);
         assert_eq!(back[&(0, 0)], s0);
         assert_eq!(back.len(), 3);
+    }
+
+    // ── forward_reachable ────────────────────────────────────────────────
+
+    #[test]
+    fn forward_single_state() {
+        // One visible state; trace of length 1.  forward[(0, 0)] = {trace[0]}.
+        let mut store = spp::SPPstore::new(3);
+        let top = store.top;
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![]],
+            outputs: vec![top],
+        };
+        let trace = vec![vec![true, false, true]];
+        let forward = forward_reachable(&dfa, &mut store, &trace);
+        assert_eq!(forward.len(), 1);
+        let expected = singleton_sp(&mut store, &trace[0]);
+        assert_eq!(forward[&(0, 0)], expected);
+    }
+
+    #[test]
+    fn forward_linear_two_visible_states() {
+        // 0 --top--> 1, both visible.  forward[(0,0)] = {trace[0]}; forward[(1,1)] = {trace[1]}.
+        let mut store = spp::SPPstore::new(2);
+        let top = store.top;
+        let zero = store.zero;
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(top, 1)], vec![]],
+            outputs: vec![zero, zero],
+        };
+        let trace = vec![vec![false, false], vec![true, true]];
+        let forward = forward_reachable(&dfa, &mut store, &trace);
+        let s0 = singleton_sp(&mut store, &trace[0]);
+        let s1 = singleton_sp(&mut store, &trace[1]);
+        assert_eq!(forward[&(0, 0)], s0);
+        assert_eq!(forward[&(1, 1)], s1);
+        assert_eq!(forward.len(), 2);
+    }
+
+    #[test]
+    fn forward_with_invisible_intermediate() {
+        // 0 (visible) --top--> 1 (invisible) --top--> 2 (visible).
+        // forward[(0,0)] = {trace[0]}; forward[(1,0)] = all packets (no
+        // visibility restriction); forward[(2,1)] = {trace[1]}.
+        let mut store = spp::SPPstore::new(2);
+        let top = store.top;
+        let zero = store.zero;
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(top, 1)], vec![(top, 2)], vec![]],
+            outputs: vec![zero, zero, zero],
+        };
+        let wrap = RandomVisibility {
+            inner: dfa,
+            visible: vec![true, false, true],
+        };
+        let trace = vec![vec![false, false], vec![true, true]];
+        let forward = forward_reachable(&wrap, &mut store, &trace);
+        let s0 = singleton_sp(&mut store, &trace[0]);
+        let s1 = singleton_sp(&mut store, &trace[1]);
+        let all = store.sp.one;
+        assert_eq!(forward[&(0, 0)], s0);
+        assert_eq!(forward[&(1, 0)], all);
+        assert_eq!(forward[&(2, 1)], s1);
+        assert_eq!(forward.len(), 3);
+    }
+
+    #[test]
+    fn forward_dead_end_after_first_step() {
+        // 0 (visible) --top--> 1 (visible) --zero--> ... trace requires step but
+        // no transition can be taken.  forward only contains (0, 0).
+        let mut store = spp::SPPstore::new(2);
+        let top = store.top;
+        let zero = store.zero;
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(zero, 1)], vec![]],
+            outputs: vec![zero, top],
+        };
+        let trace = vec![vec![false, false], vec![true, true]];
+        let forward = forward_reachable(&dfa, &mut store, &trace);
+        let s0 = singleton_sp(&mut store, &trace[0]);
+        assert_eq!(forward[&(0, 0)], s0);
+        assert_eq!(forward.len(), 1);
     }
 
     #[test]

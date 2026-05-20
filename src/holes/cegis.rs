@@ -25,14 +25,15 @@
 //!   ([`Instantiate::check_greater_than`] is `todo!()`); callers that
 //!   exercise it will panic.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::holes::aut::{DFA, NFA};
-use crate::holes::inst::Instantiate;
-use crate::holes::nk_with_holes::{AutWithHoles, Hole, State};
+use crate::holes::aut::{DFA, NFA, backward_reachable, forward_reachable, singleton_sp};
+use crate::holes::inst::{Instantiate, LowerBoundCounterexample};
+use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Hole, State};
+use crate::sp;
 use crate::spp;
 use crate::spp::existential_learner::{
-    AbstractBit, AbstractClause, ExistentialLearner, Literal, SppVar,
+    AbstractBit, AbstractClause, Existential, ExistentialLearner, Literal, SppVar,
 };
 
 /// Why the CEGIS loop gave up.
@@ -76,7 +77,9 @@ pub fn run<L: NFA, U: DFA>(
         match inst.check_less_than(store, upper_bound) {
             Ok(()) => match inst.check_greater_than(store, lower_bound) {
                 Ok(()) => return Ok(holes_map(&hole_to_var, &cands)),
-                Err(cex) => add_lower_bound_clauses(cex, &mut learner),
+                Err(cex) => {
+                    add_lower_bound_clauses(cex, &mut inst, &hole_to_var, &mut learner, store)
+                }
             },
             Err(witnesses) => add_upper_bound_clause(witnesses, &hole_to_var, &mut learner),
         }
@@ -130,15 +133,176 @@ fn add_upper_bound_clause(
     learner.add_clause(AbstractClause { literals });
 }
 
-/// Convert a lower-bound counterexample into clauses for the learner.
+/// A single hole site discovered while walking the product of the
+/// hole-bearing automaton and the trace.
+struct HoleSite {
+    hole: Hole,
+    /// SP of carry packets at the in-side that *are* forward-reachable
+    /// under the current candidate (set (1) in the design notes).
+    in_sp: sp::SP,
+    /// SP of carry packets at the out-side that (a) plausibly let the rest
+    /// of the trace continue under the all-top instantiation (set (3)) and
+    /// (b) are *not* already forward-reachable under the current candidate
+    /// (complement of set (2)).  Adding an entry whose out-packet falls in
+    /// `out_sp` genuinely expands the candidate's behaviour towards
+    /// satisfying the trace.
+    out_sp: sp::SP,
+}
+
+/// Convert a lower-bound counterexample into an existential disjunctive
+/// clause for the learner.
 ///
-/// **Stub**: turns the counterexample into existential-variable-bearing
-/// clauses.  Will panic until implemented.
+/// For each hole-bearing edge or output summand in the automaton, we compute
+/// three SPs (see the design notes / module docstring): (1) packets that
+/// actually reach the in-side under the *current* candidate, (2) packets
+/// that actually reach the out-side under the same, and (3) packets that
+/// plausibly let the rest of the trace continue under the *all-top*
+/// instantiation.  The site is viable iff `(1)` and `(3) ∩ ¬(2)` are both
+/// non-empty.  We then allocate `2 * num_vars` fresh existentials per
+/// viable site, constrain `ap1 ∈ (1)` and `ap2 ∈ (3) ∩ ¬(2)`, and emit a
+/// positive [`Literal`] over the hole's [`SppVar`].
+///
+/// All literals are joined into one [`AbstractClause`]: "at least one of
+/// these hole sites must accept a fresh (ap1, ap2) of the appropriate shape".
+/// Empty sites list → empty clause → instant UNSAT → `CegisError::Infeasible`
+/// on the next learner extraction (correct: no extension at any site can fix
+/// this counterexample).
 fn add_lower_bound_clauses(
-    _cex: crate::holes::inst::LowerBoundCounterexample,
-    _learner: &mut ExistentialLearner,
+    cex: LowerBoundCounterexample,
+    inst: &mut Instantiate,
+    hole_to_var: &HashMap<Hole, SppVar>,
+    learner: &mut ExistentialLearner,
+    store: &mut spp::SPPstore,
 ) {
-    todo!("lower-bound clause generation not yet implemented")
+    // Forward reach under the *current* candidate.
+    let forward_candidate = forward_reachable(&*inst, store, &cex.trace);
+
+    // Backward reach under all-top: temporarily swap, compute, restore.
+    let saved: HashMap<Hole, spp::SPP> = inst.holes().clone();
+    let top = store.top;
+    for &h in hole_to_var.keys() {
+        inst.set_hole(h, top);
+    }
+    let backward_top = backward_reachable(&*inst, store, &cex.trace, &cex.output);
+    for (&h, &spp) in &saved {
+        inst.set_hole(h, spp);
+    }
+
+    // Walk the raw AutWithHoles to enumerate hole sites.
+    let output_singleton = singleton_sp(store, &cex.output);
+    let n = cex.trace.len();
+    let start = inst.start_state();
+    let sites = {
+        let mut aut_ref = inst.aut();
+        collect_hole_sites(
+            &mut aut_ref,
+            start,
+            n,
+            output_singleton,
+            &forward_candidate,
+            &backward_top,
+            store,
+        )
+    };
+
+    // For each site, allocate existentials, constrain to (in_sp, out_sp),
+    // emit a positive literal over the hole's SPP.
+    let num_vars = store.num_vars() as usize;
+    let literals: Vec<Literal> = sites
+        .into_iter()
+        .map(|site| {
+            let in_vars: Vec<Existential> =
+                (0..num_vars).map(|_| learner.fresh_existential()).collect();
+            let out_vars: Vec<Existential> =
+                (0..num_vars).map(|_| learner.fresh_existential()).collect();
+            learner.add_sp_membership(site.in_sp, &in_vars, &store.sp);
+            learner.add_sp_membership(site.out_sp, &out_vars, &store.sp);
+            Literal {
+                spp: hole_to_var[&site.hole],
+                ap1: in_vars.into_iter().map(AbstractBit::Exist).collect(),
+                ap2: out_vars.into_iter().map(AbstractBit::Exist).collect(),
+                polarity: true,
+            }
+        })
+        .collect();
+    learner.add_clause(AbstractClause { literals });
+}
+
+/// Walk every state forward-reachable from `start` in `aut` and collect a
+/// [`HoleSite`] for each hole-bearing edge or output summand that has
+/// non-empty `(in_sp, out_sp)` under the supplied reachability maps.
+fn collect_hole_sites(
+    aut: &mut AutWithHoles,
+    start: State,
+    n: usize,
+    output_singleton: sp::SP,
+    forward: &HashMap<(State, usize), sp::SP>,
+    backward: &HashMap<(State, usize), sp::SP>,
+    store: &mut spp::SPPstore,
+) -> Vec<HoleSite> {
+    let mut sites = Vec::new();
+    let mut seen: HashSet<State> = HashSet::new();
+    let mut stack = vec![start];
+    let sp_zero = store.sp.zero;
+
+    while let Some(q) = stack.pop() {
+        if !seen.insert(q) {
+            continue;
+        }
+
+        let trans = aut.transitions(store, q);
+        for (label, qp) in &trans {
+            if !seen.contains(qp) {
+                stack.push(*qp);
+            }
+            if let EdgeLabel::Abstract(hole) = label {
+                let qp_visible = aut.is_visible(*qp);
+                for i in 0..n {
+                    let i_target = if qp_visible {
+                        if i + 1 >= n {
+                            continue;
+                        }
+                        i + 1
+                    } else {
+                        i
+                    };
+                    let in_sp = forward.get(&(q, i)).copied().unwrap_or(sp_zero);
+                    if store.sp.is_zero(in_sp) {
+                        continue;
+                    }
+                    let already = forward.get(&(*qp, i_target)).copied().unwrap_or(sp_zero);
+                    let plausible = backward.get(&(*qp, i_target)).copied().unwrap_or(sp_zero);
+                    let not_already = store.sp.complement(already);
+                    let out_sp = store.sp.intersect(plausible, not_already);
+                    if store.sp.is_zero(out_sp) {
+                        continue;
+                    }
+                    sites.push(HoleSite {
+                        hole: *hole,
+                        in_sp,
+                        out_sp,
+                    });
+                }
+            }
+        }
+
+        let summands = aut.output(store, q);
+        for label in &summands {
+            if let EdgeLabel::Abstract(hole) = label {
+                let in_sp = forward.get(&(q, n - 1)).copied().unwrap_or(sp_zero);
+                if store.sp.is_zero(in_sp) {
+                    continue;
+                }
+                sites.push(HoleSite {
+                    hole: *hole,
+                    in_sp,
+                    out_sp: output_singleton,
+                });
+            }
+        }
+    }
+
+    sites
 }
 
 #[cfg(test)]
@@ -245,5 +409,57 @@ mod tests {
         let result = run(aut, start, &[Hole(0), Hole(1)], &lb, &ub, &mut store).unwrap();
         assert_eq!(result[&Hole(0)], store.zero);
         assert_eq!(result[&Hole(1)], store.zero);
+    }
+
+    /// Build the SPP that accepts only the single pair `(p_in, p_out)`.
+    fn singleton_pair_spp(store: &mut spp::SPPstore, p_in: &[bool], p_out: &[bool]) -> spp::SPP {
+        let mut spp_acc = spp::SPP::new(1);
+        let mut zero = spp::SPP::new(0);
+        for (&bi, &bo) in p_in.iter().rev().zip(p_out.iter().rev()) {
+            let next = match (bi, bo) {
+                (false, false) => store.mk(spp_acc, zero, zero, zero),
+                (false, true) => store.mk(zero, spp_acc, zero, zero),
+                (true, false) => store.mk(zero, zero, spp_acc, zero),
+                (true, true) => store.mk(zero, zero, zero, spp_acc),
+            };
+            zero = store.mk(zero, zero, zero, zero);
+            spp_acc = next;
+        }
+        spp_acc
+    }
+
+    /// Lower-bound failure forces refinement.  Expression `Hole(0)` alone;
+    /// upper bound = top; lower bound is the one-state DFA that accepts
+    /// exactly the trace `([false,false])` with output `[true,true]`.  The
+    /// initial candidate (zero) doesn't accept that, so the lower-bound
+    /// check fails — `add_lower_bound_clauses` is exercised end-to-end.
+    /// After refinement, the returned SPP must accept the pair.
+    #[test]
+    fn lower_bound_drives_refinement() {
+        let n_vars: spp::Var = 2;
+        let mut store = spp::SPPstore::new(n_vars);
+        let trace0 = vec![false, false];
+        let output_pkt = vec![true, true];
+        let singleton = singleton_pair_spp(&mut store, &trace0, &output_pkt);
+        let lb = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![]],
+            outputs: vec![singleton],
+        };
+        let ub = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(store.top, 0)]],
+            outputs: vec![store.top],
+        };
+
+        let mut aut = AutWithHoles::new();
+        let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
+
+        let result = run(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
+        let h0 = result[&Hole(0)];
+        assert!(
+            store.accepts(h0, &trace0, &output_pkt),
+            "refined hole SPP must accept the lower-bound's witness pair"
+        );
     }
 }
