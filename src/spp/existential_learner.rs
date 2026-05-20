@@ -1,4 +1,4 @@
-//! Quantifier-free SPP learner with existential boolean variables, using Z3.
+//! SPP learner with existential boolean variables, using Z3.
 //!
 //! Like [`super::clause_learner::ClauseLearner`], this learner accumulates
 //! abstract clauses and extracts an SPP that satisfies all of them.  Abstract
@@ -44,7 +44,7 @@ use super::{SPP, SPPstore, Var};
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Opaque handle to an existential boolean variable owned by the learner.
-/// Obtain one via [`QuantifiedLearner::fresh_existential`].
+/// Obtain one via [`ExistentialLearner::fresh_existential`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Existential(u32);
 
@@ -75,7 +75,7 @@ pub struct AbstractClause {
     pub literals: Vec<Literal>,
 }
 
-/// Returned by [`QuantifiedLearner::extract`] when the clauses are mutually
+/// Returned by [`ExistentialLearner::extract`] when the clauses are mutually
 /// inconsistent (Z3 returned UNSAT).
 #[derive(Debug, Clone)]
 pub struct InconsistentError;
@@ -90,14 +90,14 @@ impl std::fmt::Display for InconsistentError {
 // Learner
 // ────────────────────────────────────────────────────────────────────────────
 
-pub struct QuantifiedLearner {
+pub struct ExistentialLearner {
     num_vars: Var,
     solver: Solver,
     f: FuncDecl,
     existentials: Vec<Bool>,
 }
 
-impl QuantifiedLearner {
+impl ExistentialLearner {
     /// Create a new learner for packets with `num_vars` fields.
     pub fn new(num_vars: Var) -> Self {
         set_global_param("model.compact", "false");
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn test_empty() {
         let mut store = SPPstore::new(N);
-        let mut learner = QuantifiedLearner::new(N);
+        let mut learner = ExistentialLearner::new(N);
         let spp = learner.extract(&mut store).unwrap();
         assert_eq!(spp, store.zero);
     }
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn test_single_positive_unit_clause() {
         let mut store = SPPstore::new(N);
-        let mut learner = QuantifiedLearner::new(N);
+        let mut learner = ExistentialLearner::new(N);
         learner.add_clause(AbstractClause {
             literals: vec![Literal {
                 ap1: ap_concrete(&[false, false, false]),
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn test_single_negative_unit_clause() {
         let mut store = SPPstore::new(N);
-        let mut learner = QuantifiedLearner::new(N);
+        let mut learner = ExistentialLearner::new(N);
         learner.add_clause(AbstractClause {
             literals: vec![Literal {
                 ap1: ap_concrete(&[true, true, true]),
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn test_conflicting_unit_clauses() {
         let mut store = SPPstore::new(N);
-        let mut learner = QuantifiedLearner::new(N);
+        let mut learner = ExistentialLearner::new(N);
         let ap1 = ap_concrete(&[false, false, false]);
         let ap2 = ap_concrete(&[true, false, false]);
         learner.add_clause(AbstractClause {
@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn test_disjunctive_clause() {
         let mut store = SPPstore::new(N);
-        let mut learner = QuantifiedLearner::new(N);
+        let mut learner = ExistentialLearner::new(N);
         // (0,0,0)->(0,0,0) is in SPP  OR  (1,1,1)->(1,1,1) is not in SPP
         learner.add_clause(AbstractClause {
             literals: vec![
@@ -353,7 +353,7 @@ mod tests {
     fn test_existential_only() {
         // (0, 0, e0) -> (1, 1, e0) is in the SPP, for some choice of e0.
         let mut store = SPPstore::new(N);
-        let mut learner = QuantifiedLearner::new(N);
+        let mut learner = ExistentialLearner::new(N);
         let e0 = learner.fresh_existential();
         learner.add_clause(AbstractClause {
             literals: vec![Literal {
@@ -376,7 +376,7 @@ mod tests {
         // (e0, e1, 0) -> (0, 0, 0) is in SPP, AND e0 ∨ e1, AND ¬e0.
         // Forces e0=false, e1=true, so (0,1,0)->(0,0,0) must be accepted.
         let mut store = SPPstore::new(N);
-        let mut learner = QuantifiedLearner::new(N);
+        let mut learner = ExistentialLearner::new(N);
         let e0 = learner.fresh_existential();
         let e1 = learner.fresh_existential();
         learner.add_clause(AbstractClause {
@@ -401,7 +401,7 @@ mod tests {
     fn test_existential_clause_unsat() {
         // e0 AND ¬e0  → inconsistent.
         let mut store = SPPstore::new(N);
-        let mut learner = QuantifiedLearner::new(N);
+        let mut learner = ExistentialLearner::new(N);
         let e0 = learner.fresh_existential();
         learner.add_existential_clause(&[(e0, true)]);
         learner.add_existential_clause(&[(e0, false)]);
@@ -414,7 +414,7 @@ mod tests {
         // Clause 2: (1, 0, 0) -> (0, 0, 0) is NOT in SPP
         // Only e0 = false makes both consistent.
         let mut store = SPPstore::new(N);
-        let mut learner = QuantifiedLearner::new(N);
+        let mut learner = ExistentialLearner::new(N);
         let e0 = learner.fresh_existential();
         learner.add_clause(AbstractClause {
             literals: vec![Literal {

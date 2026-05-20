@@ -4,8 +4,8 @@
 // each path down the BDD has precisely the same depth, namely the number of variables, i.e. the packet size in bits.
 
 pub mod clause_learner;
+pub mod existential_learner;
 pub mod learner;
-pub mod quantified_learner;
 
 use rand::seq::SliceRandom;
 
