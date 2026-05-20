@@ -31,7 +31,9 @@ use crate::holes::aut::{DFA, NFA};
 use crate::holes::inst::Instantiate;
 use crate::holes::nk_with_holes::{AutWithHoles, Hole, State};
 use crate::spp;
-use crate::spp::existential_learner::{AbstractBit, AbstractClause, ExistentialLearner, Literal};
+use crate::spp::existential_learner::{
+    AbstractBit, AbstractClause, ExistentialLearner, Literal, SppVar,
+};
 
 /// Why the CEGIS loop gave up.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,29 +59,37 @@ pub fn run<L: NFA, U: DFA>(
 ) -> Result<spp::SPP, CegisError> {
     let mut learner = ExistentialLearner::new(store.num_vars());
 
-    let mut candidate = match learner.extract(store) {
+    // Allocate one SPP slot per hole.  Single-hole for now; trivially
+    // generalizes to many.
+    let mut hole_to_var: HashMap<Hole, SppVar> = HashMap::new();
+    hole_to_var.insert(hole, learner.fresh_spp());
+
+    let candidates_to_holes_map = |cands: &HashMap<SppVar, spp::SPP>| -> HashMap<Hole, spp::SPP> {
+        hole_to_var.iter().map(|(&h, &v)| (h, cands[&v])).collect()
+    };
+
+    let mut cands = match learner.extract(store) {
         Ok(c) => c,
         Err(_) => return Err(CegisError::Infeasible),
     };
-
-    let mut holes_map = HashMap::new();
-    holes_map.insert(hole, candidate);
-    let mut inst = Instantiate::new(aut, start, holes_map);
+    let mut inst = Instantiate::new(aut, start, candidates_to_holes_map(&cands));
 
     loop {
         match inst.check_less_than(store, upper_bound) {
             Ok(()) => match inst.check_greater_than(store, lower_bound) {
-                Ok(()) => return Ok(candidate),
+                Ok(()) => return Ok(cands[&hole_to_var[&hole]]),
                 Err(cex) => add_lower_bound_clauses(cex, &mut learner),
             },
-            Err(witnesses) => add_upper_bound_clause(witnesses, &mut learner),
+            Err(witnesses) => add_upper_bound_clause(witnesses, &hole_to_var, &mut learner),
         }
 
-        candidate = match learner.extract(store) {
+        cands = match learner.extract(store) {
             Ok(c) => c,
             Err(_) => return Err(CegisError::Infeasible),
         };
-        inst.set_hole(hole, candidate);
+        for (h, v) in &hole_to_var {
+            inst.set_hole(*h, cands[v]);
+        }
     }
 }
 
@@ -89,7 +99,8 @@ pub fn run<L: NFA, U: DFA>(
 /// Semantics: each pair `(in_i, out_i)` is a place the trace relied on the
 /// hole accepting that pair.  To kill the counterexample, the hole's SPP
 /// must *not* accept at least one of them.  That's a disjunction of
-/// negative literals — exactly one [`AbstractClause`].
+/// negative literals — exactly one [`AbstractClause`], each literal targeting
+/// the hole's [`SppVar`].
 ///
 /// An empty witness vec means the violation was purely concrete (no hole
 /// involvement).  Adding an empty clause makes the learner immediately
@@ -97,11 +108,13 @@ pub fn run<L: NFA, U: DFA>(
 /// violation.
 fn add_upper_bound_clause(
     witnesses: Vec<(Hole, (Vec<bool>, Vec<bool>))>,
+    hole_to_var: &HashMap<Hole, SppVar>,
     learner: &mut ExistentialLearner,
 ) {
     let literals = witnesses
         .into_iter()
-        .map(|(_h, (p1, p2))| Literal {
+        .map(|(h, (p1, p2))| Literal {
+            spp: hole_to_var[&h],
             ap1: p1.into_iter().map(AbstractBit::Concrete).collect(),
             ap2: p2.into_iter().map(AbstractBit::Concrete).collect(),
             polarity: false,

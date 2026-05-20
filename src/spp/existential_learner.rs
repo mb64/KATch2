@@ -39,6 +39,8 @@ use z3::{
 use super::learner::{AbstractPacket as ConcretePacket, Learner};
 use super::{SPP, SPPstore, Var};
 
+use std::collections::HashMap;
+
 // ────────────────────────────────────────────────────────────────────────────
 // Public types
 // ────────────────────────────────────────────────────────────────────────────
@@ -47,6 +49,11 @@ use super::{SPP, SPPstore, Var};
 /// Obtain one via [`ExistentialLearner::fresh_existential`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Existential(u32);
+
+/// Opaque handle to a learnable SPP slot owned by the learner.
+/// Obtain one via [`ExistentialLearner::fresh_spp`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SppVar(u32);
 
 /// One bit of an abstract packet.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,11 +67,14 @@ pub enum AbstractBit {
 /// An abstract packet: one [`AbstractBit`] per packet field.
 pub type AbstractPacket = Vec<AbstractBit>;
 
-/// A literal — an abstract packet pair plus a polarity.
+/// A literal — an abstract packet pair plus a polarity, targeting a
+/// specific learnable SPP.
 ///
-/// `polarity = true` means "the pair is in the SPP"; `false` means "the pair
-/// is not in the SPP".
+/// `polarity = true` means "the pair is in `spp`"; `false` means "the pair
+/// is not in `spp`".
 pub struct Literal {
+    /// Which learnable SPP this literal constrains.
+    pub spp: SppVar,
     pub ap1: AbstractPacket,
     pub ap2: AbstractPacket,
     pub polarity: bool,
@@ -93,23 +103,35 @@ impl std::fmt::Display for InconsistentError {
 pub struct ExistentialLearner {
     num_vars: Var,
     solver: Solver,
-    f: FuncDecl,
+    /// One uninterpreted function `Bool^{2n} -> Bool` per learnable SPP,
+    /// indexed by [`SppVar::0`].
+    spps: Vec<FuncDecl>,
     existentials: Vec<Bool>,
 }
 
 impl ExistentialLearner {
-    /// Create a new learner for packets with `num_vars` fields.
+    /// Create a new learner for packets with `num_vars` fields.  No SPP
+    /// slots or existentials exist yet; allocate them with
+    /// [`Self::fresh_spp`] and [`Self::fresh_existential`].
     pub fn new(num_vars: Var) -> Self {
         set_global_param("model.compact", "false");
-        let bool_sort = Sort::bool();
-        let domain_refs: Vec<&Sort> = (0..2 * num_vars).map(|_| &bool_sort).collect();
-        let f = FuncDecl::new("spp_mem", &domain_refs, &Sort::bool());
         Self {
             num_vars,
             solver: Solver::new(),
-            f,
+            spps: Vec::new(),
             existentials: Vec::new(),
         }
+    }
+
+    /// Allocate a fresh learnable SPP slot.  The returned [`SppVar`] can be
+    /// referenced in [`Literal::spp`].
+    pub fn fresh_spp(&mut self) -> SppVar {
+        let id = self.spps.len() as u32;
+        let bool_sort = Sort::bool();
+        let domain_refs: Vec<&Sort> = (0..2 * self.num_vars).map(|_| &bool_sort).collect();
+        let f = FuncDecl::new(format!("spp_mem_{}", id), &domain_refs, &Sort::bool());
+        self.spps.push(f);
+        SppVar(id)
     }
 
     /// Allocate a fresh existential boolean variable.  The returned
@@ -162,7 +184,8 @@ impl ExistentialLearner {
                 }
             }
             let arg_refs: Vec<&dyn Ast> = args.iter().map(|a| a as &dyn Ast).collect();
-            let applied = self.f.apply(&arg_refs).as_bool().expect("f has Bool range");
+            let f = &self.spps[lit.spp.0 as usize];
+            let applied = f.apply(&arg_refs).as_bool().expect("f has Bool range");
             lit_asts.push(if lit.polarity { applied } else { applied.not() });
         }
 
@@ -174,8 +197,17 @@ impl ExistentialLearner {
         self.solver.assert(&body);
     }
 
-    /// Solve and extract an SPP consistent with every added clause.
-    pub fn extract(&mut self, spp_store: &mut SPPstore) -> Result<SPP, InconsistentError> {
+    /// Solve once and extract a concrete SPP for each allocated [`SppVar`].
+    ///
+    /// Returns a map from every [`SppVar`] allocated via [`Self::fresh_spp`]
+    /// to a learned SPP.  Each SPP is the result of feeding its UF's
+    /// [`z3::FuncInterp`] entries into an independent
+    /// [`super::learner::Learner`], inheriting that learner's BDD-style
+    /// inductive bias.
+    pub fn extract(
+        &mut self,
+        spp_store: &mut SPPstore,
+    ) -> Result<HashMap<SppVar, SPP>, InconsistentError> {
         match self.solver.check() {
             SatResult::Unsat => return Err(InconsistentError),
             SatResult::Unknown => panic!("Z3 returned unknown"),
@@ -183,35 +215,42 @@ impl ExistentialLearner {
         }
         let model = self.solver.get_model().expect("model after Sat");
         let n = self.num_vars as usize;
-        let mut learner = Learner::new(self.num_vars);
 
-        // If `f` is never constrained (e.g. no clauses), there is no func interp.
-        if let Some(interp) = model.get_func_interp(&self.f) {
-            for entry in interp.get_entries() {
-                let args = entry.get_args();
-                let polarity = entry
-                    .get_value()
-                    .as_bool()
-                    .and_then(|b| b.as_bool())
-                    .expect("entry value is a concrete Bool");
-                let bits: Vec<bool> = args
-                    .iter()
-                    .map(|a| {
-                        a.as_bool()
-                            .and_then(|b| b.as_bool())
-                            .expect("entry arg is a concrete Bool")
-                    })
-                    .collect();
-                assert_eq!(bits.len(), 2 * n);
-                let ap1: ConcretePacket = bits[..n].iter().map(|&b| Some(b)).collect();
-                let ap2: ConcretePacket = bits[n..].iter().map(|&b| Some(b)).collect();
-                learner
-                    .add_example(ap1, ap2, polarity)
-                    .expect("Z3 model is internally consistent");
+        let mut result = HashMap::with_capacity(self.spps.len());
+        for (idx, f) in self.spps.iter().enumerate() {
+            let mut learner = Learner::new(self.num_vars);
+
+            // If this UF was never constrained, there is no func interp;
+            // we feed no examples and the learner extracts the zero SPP.
+            if let Some(interp) = model.get_func_interp(f) {
+                for entry in interp.get_entries() {
+                    let args = entry.get_args();
+                    let polarity = entry
+                        .get_value()
+                        .as_bool()
+                        .and_then(|b| b.as_bool())
+                        .expect("entry value is a concrete Bool");
+                    let bits: Vec<bool> = args
+                        .iter()
+                        .map(|a| {
+                            a.as_bool()
+                                .and_then(|b| b.as_bool())
+                                .expect("entry arg is a concrete Bool")
+                        })
+                        .collect();
+                    assert_eq!(bits.len(), 2 * n);
+                    let ap1: ConcretePacket = bits[..n].iter().map(|&b| Some(b)).collect();
+                    let ap2: ConcretePacket = bits[n..].iter().map(|&b| Some(b)).collect();
+                    learner
+                        .add_example(ap1, ap2, polarity)
+                        .expect("Z3 model is internally consistent");
+                }
             }
+
+            result.insert(SppVar(idx as u32), learner.extract(spp_store));
         }
 
-        Ok(learner.extract(spp_store))
+        Ok(result)
     }
 }
 
@@ -257,22 +296,34 @@ mod tests {
     fn test_empty() {
         let mut store = SPPstore::new(N);
         let mut learner = ExistentialLearner::new(N);
-        let spp = learner.extract(&mut store).unwrap();
-        assert_eq!(spp, store.zero);
+        let s = learner.fresh_spp();
+        let result = learner.extract(&mut store).unwrap();
+        assert_eq!(result[&s], store.zero);
+    }
+
+    #[test]
+    fn test_empty_no_spps() {
+        // No SPP slots allocated: extract returns an empty map.
+        let mut store = SPPstore::new(N);
+        let mut learner = ExistentialLearner::new(N);
+        let result = learner.extract(&mut store).unwrap();
+        assert!(result.is_empty());
     }
 
     #[test]
     fn test_single_positive_unit_clause() {
         let mut store = SPPstore::new(N);
         let mut learner = ExistentialLearner::new(N);
+        let s = learner.fresh_spp();
         learner.add_clause(AbstractClause {
             literals: vec![Literal {
+                spp: s,
                 ap1: ap_concrete(&[false, false, false]),
                 ap2: ap_concrete(&[true, true, true]),
                 polarity: true,
             }],
         });
-        let spp = learner.extract(&mut store).unwrap();
+        let spp = learner.extract(&mut store).unwrap()[&s];
         assert!(spp_accepts(
             &store,
             spp,
@@ -285,14 +336,16 @@ mod tests {
     fn test_single_negative_unit_clause() {
         let mut store = SPPstore::new(N);
         let mut learner = ExistentialLearner::new(N);
+        let s = learner.fresh_spp();
         learner.add_clause(AbstractClause {
             literals: vec![Literal {
+                spp: s,
                 ap1: ap_concrete(&[true, true, true]),
                 ap2: ap_concrete(&[false, false, false]),
                 polarity: false,
             }],
         });
-        let spp = learner.extract(&mut store).unwrap();
+        let spp = learner.extract(&mut store).unwrap()[&s];
         assert!(!spp_accepts(
             &store,
             spp,
@@ -305,10 +358,12 @@ mod tests {
     fn test_conflicting_unit_clauses() {
         let mut store = SPPstore::new(N);
         let mut learner = ExistentialLearner::new(N);
+        let s = learner.fresh_spp();
         let ap1 = ap_concrete(&[false, false, false]);
         let ap2 = ap_concrete(&[true, false, false]);
         learner.add_clause(AbstractClause {
             literals: vec![Literal {
+                spp: s,
                 ap1: ap1.clone(),
                 ap2: ap2.clone(),
                 polarity: true,
@@ -316,6 +371,7 @@ mod tests {
         });
         learner.add_clause(AbstractClause {
             literals: vec![Literal {
+                spp: s,
                 ap1,
                 ap2,
                 polarity: false,
@@ -328,22 +384,25 @@ mod tests {
     fn test_disjunctive_clause() {
         let mut store = SPPstore::new(N);
         let mut learner = ExistentialLearner::new(N);
+        let s = learner.fresh_spp();
         // (0,0,0)->(0,0,0) is in SPP  OR  (1,1,1)->(1,1,1) is not in SPP
         learner.add_clause(AbstractClause {
             literals: vec![
                 Literal {
+                    spp: s,
                     ap1: ap_concrete(&[false, false, false]),
                     ap2: ap_concrete(&[false, false, false]),
                     polarity: true,
                 },
                 Literal {
+                    spp: s,
                     ap1: ap_concrete(&[true, true, true]),
                     ap2: ap_concrete(&[true, true, true]),
                     polarity: false,
                 },
             ],
         });
-        let spp = learner.extract(&mut store).unwrap();
+        let spp = learner.extract(&mut store).unwrap()[&s];
         let a = spp_accepts(&store, spp, &[false, false, false], &[false, false, false]);
         let b = spp_accepts(&store, spp, &[true, true, true], &[true, true, true]);
         assert!(a || !b, "clause disjunction not satisfied");
@@ -354,15 +413,17 @@ mod tests {
         // (0, 0, e0) -> (1, 1, e0) is in the SPP, for some choice of e0.
         let mut store = SPPstore::new(N);
         let mut learner = ExistentialLearner::new(N);
+        let s = learner.fresh_spp();
         let e0 = learner.fresh_existential();
         learner.add_clause(AbstractClause {
             literals: vec![Literal {
+                spp: s,
                 ap1: vec![c(false), c(false), AbstractBit::Exist(e0)],
                 ap2: vec![c(true), c(true), AbstractBit::Exist(e0)],
                 polarity: true,
             }],
         });
-        let spp = learner.extract(&mut store).unwrap();
+        let spp = learner.extract(&mut store).unwrap()[&s];
         let accepts_false = spp_accepts(&store, spp, &[false, false, false], &[true, true, false]);
         let accepts_true = spp_accepts(&store, spp, &[false, false, true], &[true, true, true]);
         assert!(
@@ -377,10 +438,12 @@ mod tests {
         // Forces e0=false, e1=true, so (0,1,0)->(0,0,0) must be accepted.
         let mut store = SPPstore::new(N);
         let mut learner = ExistentialLearner::new(N);
+        let s = learner.fresh_spp();
         let e0 = learner.fresh_existential();
         let e1 = learner.fresh_existential();
         learner.add_clause(AbstractClause {
             literals: vec![Literal {
+                spp: s,
                 ap1: vec![AbstractBit::Exist(e0), AbstractBit::Exist(e1), c(false)],
                 ap2: ap_concrete(&[false, false, false]),
                 polarity: true,
@@ -388,7 +451,7 @@ mod tests {
         });
         learner.add_existential_clause(&[(e0, true), (e1, true)]);
         learner.add_existential_clause(&[(e0, false)]);
-        let spp = learner.extract(&mut store).unwrap();
+        let spp = learner.extract(&mut store).unwrap()[&s];
         assert!(spp_accepts(
             &store,
             spp,
@@ -415,9 +478,11 @@ mod tests {
         // Only e0 = false makes both consistent.
         let mut store = SPPstore::new(N);
         let mut learner = ExistentialLearner::new(N);
+        let s = learner.fresh_spp();
         let e0 = learner.fresh_existential();
         learner.add_clause(AbstractClause {
             literals: vec![Literal {
+                spp: s,
                 ap1: vec![AbstractBit::Exist(e0), c(false), c(false)],
                 ap2: ap_concrete(&[false, false, false]),
                 polarity: true,
@@ -425,12 +490,13 @@ mod tests {
         });
         learner.add_clause(AbstractClause {
             literals: vec![Literal {
+                spp: s,
                 ap1: ap_concrete(&[true, false, false]),
                 ap2: ap_concrete(&[false, false, false]),
                 polarity: false,
             }],
         });
-        let spp = learner.extract(&mut store).unwrap();
+        let spp = learner.extract(&mut store).unwrap()[&s];
         assert!(spp_accepts(
             &store,
             spp,
@@ -443,5 +509,85 @@ mod tests {
             &[true, false, false],
             &[false, false, false],
         ));
+    }
+
+    #[test]
+    fn test_two_spps_independent() {
+        // Two SPP slots constrained independently: s1 must accept (0,0,0)→(1,1,1),
+        // s2 must NOT accept (0,0,0)→(0,0,0).  Both constraints satisfiable
+        // in isolation; extract returns one SPP per slot.
+        let mut store = SPPstore::new(N);
+        let mut learner = ExistentialLearner::new(N);
+        let s1 = learner.fresh_spp();
+        let s2 = learner.fresh_spp();
+        learner.add_clause(AbstractClause {
+            literals: vec![Literal {
+                spp: s1,
+                ap1: ap_concrete(&[false, false, false]),
+                ap2: ap_concrete(&[true, true, true]),
+                polarity: true,
+            }],
+        });
+        learner.add_clause(AbstractClause {
+            literals: vec![Literal {
+                spp: s2,
+                ap1: ap_concrete(&[false, false, false]),
+                ap2: ap_concrete(&[false, false, false]),
+                polarity: false,
+            }],
+        });
+        let result = learner.extract(&mut store).unwrap();
+        assert!(spp_accepts(
+            &store,
+            result[&s1],
+            &[false, false, false],
+            &[true, true, true],
+        ));
+        assert!(!spp_accepts(
+            &store,
+            result[&s2],
+            &[false, false, false],
+            &[false, false, false],
+        ));
+    }
+
+    #[test]
+    fn test_clause_spanning_two_spps() {
+        // s1 accepts (0,0,0)→(0,0,0)  OR  s2 does NOT accept (1,1,1)→(1,1,1).
+        // A disjunction across distinct SPPs.  The learner must satisfy *one*.
+        let mut store = SPPstore::new(N);
+        let mut learner = ExistentialLearner::new(N);
+        let s1 = learner.fresh_spp();
+        let s2 = learner.fresh_spp();
+        learner.add_clause(AbstractClause {
+            literals: vec![
+                Literal {
+                    spp: s1,
+                    ap1: ap_concrete(&[false, false, false]),
+                    ap2: ap_concrete(&[false, false, false]),
+                    polarity: true,
+                },
+                Literal {
+                    spp: s2,
+                    ap1: ap_concrete(&[true, true, true]),
+                    ap2: ap_concrete(&[true, true, true]),
+                    polarity: false,
+                },
+            ],
+        });
+        let result = learner.extract(&mut store).unwrap();
+        let a = spp_accepts(
+            &store,
+            result[&s1],
+            &[false, false, false],
+            &[false, false, false],
+        );
+        let b = spp_accepts(
+            &store,
+            result[&s2],
+            &[true, true, true],
+            &[true, true, true],
+        );
+        assert!(a || !b, "no disjunct satisfied across two SPPs");
     }
 }
