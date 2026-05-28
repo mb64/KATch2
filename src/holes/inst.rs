@@ -82,16 +82,15 @@ impl Instantiate {
     /// counterexample trace: at every visited edge or output-summand that was
     /// abstract, we record which hole was relied on and the packet pair it
     /// transmitted.
-    ///
-    /// Implementation: build the product NFA `self ∩ complement(upper_bound)`,
-    /// extract a visible trace from it, elaborate the trace through the
-    /// underlying [`AutWithHoles`] to recover invisible intermediates, then
-    /// walk every transition and the final output to collect abstract labels.
     pub fn check_less_than<U: DFA>(
         &self,
         store: &mut spp::SPPstore,
         upper_bound: &U,
     ) -> Result<(), Vec<(Hole, (Vec<bool>, Vec<bool>))>> {
+        // Build the product NFA `self ∩ complement(upper_bound)`, extract a
+        // visible trace from it, elaborate the trace through the underlying
+        // `AutWithHoles` to recover invisible intermediates, then walk every
+        // transition and the final output to collect abstract labels.
         let self_nfa = EpsilonClosure::new(self);
         let complement_ub = ops::complement(upper_bound);
         let product = ops::intersection(&self_nfa, &complement_ub);
@@ -108,7 +107,7 @@ impl Instantiate {
 
         // Splice the invisible intermediates back in.
         let full_path: Vec<(State, Vec<bool>)> =
-            self_nfa.elaborate_trace(store, &self_visible_path);
+            self_nfa.elaborate_trace(store, &self_visible_path, &output_pkt);
 
         Err(self.holes_used_in_trace(store, &full_path, &output_pkt))
     }

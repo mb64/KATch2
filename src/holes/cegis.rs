@@ -67,10 +67,9 @@ pub fn run<L: NFA, U: DFA>(
         hole_to_var.insert(h, learner.fresh_spp());
     }
 
-    let mut cands = match learner.extract(store) {
-        Ok(c) => c,
-        Err(_) => return Err(CegisError::Infeasible),
-    };
+    let mut cands = learner
+        .extract(store)
+        .expect("haven't added any constraints yet");
     let mut inst = Instantiate::new(aut, start, holes_map(&hole_to_var, &cands));
 
     loop {
@@ -78,10 +77,14 @@ pub fn run<L: NFA, U: DFA>(
             Ok(()) => match inst.check_greater_than(store, lower_bound) {
                 Ok(()) => return Ok(holes_map(&hole_to_var, &cands)),
                 Err(cex) => {
-                    add_lower_bound_clauses(cex, &mut inst, &hole_to_var, &mut learner, store)
+                    println!("New lower bound cex: {cex:?}");
+                    add_lower_bound_clauses(cex, &mut inst, &hole_to_var, &mut learner, store);
                 }
             },
-            Err(witnesses) => add_upper_bound_clause(witnesses, &hole_to_var, &mut learner),
+            Err(witnesses) => {
+                println!("New upper bound cex: {witnesses:?}");
+                add_upper_bound_clause(witnesses, &hole_to_var, &mut learner);
+            }
         }
 
         cands = match learner.extract(store) {

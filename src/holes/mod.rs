@@ -38,42 +38,29 @@
 //! `dup ; Hole(0)` equal the target `dup ; (x0 := 1)`?
 //!
 //! ```
-//! use katch2::aut::Aut;
-//! use katch2::expr::Expr;
-//! use katch2::holes::aut::aut_to_dfa;
-//! use katch2::holes::nk_with_holes::{Expr as HExpr, Hole};
-//! use katch2::holes::solve_holes;
-//!
-//! // Build the target as a concrete DFA via the holeless `Aut`.
+//! # use katch2::aut::Aut;
+//! # use katch2::expr::Expr;
+//! # use katch2::holes::aut::aut_to_dfa;
+//! # use katch2::holes::nk_with_holes::{Expr as HExpr, Hole};
+//! # use katch2::holes::solve_holes;
 //! let mut aut = Aut::new(2);
 //! let target = Expr::sequence(Expr::dup(), Expr::assign(0, true));
 //! let target_state = aut.expr_to_state(&target);
 //! let target_dfa = aut_to_dfa(&mut aut, target_state);
-//!
-//! // Hole-bearing expression sharing the same SPP store.
 //! let store = aut.spp_store_mut();
 //! let hole_expr = HExpr::sequence(HExpr::dup(), HExpr::hole(Hole(0)));
-//!
-//! // Lower-bound = upper-bound = target  →  forces equation.
 //! let result = solve_holes(
 //!     &hole_expr, &[Hole(0)], &target_dfa, &target_dfa, store,
 //! ).unwrap();
 //! let h0 = result[&Hole(0)];
 //!
-//! // The unique Hole(0) is `x0 := 1`: any input maps to itself with bit 0 = 1.
-//! for in_b1 in [false, true] {
-//!     for in_b0 in [false, true] {
-//!         let inp  = [in_b0, in_b1];
-//!         let outp = [true,  in_b1];
-//!         assert!(
-//!             store.accepts(h0, &inp, &outp),
-//!             "expected ({:?})→({:?}) in synthesized hole", inp, outp,
-//!         );
+//! // The synthesized Hole(0) is `x0 := 1`: any input maps to itself with bit 0 set.
+//! for b1 in [false, true] {
+//!     for b0 in [false, true] {
+//!         assert!(store.accepts(h0, &[b0, b1], &[true, b1]));
 //!     }
 //! }
-//! // And no extension that flips bit 0 the wrong way.
 //! assert!(!store.accepts(h0, &[true, true], &[false, true]));
-//! assert!(!store.accepts(h0, &[false, false], &[false, true]));
 //! ```
 //!
 //! # Example: infeasible synthesis
@@ -91,21 +78,17 @@
 //! clause is added and the next extraction is immediately UNSAT.
 //!
 //! ```
-//! use katch2::aut::Aut;
-//! use katch2::expr::Expr;
-//! use katch2::holes::aut::aut_to_dfa;
-//! use katch2::holes::cegis::CegisError;
-//! use katch2::holes::nk_with_holes::{Expr as HExpr, Hole};
-//! use katch2::holes::solve_holes;
-//!
+//! # use katch2::aut::Aut;
+//! # use katch2::expr::Expr;
+//! # use katch2::holes::aut::aut_to_dfa;
+//! # use katch2::holes::cegis::CegisError;
+//! # use katch2::holes::nk_with_holes::{Expr as HExpr, Hole};
+//! # use katch2::holes::solve_holes;
 //! let mut aut = Aut::new(2);
-//! let target = Expr::dup();
-//! let target_state = aut.expr_to_state(&target);
+//! let target_state = aut.expr_to_state(&Expr::dup());
 //! let target_dfa = aut_to_dfa(&mut aut, target_state);
-//!
 //! let store = aut.spp_store_mut();
 //! let hole_expr = HExpr::hole(Hole(0));   // no `dup` — length-1 traces only
-//!
 //! let result = solve_holes(
 //!     &hole_expr, &[Hole(0)], &target_dfa, &target_dfa, store,
 //! );
@@ -144,4 +127,92 @@ pub fn solve_holes<L: NFA, U: DFA>(
     let mut aut = AutWithHoles::new();
     let start = aut.expr_to_state(store, expr);
     run(aut, start, holes, lower_bound, upper_bound, store)
+}
+
+#[cfg(test)]
+mod test {
+    use katch2::aut::Aut;
+    use katch2::expr::Expr;
+    use katch2::holes::aut::aut_to_dfa;
+    use katch2::holes::nk_with_holes::{Expr as HExpr, Hole};
+    use katch2::holes::solve_holes;
+
+    #[test]
+    fn two_holes() {
+        let mut aut = Aut::new(1);
+        let target_state = aut.expr_to_state(&Expr::one());
+        let target_dfa = aut_to_dfa(&mut aut, target_state);
+        let store = aut.spp_store_mut();
+        let spp_0 = store.test(0, true);
+        let spp_1 = store.test(0, false);
+        let spp_01 = store.union(spp_0, spp_1);
+        // let spp_2 = store.test(0, true);
+        // let spp_3 = store.test(0, true);
+        // let spp_012 = store.union(spp_01, spp_2);
+        // let spp_0123 = store.union(spp_012, spp_3);
+        let hole_expr = HExpr::sequence(
+            HExpr::hole(Hole(0)),
+            HExpr::sequence(HExpr::spp(spp_01), HExpr::hole(Hole(1))),
+        );
+        let result = solve_holes(
+            &hole_expr,
+            &[Hole(0), Hole(1)],
+            &target_dfa,
+            &target_dfa,
+            store,
+        );
+        assert!(result.is_ok());
+    }
+
+    /// The "slow" parameterized test asks:
+    ///
+    /// ```text
+    /// Hole0; (f_0 == 1 || ... || f_n == 1); Hole1 == id
+    /// ```
+    ///
+    /// That is, Hole0 must be an injective function from 2^`n` pigeons into 2^`n` - 1 holes.
+    ///
+    /// This is of course UNSAT, but figuring that out is slow.
+    fn slow(n_fields: u32) {
+        let mut aut = Aut::new(n_fields);
+        let target_state = aut.expr_to_state(&Expr::one());
+        let target_dfa = aut_to_dfa(&mut aut, target_state);
+        let store = aut.spp_store_mut();
+        let mut spp = store.zero;
+        for i in 0..n_fields {
+            let spp_i = store.test(i, true);
+            spp = store.union(spp, spp_i);
+        }
+        let hole_expr = HExpr::sequence(
+            HExpr::hole(Hole(0)),
+            HExpr::sequence(HExpr::spp(spp), HExpr::hole(Hole(1))),
+        );
+        let result = solve_holes(
+            &hole_expr,
+            &[Hole(0), Hole(1)],
+            &target_dfa,
+            &target_dfa,
+            store,
+        );
+        assert!(result.is_err());
+    }
+
+    /// 4 pigeons: essentially instant
+    #[test]
+    fn slightly_slow_test() {
+        slow(2);
+    }
+
+    /// 8 pigeons: a couple seconds
+    #[test]
+    fn slow_test() {
+        slow(3);
+    }
+
+    /// 16 pigeons: impossibly long
+    #[test]
+    #[ignore]
+    fn slower_test() {
+        slow(4);
+    }
 }

@@ -356,16 +356,26 @@ impl<T: ENFA> EpsilonClosure<T> {
     }
 
     /// Given a trace through the closure NFA -- a sequence of
-    /// `(visible_state, packet)` pairs -- elaborate it into the full path
-    /// through the underlying ENFA `T`, splicing in the invisible states
-    /// the closure abstracted away.  The returned vector starts with
-    /// `visible_path[0]` and ends with `visible_path.last()`; each
-    /// consecutive pair is bridged by [`elaborate_step`].
+    /// `(visible_state, packet)` pairs plus the trace's final `output_pkt` --
+    /// elaborate it into the full path through the underlying ENFA `T`,
+    /// splicing in the invisible states the closure abstracted away.
+    ///
+    /// Invisible states can hide in two places:
+    /// * *Between* two visible states.
+    /// * *After* the last visible state: the closure's `output` at a visible
+    ///   `q` sums in `inner.output(q_inv)` for every invisible `q_inv` in
+    ///   `q`'s ε-closure, so the triple's output may actually be emitted at an
+    ///   invisible state reachable from `q` via an ε-only path. By convention
+    ///   the start state is always included, so there is no symmetric gap at
+    ///   the *start* of the trace.
     pub fn elaborate_trace(
         &self,
         store: &mut spp::SPPstore,
         visible_path: &[(T::State, Vec<bool>)],
+        output_pkt: &[bool],
     ) -> Vec<(T::State, Vec<bool>)> {
+        // `elaborate_step` fills the between-states gaps; `elaborate_tail`
+        // recovers the trailing ε-path to where the output is emitted.
         let mut full: Vec<(T::State, Vec<bool>)> = Vec::new();
         if let Some(first) = visible_path.first() {
             full.push(first.clone());
@@ -375,6 +385,10 @@ impl<T: ENFA> EpsilonClosure<T> {
             let (q_next, p_next) = &w[1];
             let step = elaborate_step(self.inner(), store, q_curr, p_curr, q_next, p_next);
             full.extend(step);
+        }
+        if let Some((q_last, p_last)) = visible_path.last() {
+            let tail = elaborate_tail(self.inner(), store, q_last, p_last, output_pkt);
+            full.extend(tail);
         }
         full
     }
@@ -1598,11 +1612,6 @@ impl<'a, T: ENFA> ENFA for ElaborateStepHelper<'a, T> {
 /// Returns the sequence of `(state, packet)` pairs visited *after* the
 /// source — so the source itself is **not** included, but the destination
 /// (with packet `p_dest`) is the last entry.
-///
-/// The construction follows the strategy of building a tiny helper ENFA
-/// (every state visible, pinned start, single accept) and running
-/// [`get_any_trace`] on it, then forward-simulating the returned trace
-/// through `inner` to recover the state sequence.
 pub fn elaborate_step<T: ENFA>(
     inner: &T,
     store: &mut spp::SPPstore,
@@ -1611,6 +1620,9 @@ pub fn elaborate_step<T: ENFA>(
     q_dest: &T::State,
     p_dest: &[bool],
 ) -> Vec<(T::State, Vec<bool>)> {
+    // Build a tiny helper ENFA (every state visible, pinned start, single
+    // accept), run `get_any_trace` on it, then forward-simulate the returned
+    // trace through `inner` to recover the state sequence.
     let start_spp = force_output_spp(store, p_source);
     let output_spp = filter_input_spp(store, p_dest);
     let zero_spp = store.zero;
@@ -1651,6 +1663,127 @@ pub fn elaborate_step<T: ENFA>(
 
     debug_assert!(state == *q_dest);
     debug_assert!(pkt == p_dest);
+
+    path
+}
+
+/// ENFA helper used by [`elaborate_tail`].  Like [`ElaborateStepHelper`] but
+/// with no fixed destination: from the pinned source it walks only into
+/// *invisible* inner states (the ε-closure the wrapper hides), and any state
+/// whose inner output can emit `output_pkt` is accepting (its output is
+/// intersected with `force_output` to pin the emitted packet).
+struct ElaborateTailHelper<'a, T: ENFA> {
+    inner: &'a T,
+    /// `force_output_spp(p_source)`: relates anything to `p_source`.
+    pre_to_source_spp: spp::SPP,
+    source: T::State,
+    /// `force_output_spp(output_pkt)`: intersected with each state's inner
+    /// output so a trace is accepting only when it can emit `output_pkt`.
+    force_output: spp::SPP,
+    zero_spp: spp::SPP,
+}
+
+impl<'a, T: ENFA> ENFA for ElaborateTailHelper<'a, T> {
+    type State = HelperState<T::State>;
+
+    fn start(&self, _store: &mut spp::SPPstore) -> Self::State {
+        HelperState::PreStart
+    }
+
+    fn is_visible(&self, _store: &mut spp::SPPstore, _q: &Self::State) -> bool {
+        true
+    }
+
+    fn transitions(
+        &self,
+        store: &mut spp::SPPstore,
+        q: &Self::State,
+    ) -> Vec<(spp::SPP, Self::State)> {
+        match q {
+            HelperState::PreStart => vec![(
+                self.pre_to_source_spp,
+                HelperState::Inner(self.source.clone()),
+            )],
+            HelperState::Inner(s) => {
+                let trans = self.inner.transitions(store, s);
+                let mut result = Vec::new();
+                for (spp, q_next) in trans {
+                    if self.inner.is_visible(store, &q_next) {
+                        continue;
+                    }
+                    result.push((spp, HelperState::Inner(q_next)));
+                }
+                result
+            }
+        }
+    }
+
+    fn output(&self, store: &mut spp::SPPstore, q: &Self::State) -> spp::SPP {
+        match q {
+            HelperState::PreStart => self.zero_spp,
+            HelperState::Inner(s) => {
+                let out = self.inner.output(store, s);
+                store.intersect(out, self.force_output)
+            }
+        }
+    }
+}
+
+/// Elaborate the invisible *tail* of an `EpsilonClosure<T>` trace: starting
+/// from the last visible state `q_last` (at packet `p_last`), recover the
+/// ε-only path through invisible inner states that ends where `output_pkt` is
+/// actually emitted.
+///
+/// Returns the sequence of `(state, packet)` pairs visited *after* `q_last`
+/// (so `q_last` is **not** included).  The result is empty when `q_last`'s own
+/// inner output already emits `output_pkt`.
+pub fn elaborate_tail<T: ENFA>(
+    inner: &T,
+    store: &mut spp::SPPstore,
+    q_last: &T::State,
+    p_last: &[bool],
+    output_pkt: &[bool],
+) -> Vec<(T::State, Vec<bool>)> {
+    // Same strategy as `elaborate_step`: build a tiny all-visible helper ENFA,
+    // run `get_any_trace` on it, then forward-simulate through `inner`.
+    let start_spp = force_output_spp(store, p_last);
+    let force_output = force_output_spp(store, output_pkt);
+    let zero_spp = store.zero;
+
+    let helper = ElaborateTailHelper {
+        inner,
+        pre_to_source_spp: start_spp,
+        source: q_last.clone(),
+        force_output,
+        zero_spp,
+    };
+
+    let (pkt_trace_full, _output_pkt) = get_any_trace(&helper, store)
+        .expect("elaborate_tail: no inner ε-path emits the trace's output packet");
+    // pkt_trace_full[0] is the (arbitrary) PreStart packet; [1] is `p_last` at
+    // `Inner(q_last)`; the rest are the spliced invisible-state packets.
+    let pkt_trace: Vec<Vec<bool>> = pkt_trace_full.into_iter().skip(2).collect();
+
+    let mut path: Vec<(T::State, Vec<bool>)> = Vec::new();
+    let mut state = q_last.clone();
+    let mut pkt: Vec<bool> = p_last.to_vec();
+    for next_pkt in pkt_trace {
+        let mut found: Option<T::State> = None;
+        for (spp, q_next) in inner.transitions(store, &state) {
+            if inner.is_visible(store, &q_next) {
+                continue;
+            }
+            if store.accepts(spp, &pkt, &next_pkt) {
+                found = Some(q_next);
+                break;
+            }
+        }
+        let q_next = found
+            .expect("forward simulation must find an invisible transition matching the trace step");
+        state = q_next;
+        pkt = next_pkt;
+        path.push((state.clone(), pkt.clone()));
+    }
 
     path
 }
@@ -1760,9 +1893,10 @@ mod tests {
 
             let trace = get_any_trace_with_states(&closure, aut.spp_store_mut())
                 .expect("non-empty closure should yield a trace");
-            let (visible_path, _output_pkt) = trace;
+            let (visible_path, output_pkt) = trace;
 
-            let full_path = closure.elaborate_trace(aut.spp_store_mut(), &visible_path);
+            let full_path =
+                closure.elaborate_trace(aut.spp_store_mut(), &visible_path, &output_pkt);
 
             // Every consecutive `(q, p) -> (q', p')` in the elaborated path
             // must be backed by a real inner transition matching the packets.
@@ -1784,13 +1918,24 @@ mod tests {
                 );
             }
 
-            // The visible-path endpoints must coincide with the elaboration's.
+            // The elaboration starts at the visible start...
             let (start_q, start_p) = &visible_path[0];
-            let (end_q, end_p) = visible_path.last().unwrap();
             assert_eq!(*start_q, full_path.first().unwrap().0);
             assert_eq!(start_p, &full_path.first().unwrap().1);
-            assert_eq!(*end_q, full_path.last().unwrap().0);
-            assert_eq!(end_p, &full_path.last().unwrap().1);
+
+            // ...and ends at a state whose inner output emits the trace's
+            // output packet -- possibly an invisible state spliced in past the
+            // last visible one (the `elaborate_tail` fix).
+            let (end_q, end_p) = full_path.last().unwrap().clone();
+            let out_spp = closure.inner().output(aut.spp_store_mut(), &end_q);
+            assert!(
+                aut.spp_store_mut().accepts(out_spp, &end_p, &output_pkt),
+                "trial {}: elaborated path ends at ({}, {:?}) which does not emit output {:?}",
+                trial,
+                end_q,
+                end_p,
+                output_pkt,
+            );
         }
     }
 
