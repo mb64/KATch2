@@ -1050,6 +1050,23 @@ pub fn aut_to_dfa(aut: &mut crate::aut::Aut, start: usize) -> ExplicitDFA {
     }
 }
 
+/// Convert a [`crate::expr::Expr`] into a DFA.
+///
+/// A helper function which wraps [`crate::aut`].
+pub fn expr_to_dfa(expr: &crate::expr::Expr, store: &mut spp::SPPstore) -> ExplicitDFA {
+    // Take the SPP store temporarily (we need full ownership)
+    let fake_store = spp::SPPstore::new(0);
+    let mut aut = crate::aut::Aut::from_spp_store(std::mem::replace(store, fake_store));
+
+    let start_state = aut.expr_to_state(expr);
+    let dfa = aut_to_dfa(&mut aut, start_state);
+
+    // Put the SPP store back
+    std::mem::swap(store, aut.spp_store_mut());
+
+    dfa
+}
+
 // ---- Algorithms -------------------------------------------------------------
 
 /// Returns `true` if no (input, trace, output) triple is accepted by `aut`.

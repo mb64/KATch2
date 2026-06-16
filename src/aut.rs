@@ -61,17 +61,21 @@ pub struct Aut {
 }
 
 impl Aut {
-    pub fn new(num_vars: u32) -> Self {
+    pub fn from_spp_store(store: spp::SPPstore) -> Self {
         Aut {
             aexprs: vec![],
             aexpr_map: HashMap::new(),
             delta_map: HashMap::new(),
             epsilon_map: HashMap::new(),
             eliminate_dup_cache: HashMap::new(),
-            spp: spp::SPPstore::new(num_vars),
+            spp: store,
             // num_vars,
             num_calls: 0,
         }
+    }
+
+    pub fn new(num_vars: u32) -> Self {
+        Self::from_spp_store(spp::SPPstore::new(num_vars))
     }
 
     // --- States ---
