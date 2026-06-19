@@ -850,7 +850,7 @@ pub mod ops {
 
     /// State of [`Union`]: a fresh `Start` that fans out into either side's
     /// start, plus tagged inner states.
-    #[derive(Clone, PartialEq, Eq, Hash)]
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum UnionState<L, R> {
         Start,
         Left(L),

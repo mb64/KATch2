@@ -1,12 +1,16 @@
-//! NetKAT with holes — synthesizing concrete SPPs for unknown sub-expressions.
+//! NetKAT with holes — synthesizing NetKAT values for unknown sub-expressions.
 //!
 //! # Overview
 //!
 //! A [`nk_with_holes::Expr`] is a NetKAT expression whose primitives may be
 //! either a concrete SPP or an opaque [`nk_with_holes::Hole`].  Given upper
 //! and lower bounds on the overall expression's behaviour, the goal is to
-//! synthesize one SPP per hole that lands the expression inside the
+//! synthesize one candidate per hole that lands the expression inside the
 //! `lower_bound ⊆ expr[holes] ⊆ upper_bound` interval.
+//!
+//! What a candidate may be is configurable: at one extreme a candidate is a
+//! single dup-free [`spp::SPP`], at the other it is an arbitrary, possibly
+//! dup-ful sub-program.  See [`candidate::Candidate`].
 //!
 //! The submodules cover the pieces:
 //!
@@ -14,7 +18,7 @@
 //!   automaton ([`nk_with_holes::AutWithHoles`]); states are pairs of an
 //!   ε-derivative class and a visibility flag, and edges/output summands
 //!   are labelled either `Concrete(spp)` or `Abstract(Hole)`.
-//! * [`inst`] — a concrete SPP assignment for each hole, wrapped to expose
+//! * [`inst`] — a concrete NFA assignment for each hole, wrapped to expose
 //!   the resulting ENFA.  Surfaces both [`inst::Instantiate::check_less_than`]
 //!   (upper-bound counterexamples) and [`inst::Instantiate::check_greater_than`]
 //!   (lower-bound counterexamples).
@@ -25,11 +29,25 @@
 //!   [`crate::holes::smt::SmtLearner`] with clauses
 //!   derived from each bound check.
 //!
-//! # Convenience entry point
+//! # Convenience entry points
 //!
-//! [`solve_holes`] is the high-level helper most callers want: hand it an
-//! [`nk_with_holes::Expr`], the hole labels appearing in it, both bounds,
-//! and an SPP store; receive the synthesized assignment per hole.
+//! Both helpers take the same arguments — an [`nk_with_holes::Expr`], the hole
+//! labels appearing in it, both bounds, and an SPP store — and return the
+//! synthesized assignment per hole.  They differ only in the search space they
+//! consider for each hole:
+//!
+//! * [`solve_holes`] fills every hole with a single dup-free [`spp::SPP`].  It
+//!   is the right choice when the holes are meant to be plain
+//!   packet-transformations, and it is what most callers want.
+//! * [`solve_holes_full`] fills every hole with an arbitrary, possibly dup-ful
+//!   sub-program (a union of an [`spp::SPP`] and a richer
+//!   [`cand::Cand`]).  Use it when a hole may need to emit `dup`s — that is,
+//!   produce traces longer than one step.
+//!
+//! Because [`solve_holes_full`] searches a strictly larger space, it can solve
+//! problems [`solve_holes`] reports as [`cegis::CegisError::Infeasible`] (see
+//! the second example below).  Both are thin wrappers over
+//! [`solve_holes_general`], which is generic over the candidate kind.
 //!
 //! # Example: `expr[hole] == target`
 //!
@@ -61,19 +79,18 @@
 //! assert!(!store.accepts(h0, &[true, true], &[false, true]));
 //! ```
 //!
-//! # Example: infeasible synthesis
+//! # Example: when the candidate kind matters
 //!
-//! When the bounds force a behaviour the hole cannot reach, the loop
-//! converges to `Infeasible`.  Here we ask for `Hole(0) == dup` — but a
-//! hole is filled with an *SPP*, which contributes no trace step, while
-//! `dup` is the operation that produces length-2 traces.  No SPP value can
-//! bridge this structural mismatch.
+//! Here we ask for `Hole(0) == dup`.  An [`spp::SPP`] contributes no trace
+//! step, while `dup` is the operation that produces length-2 traces, so no
+//! single SPP can realize it — the *search space* of [`solve_holes`], not the
+//! bounds themselves, is what makes this infeasible.
 //!
-//! The lower-bound check fires on the first iteration; site collection
-//! finds zero viable hole sites (the only candidate site is `Hole(0)`'s
-//! output summand, but `forward_candidate[(start, 1)]` is empty since the
-//! expression has no way to advance the trace position), so an empty
-//! clause is added and the next extraction is immediately UNSAT.
+//! For [`solve_holes`], the lower-bound check fires on the first iteration;
+//! site collection finds zero viable hole sites (the only candidate site is
+//! `Hole(0)`'s output summand, but `forward_candidate[(start, 1)]` is empty
+//! since the expression has no way to advance the trace position), so an empty
+//! clause is added and the next extraction is immediately UNSAT:
 //!
 //! ```
 //! # use katch2::expr::Expr;
@@ -90,6 +107,24 @@
 //! );
 //! assert!(matches!(result, Err(CegisError::Infeasible)));
 //! ```
+//!
+//! [`solve_holes_full`], whose candidates may be dup-ful, can fill `Hole(0)`
+//! with `dup` itself, so the same query succeeds:
+//!
+//! ```
+//! # use katch2::expr::Expr;
+//! # use katch2::holes::aut::expr_to_dfa;
+//! # use katch2::holes::nk_with_holes::{Expr as HExpr, Hole};
+//! # use katch2::holes::solve_holes_full;
+//! # use katch2::spp::SPPstore;
+//! let mut store = SPPstore::new(2);
+//! let target = expr_to_dfa(&Expr::dup(), &mut store);
+//! let hole_expr = HExpr::hole(Hole(0));
+//! let result = solve_holes_full(
+//!     &hole_expr, &[Hole(0)], &target, &target, &mut store,
+//! );
+//! assert!(result.is_ok());
+//! ```
 
 pub mod aut;
 pub mod cand;
@@ -101,21 +136,43 @@ pub mod smt;
 
 use std::collections::HashMap;
 
-use crate::holes::aut::{ExplicitDFA, NFA};
-use crate::holes::cegis::{CegisError, run};
-use crate::holes::nk_with_holes::{AutWithHoles, Expr, Hole};
 use crate::spp;
+use aut::{ExplicitDFA, NFA, ops};
+use candidate::Candidate;
+use cegis::{CegisError, run};
+use nk_with_holes::{AutWithHoles, Expr, Hole};
 
 /// Solve `lower_bound ⊆ expr[holes] ⊆ upper_bound` for the holes appearing
-/// in `expr`, returning the synthesized SPP per hole on success.
+/// in `expr`, filling each hole with a candidate of kind `C`.
+///
+/// This is the generic core behind [`solve_holes`] (where `C` is a dup-free
+/// [`spp::SPP`]) and [`solve_holes_full`] (where `C` may be dup-ful); the two
+/// public helpers just pin `C`.
 ///
 /// Convenience wrapper around [`cegis::run`] that compiles the hole-bearing
 /// [`Expr`] into an [`AutWithHoles`] internally.  Every hole label the
 /// expression can reach must be listed in `holes` (the loop panics on
 /// encountering an unmapped hole when it instantiates the expression).
 ///
-/// Returns [`CegisError::Infeasible`] if the constraints are mutually
-/// unsatisfiable (no assignment can land inside the interval).
+/// Returns [`CegisError::Infeasible`] when no assignment of kind `C` lands the
+/// expression inside the interval — note this is relative to the candidate
+/// kind, so a problem infeasible for one `C` may be solvable for a richer one.
+pub fn solve_holes_general<'a, L: NFA, C: Candidate<'a>>(
+    expr: &Expr,
+    holes: &[Hole],
+    lower_bound: &L,
+    upper_bound: &'a ExplicitDFA,
+    store: &mut spp::SPPstore,
+) -> Result<HashMap<Hole, C>, CegisError> {
+    let mut aut = AutWithHoles::new();
+    let start = aut.expr_to_state(store, expr);
+    run::<C, L>(aut, start, holes, lower_bound, upper_bound, store)
+}
+
+/// Solve `lower_bound ⊆ expr[holes] ⊆ upper_bound`, filling each hole with a
+/// single dup-free [`spp::SPP`].
+///
+/// This is the dup-free specialization of [`solve_holes_general`].
 pub fn solve_holes<L: NFA>(
     expr: &Expr,
     holes: &[Hole],
@@ -123,9 +180,24 @@ pub fn solve_holes<L: NFA>(
     upper_bound: &ExplicitDFA,
     store: &mut spp::SPPstore,
 ) -> Result<HashMap<Hole, spp::SPP>, CegisError> {
-    let mut aut = AutWithHoles::new();
-    let start = aut.expr_to_state(store, expr);
-    run::<spp::SPP, L>(aut, start, holes, lower_bound, upper_bound, store)
+    solve_holes_general(expr, holes, lower_bound, upper_bound, store)
+}
+
+/// Solve `lower_bound ⊆ expr[holes] ⊆ upper_bound`, filling each hole with an
+/// arbitrary, possibly dup-ful candidate: a union of a dup-free [`spp::SPP`]
+/// and a richer [`cand::Cand`] that pulls its states from `upper_bound`.
+///
+/// This searches a strictly larger space than [`solve_holes`], so it can solve
+/// problems that solver reports as [`CegisError::Infeasible`] (e.g. a hole that
+/// must equal `dup`).
+pub fn solve_holes_full<'a, L: NFA>(
+    expr: &Expr,
+    holes: &[Hole],
+    lower_bound: &L,
+    upper_bound: &'a ExplicitDFA,
+    store: &mut spp::SPPstore,
+) -> Result<HashMap<Hole, ops::Union<spp::SPP, cand::Cand<'a>>>, CegisError> {
+    solve_holes_general(expr, holes, lower_bound, upper_bound, store)
 }
 
 #[cfg(test)]
@@ -205,5 +277,54 @@ mod test {
     #[ignore]
     fn slower_test() {
         slow(4);
+    }
+
+    use katch2::holes::cegis::CegisError;
+    use katch2::holes::solve_holes_full;
+
+    /// `solve_holes_full` should solve a problem that `solve_holes` already
+    /// handles with a plain dup-free SPP: `dup ; Hole(0) == dup ; (x0 := 1)`.
+    /// The synthesized `Hole(0)` is the assignment `x0 := 1`.
+    #[test]
+    fn full_solves_spp_problem() {
+        let mut store = SPPstore::new(2);
+        let target = Expr::sequence(Expr::dup(), Expr::assign(0, true));
+        let target_dfa = expr_to_dfa(&target, &mut store);
+        let hole_expr = HExpr::sequence(HExpr::dup(), HExpr::hole(Hole(0)));
+        let result = solve_holes_full(&hole_expr, &[Hole(0)], &target_dfa, &target_dfa, &mut store);
+        assert!(result.is_ok());
+    }
+
+    /// `Hole(0) == dup` is infeasible for `solve_holes` (an SPP contributes no
+    /// trace step, so it can never produce the length-2 trace of `dup`), but
+    /// `solve_holes_full` may fill the hole with a dup-ful candidate, so it
+    /// must succeed.  This is the case that exercises the extra power of the
+    /// full solver over the SPP-only one.
+    #[test]
+    fn full_solves_dup_where_spp_cannot() {
+        let mut store = SPPstore::new(2);
+        let target = expr_to_dfa(&Expr::dup(), &mut store);
+        let hole_expr = HExpr::hole(Hole(0));
+
+        // SPP-only is infeasible.
+        let spp_result = solve_holes(&hole_expr, &[Hole(0)], &target, &target, &mut store);
+        assert!(matches!(spp_result, Err(CegisError::Infeasible)));
+
+        // The full solver can realize `dup` with a dup-ful candidate.
+        let full_result = solve_holes_full(&hole_expr, &[Hole(0)], &target, &target, &mut store);
+        assert!(full_result.is_ok());
+    }
+
+    /// When the bounds themselves are unsatisfiable independent of the hole
+    /// (`one ⊆ Hole(0) ⊆ zero`, but `one ⊄ zero`), even the full solver must
+    /// report `Infeasible`.
+    #[test]
+    fn full_infeasible_bounds() {
+        let mut store = SPPstore::new(1);
+        let lower = expr_to_dfa(&Expr::one(), &mut store);
+        let upper = expr_to_dfa(&Expr::zero(), &mut store);
+        let hole_expr = HExpr::hole(Hole(0));
+        let result = solve_holes_full(&hole_expr, &[Hole(0)], &lower, &upper, &mut store);
+        assert!(matches!(result, Err(CegisError::Infeasible)));
     }
 }

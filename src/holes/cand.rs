@@ -195,22 +195,6 @@ impl<'a> Cand<'a> {
     ///
     /// Returns [`ConflictError`] if two examples give the same concrete `Input`
     /// opposite labels.
-    ///
-    /// # Algorithm
-    ///
-    /// Each `Input` is flattened into a path of decisions: one per field level
-    /// (`2*pkt_in[i] + pkt_start[i]`, width 4), one per state level
-    /// (`states[j]`, width `num_states`), then one per output level
-    /// (`2*pkt_end[i] + pkt_out[i]`, width 4), ending in the label.  The
-    /// decision diagram is then built bottom-up, one layer at a time, like a
-    /// leveled BDD reduction: examples sharing a prefix land on the same node
-    /// (so they are never separated when they shouldn't be — that's the
-    /// "in-edge" constraint), and two nodes coincide exactly when their child
-    /// rows are identical after filling don't-care branches.  Don't-cares (a
-    /// branch no example exercises) are filled with one of the node's defined
-    /// children, which is what biases the result toward fewer, more-shared
-    /// nodes.  The output levels build an [`spp::SPP`] (via [`spp::SPPstore`]);
-    /// the boundary wraps each SPP in a [`CandNode::Root`].
     pub fn from_examples(
         store: &mut spp::SPPstore,
         dfa: &'a ExplicitDFA,

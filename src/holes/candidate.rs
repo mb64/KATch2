@@ -8,7 +8,7 @@
 //!
 //! Three implementations:
 //!
-//! * [`spp::SPP`] — a single dup-free step
+//! * [`SPP`] — a single dup-free step
 //! * [`Cand`] — a richer, DFA-state-dependent sub-program that pulls its states
 //!   from the **upper-bound** DFA.
 //! * [`ops::Union`] -- union together an `SPP` and a `Cand` to actually solve full NetKAT synthesis
@@ -27,7 +27,7 @@ use crate::spp::{SPP, SPPstore};
 /// A thing CEGIS can synthesize for a hole.
 ///
 /// `'a` is the lifetime of the upper-bound DFA that [`Cand`] candidates borrow.
-pub trait Candidate<'a>: NFA + Clone {
+pub trait Candidate<'a>: ENFA<State: Ord> + NFA + Clone {
     /// The learner slot handle for this candidate kind ([`SppVar`] / [`CandVar`]).
     type Var: Copy + Eq + Hash;
 
@@ -61,7 +61,7 @@ pub trait Candidate<'a>: NFA + Clone {
     /// `trace` is the subtrace the hole consumes between its in- and out-side
     /// (empty if it consumes nothing).  Returns `None` if this candidate kind
     /// cannot realize a traversal that consumes exactly `trace` (e.g. an
-    /// [`spp::SPP`] consumes nothing, so any non-empty `trace` is `None`).
+    /// [`SPP`] consumes nothing, so any non-empty `trace` is `None`).
     fn accept_literal(
         var: Self::Var,
         learner: &mut SmtLearner<'a>,
@@ -257,7 +257,19 @@ impl<'a> Candidate<'a> for ops::Union<SPP, Cand<'a>> {
         if inner.is_empty() {
             SPP::reject_literal(var.0, pkt_in, &[], pkt_out)
         } else {
-            let inner: Vec<(CandState, Vec<bool>)> = inner.iter().map(|(q, pk)| todo!()).collect();
+            // A non-empty inner trace must have gone through the `Cand` (Right)
+            // side: the `SPP` side has no transitions, so it can only output
+            // directly (an empty inner trace).  Union transitions keep `Right`
+            // states `Right`, so every recorded state is `Right(cand_state)`.
+            let inner: Vec<(CandState, Vec<bool>)> = inner
+                .iter()
+                .map(|(q, pk)| match q {
+                    ops::UnionState::Right(cs) => (cs.clone(), pk.clone()),
+                    ops::UnionState::Start | ops::UnionState::Left(_) => {
+                        unreachable!("a non-empty union hole traversal goes through the Cand side")
+                    }
+                })
+                .collect();
             Cand::reject_literal(var.1, pkt_in, &inner, pkt_out)
         }
     }

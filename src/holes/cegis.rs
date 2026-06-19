@@ -64,10 +64,7 @@ pub fn run<'a, C: Candidate<'a>, L: NFA>(
     lower_bound: &L,
     upper_bound: &'a ExplicitDFA,
     store: &mut spp::SPPstore,
-) -> Result<HashMap<Hole, C>, CegisError>
-where
-    <C as ENFA>::State: Ord,
-{
+) -> Result<HashMap<Hole, C>, CegisError> {
     let mut learner = SmtLearner::new(store.num_vars());
 
     let mut hole_to_var: HashMap<Hole, C::Var> = HashMap::new();
