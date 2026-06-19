@@ -8,9 +8,7 @@
 //!
 //! The public API closely mirrors the `ENFA` trait — `transitions`,
 //! `output`, `is_visible` — except that edges carry an [`EdgeLabel`]
-//! (`Concrete(SPP)` or `Abstract(Hole)`) rather than a single SPP, and
-//! `output` returns a *sum* of atomic summands (since with holes a state's
-//! epsilon need not be a single SPP).
+//! (`Concrete(SPP)` or `Abstract(Hole)`) rather than a single SPP.
 //!
 //! The SPP store is threaded as a `&mut spp::SPPstore` parameter rather
 //! than owned by the automaton, so callers can hold mutable borrows of
@@ -107,7 +105,6 @@ pub struct AutWithHoles {
     /// the source state's visibility (only on its `AExpr`), so we cache
     /// once per expression and reuse across visibilities.
     delta_cache: HashMap<AExprIdx, Vec<(EdgeLabel, State)>>,
-    output_cache: HashMap<AExprIdx, Vec<EdgeLabel>>,
 }
 
 impl AutWithHoles {
@@ -116,7 +113,6 @@ impl AutWithHoles {
             aexprs: Vec::new(),
             aexpr_map: HashMap::new(),
             delta_cache: HashMap::new(),
-            output_cache: HashMap::new(),
         }
     }
 
@@ -172,7 +168,7 @@ impl AutWithHoles {
     /// itself accepts the empty trace.  An empty vector means "the zero
     /// SPP" (no acceptance).  A single entry `Concrete(one)` means "the
     /// identity SPP" (always accept the empty trace).
-    pub fn output(&mut self, store: &mut spp::SPPstore, q: State) -> Vec<EdgeLabel> {
+    pub fn output(&mut self, store: &mut spp::SPPstore, q: State) -> spp::SPP {
         self.output_for_aexpr(store, q.aexpr)
     }
 
@@ -348,7 +344,14 @@ impl AutWithHoles {
     ) -> Vec<(EdgeLabel, State)> {
         let node = self.get_expr(aexpr).clone();
         match node {
-            AExpr::Spp(_) | AExpr::Hole(_) => Vec::new(),
+            AExpr::Spp(_) => Vec::new(),
+            AExpr::Hole(hole) => {
+                let target = State {
+                    aexpr: self.mk_spp(store.one),
+                    visible: false,
+                };
+                vec![(EdgeLabel::Abstract(hole), target)]
+            }
             AExpr::Dup => {
                 // Crossing dup: identity SPP, target is `1` and visible.
                 let one_aexpr = self.mk_spp(store.one);
@@ -368,8 +371,7 @@ impl AutWithHoles {
             AExpr::Sequence(children) => self.delta_sequence(store, &children),
             AExpr::Star(inner) => {
                 // δ(e*) = δ(e ; e*).
-                let seq = self.mk_sequence_n(store, vec![inner, aexpr]);
-                self.delta_for_aexpr(store, seq)
+                self.delta_sequence(store, &[inner, aexpr])
             }
         }
     }
@@ -379,152 +381,63 @@ impl AutWithHoles {
         store: &mut spp::SPPstore,
         children: &[AExprIdx],
     ) -> Vec<(EdgeLabel, State)> {
-        debug_assert!(
-            !children.is_empty(),
-            "Sequence should have at least one child"
-        );
+        // In a sequence, either the head steps (and the tail comes along for
+        // the ride), or the head outputs and we yield to the tail.
         let head = children[0];
-        let tail: Vec<AExprIdx> = children[1..].to_vec();
-        let head_expr = self.get_expr(head).clone();
-        match head_expr {
-            AExpr::Spp(s) => {
-                let rest = self.mk_sequence_n(store, tail);
-                let target = State {
-                    aexpr: rest,
-                    visible: false,
-                };
-                vec![(EdgeLabel::Concrete(s), target)]
-            }
-            AExpr::Hole(h) => {
-                let rest = self.mk_sequence_n(store, tail);
-                let target = State {
-                    aexpr: rest,
-                    visible: false,
-                };
-                vec![(EdgeLabel::Abstract(h), target)]
-            }
-            AExpr::Dup => {
-                let rest = self.mk_sequence_n(store, tail);
-                let target = State {
-                    aexpr: rest,
-                    visible: true,
-                };
-                vec![(EdgeLabel::Concrete(store.one), target)]
-            }
-            AExpr::Union(branches) => {
-                // Distribute the union out of the head.
-                let mut out = Vec::new();
-                for branch in branches {
-                    let mut new_children = Vec::with_capacity(1 + tail.len());
-                    new_children.push(branch);
-                    new_children.extend_from_slice(&tail);
-                    let new_seq = self.mk_sequence_n(store, new_children);
-                    out.extend(self.delta_for_aexpr(store, new_seq));
-                }
-                out
-            }
-            AExpr::Star(inner) => {
-                // Iterate once: Sequence([inner, Star(inner), ...tail]).
-                // Or skip: Sequence([...tail]).
-                let mut iter_children = Vec::with_capacity(2 + tail.len());
-                iter_children.push(inner);
-                iter_children.push(head); // == Star(inner)
-                iter_children.extend_from_slice(&tail);
-                let iter_seq = self.mk_sequence_n(store, iter_children);
-                let skip_seq = self.mk_sequence_n(store, tail);
-                let mut out = self.delta_for_aexpr(store, iter_seq);
-                out.extend(self.delta_for_aexpr(store, skip_seq));
-                out
-            }
-            AExpr::Sequence(_) => {
-                unreachable!("mk_sequence_n flattens nested sequences");
-            }
+        let tail: &[AExprIdx] = &children[1..];
+
+        // δ(head) ; tail: each of the head's edges keeps its label and
+        // visibility, but its target is re-sequenced with the tail.
+        let head_edges = self.delta_for_aexpr(store, head);
+        let mut edges = Vec::with_capacity(head_edges.len() + 1);
+        for (label, t) in head_edges {
+            let mut seq = Vec::with_capacity(1 + tail.len());
+            seq.push(t.aexpr);
+            seq.extend_from_slice(tail);
+            let aexpr = self.mk_sequence_n(store, seq);
+            edges.push((
+                label,
+                State {
+                    aexpr,
+                    visible: t.visible,
+                },
+            ));
         }
+
+        // If the head accepts the empty trace with SPP `out`, yield into the
+        // tail through an invisible intermediate carrying `out`.
+        let out = self.output_for_aexpr(store, head);
+        if out != store.zero {
+            let target = State {
+                aexpr: self.mk_sequence_n(store, tail.to_vec()),
+                visible: false,
+            };
+            edges.push((EdgeLabel::Concrete(out), target));
+        }
+
+        edges
     }
 
-    /// Compute `output` for an `AExpr`, caching the result.  See module
+    /// Compute `output` for an `AExpr`.  See module
     /// docs for the recipe.
-    fn output_for_aexpr(&mut self, store: &mut spp::SPPstore, aexpr: AExprIdx) -> Vec<EdgeLabel> {
-        if let Some(cached) = self.output_cache.get(&aexpr) {
-            return cached.clone();
-        }
-        let result = self.output_compute(store, aexpr);
-        self.output_cache.insert(aexpr, result.clone());
-        result
-    }
-
-    fn output_compute(&mut self, store: &mut spp::SPPstore, aexpr: AExprIdx) -> Vec<EdgeLabel> {
+    fn output_for_aexpr(&mut self, store: &mut spp::SPPstore, aexpr: AExprIdx) -> spp::SPP {
         let node = self.get_expr(aexpr).clone();
         match node {
-            AExpr::Spp(s) => {
-                if s == store.zero {
-                    Vec::new()
-                } else {
-                    vec![EdgeLabel::Concrete(s)]
-                }
-            }
-            AExpr::Hole(h) => vec![EdgeLabel::Abstract(h)],
-            AExpr::Dup => Vec::new(),
+            AExpr::Spp(s) => s,
+            AExpr::Hole(_) => store.zero,
+            AExpr::Dup => store.zero,
             AExpr::Union(children) => {
-                let mut out = Vec::new();
+                // Can't use iterators bc it would borrow store mutably too many times
+                let mut out = store.zero;
                 for child in children {
-                    out.extend(self.output_for_aexpr(store, child));
+                    let val = self.output_for_aexpr(store, child);
+                    out = store.union(out, val);
                 }
                 out
             }
-            AExpr::Sequence(children) => self.output_sequence(store, &children),
-            AExpr::Star(_) => vec![EdgeLabel::Concrete(store.one)],
-        }
-    }
-
-    fn output_sequence(
-        &mut self,
-        store: &mut spp::SPPstore,
-        children: &[AExprIdx],
-    ) -> Vec<EdgeLabel> {
-        debug_assert!(
-            !children.is_empty(),
-            "Sequence should have at least one child"
-        );
-        let head = children[0];
-        let tail: Vec<AExprIdx> = children[1..].to_vec();
-        let head_expr = self.get_expr(head).clone();
-        match head_expr {
-            AExpr::Spp(_) | AExpr::Hole(_) | AExpr::Dup => {
-                // The composed ε with these heads is non-atomic (or zero);
-                // any atomic summand is captured by the δ chain through
-                // the invisible state for the tail.
-                Vec::new()
-            }
-            AExpr::Union(branches) => {
-                // Distribute Union out of the head and union the outputs
-                // of each resulting Sequence.
-                let mut out = Vec::new();
-                for branch in branches {
-                    let mut new_children = Vec::with_capacity(1 + tail.len());
-                    new_children.push(branch);
-                    new_children.extend_from_slice(&tail);
-                    let new_seq = self.mk_sequence_n(store, new_children);
-                    out.extend(self.output_for_aexpr(store, new_seq));
-                }
-                out
-            }
-            AExpr::Star(inner) => {
-                // Iterate: output(Sequence([inner, Star(inner), ...tail])).
-                // Skip:    output(Sequence([...tail])).
-                let mut iter_children = Vec::with_capacity(2 + tail.len());
-                iter_children.push(inner);
-                iter_children.push(head); // == Star(inner)
-                iter_children.extend_from_slice(&tail);
-                let iter_seq = self.mk_sequence_n(store, iter_children);
-                let skip_seq = self.mk_sequence_n(store, tail);
-                let mut out = self.output_for_aexpr(store, iter_seq);
-                out.extend(self.output_for_aexpr(store, skip_seq));
-                out
-            }
-            AExpr::Sequence(_) => {
-                unreachable!("mk_sequence_n flattens nested sequences");
-            }
+            AExpr::Sequence(_) => store.zero,
+            // self.output_sequence(store, &children),
+            AExpr::Star(_) => store.one,
         }
     }
 }
@@ -717,25 +630,13 @@ mod tests {
         let mut aut = AutWithHoles::new();
         let top = store.top;
         let q = aut.expr_to_state(&mut store, &Expr::spp(top));
-        assert_eq!(aut.output(&mut store, q), vec![EdgeLabel::Concrete(top)]);
+        assert_eq!(aut.output(&mut store, q), top);
         assert_eq!(aut.transitions(&mut store, q), vec![]);
 
-        // Spp(zero) outputs the empty sum.
+        // Spp(zero) outputs the zero SPP.
         let zero = store.zero;
         let q0 = aut.expr_to_state(&mut store, &Expr::spp(zero));
-        assert_eq!(aut.output(&mut store, q0), vec![]);
-    }
-
-    #[test]
-    fn hole_state_output_and_transitions() {
-        let mut store = mk_store();
-        let mut aut = AutWithHoles::new();
-        let q = aut.expr_to_state(&mut store, &Expr::hole(Hole(7)));
-        assert_eq!(
-            aut.output(&mut store, q),
-            vec![EdgeLabel::Abstract(Hole(7))]
-        );
-        assert_eq!(aut.transitions(&mut store, q), vec![]);
+        assert_eq!(aut.output(&mut store, q0), store.zero);
     }
 
     #[test]
@@ -743,7 +644,7 @@ mod tests {
         let mut store = mk_store();
         let mut aut = AutWithHoles::new();
         let q = aut.expr_to_state(&mut store, &Expr::dup());
-        assert_eq!(aut.output(&mut store, q), vec![]);
+        assert_eq!(aut.output(&mut store, q), store.zero);
 
         let trans = aut.transitions(&mut store, q);
         assert_eq!(trans.len(), 1);
@@ -756,23 +657,6 @@ mod tests {
     }
 
     #[test]
-    fn union_atomic_summands_in_output() {
-        let mut store = mk_store();
-        let mut aut = AutWithHoles::new();
-        let top = store.top;
-        let q = aut.expr_to_state(
-            &mut store,
-            &Expr::union(Expr::spp(top), Expr::hole(Hole(0))),
-        );
-        let mut got = aut.output(&mut store, q);
-        let mut want = vec![EdgeLabel::Concrete(top), EdgeLabel::Abstract(Hole(0))];
-        got.sort_by_key(|l| format!("{:?}", l));
-        want.sort_by_key(|l| format!("{:?}", l));
-        assert_eq!(got, want);
-        assert_eq!(aut.transitions(&mut store, q), vec![]);
-    }
-
-    #[test]
     fn sequence_spp_hole_chains_through_invisible() {
         let mut store = mk_store();
         let mut aut = AutWithHoles::new();
@@ -781,8 +665,8 @@ mod tests {
             &mut store,
             &Expr::sequence(Expr::spp(top), Expr::hole(Hole(0))),
         );
-        // Sequence with mixed Spp/Hole head has empty atomic-output...
-        assert_eq!(aut.output(&mut store, q), vec![]);
+        // Sequence with mixed Spp/Hole head has zero local output...
+        assert_eq!(aut.output(&mut store, q), store.zero);
         // ...and a single concrete-SPP edge into an invisible Hole state.
         let trans = aut.transitions(&mut store, q);
         assert_eq!(trans.len(), 1);
@@ -791,11 +675,8 @@ mod tests {
         assert!(!target.visible);
         let hole_aexpr = aut.mk_hole(Hole(0));
         assert_eq!(target.aexpr, hole_aexpr);
-        // Terminating at the hole state yields the abstract summand.
-        assert_eq!(
-            aut.output(&mut store, target),
-            vec![EdgeLabel::Abstract(Hole(0))]
-        );
+        // The hole state contributes no local output; the hole is a transition.
+        assert_eq!(aut.output(&mut store, target), store.zero);
     }
 
     #[test]
@@ -822,11 +703,8 @@ mod tests {
         assert_eq!(label_2, EdgeLabel::Concrete(store.one));
         assert!(target_2.visible, "post-Dup target should be visible");
 
-        // After the dup we're at `Spp(top)` with output [Concrete(top)].
-        assert_eq!(
-            aut.output(&mut store, target_2),
-            vec![EdgeLabel::Concrete(top)]
-        );
+        // After the dup we're at `Spp(top)` with output `top`.
+        assert_eq!(aut.output(&mut store, target_2), top);
     }
 
     #[test]
@@ -836,10 +714,7 @@ mod tests {
         let q = aut.expr_to_state(&mut store, &Expr::star(Expr::hole(Hole(0))));
 
         // 0 iterations: identity in the output.
-        assert_eq!(
-            aut.output(&mut store, q),
-            vec![EdgeLabel::Concrete(store.one)]
-        );
+        assert_eq!(aut.output(&mut store, q), store.one);
 
         // One iteration loops back to the same expression but invisible.
         let trans = aut.transitions(&mut store, q);
@@ -851,44 +726,12 @@ mod tests {
 
         // From the invisible variant, output is still the identity and the
         // edge still loops to the invisible variant.
-        assert_eq!(
-            aut.output(&mut store, target),
-            vec![EdgeLabel::Concrete(store.one)]
-        );
+        assert_eq!(aut.output(&mut store, target), store.one);
         let trans_inv = aut.transitions(&mut store, target);
         assert_eq!(trans_inv.len(), 1);
         let (label_inv, target_inv) = trans_inv[0];
         assert_eq!(label_inv, EdgeLabel::Abstract(Hole(0)));
         assert!(!target_inv.visible);
         assert_eq!(target_inv, target);
-    }
-
-    #[test]
-    fn sequence_with_star_head_skip_captured_in_output() {
-        // `(Hole(0))* ; Spp(top)`: the "0 iterations" branch contributes
-        // an atomic Concrete(top) to output; the "1+ iterations" branch
-        // shows up as an abstract-hole transition into the invisible
-        // loop state.
-        let mut store = mk_store();
-        let mut aut = AutWithHoles::new();
-        let top = store.top;
-        let q = aut.expr_to_state(
-            &mut store,
-            &Expr::sequence(Expr::star(Expr::hole(Hole(0))), Expr::spp(top)),
-        );
-
-        assert_eq!(
-            aut.output(&mut store, q),
-            vec![EdgeLabel::Concrete(top)],
-            "skip-star + Spp(top) yields the Concrete(top) summand"
-        );
-
-        let trans = aut.transitions(&mut store, q);
-        // Iterate branch yields an Abstract(H0) edge; the skip branch's
-        // delta is empty (Spp targets have no edges).
-        assert_eq!(trans.len(), 1);
-        let (label, target) = trans[0];
-        assert_eq!(label, EdgeLabel::Abstract(Hole(0)));
-        assert!(!target.visible);
     }
 }

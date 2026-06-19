@@ -27,8 +27,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::holes::aut::{DFA, NFA, backward_reachable, forward_reachable, singleton_sp};
-use crate::holes::inst::{Instantiate, LowerBoundCounterexample};
+use crate::holes::aut::{DFA, NFA, backward_reachable, forward_reachable};
+use crate::holes::inst::{self, Instantiate, LowerBoundCounterexample};
 use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Hole, State};
 use crate::sp;
 use crate::spp;
@@ -82,6 +82,10 @@ pub fn run<L: NFA, U: DFA>(
                 }
             },
             Err(witnesses) => {
+                let witnesses: Vec<_> = witnesses
+                    .into_iter()
+                    .map(|(hole, (start, _, end))| (hole, (start, end)))
+                    .collect();
                 println!("New upper bound cex: {witnesses:?}");
                 add_upper_bound_clause(witnesses, &hole_to_var, &mut learner);
             }
@@ -172,7 +176,7 @@ struct HoleSite {
 /// this counterexample).
 fn add_lower_bound_clauses(
     cex: LowerBoundCounterexample,
-    inst: &mut Instantiate,
+    inst: &mut Instantiate<spp::SPP>,
     hole_to_var: &HashMap<Hole, SppVar>,
     learner: &mut ExistentialLearner,
     store: &mut spp::SPPstore,
@@ -191,8 +195,23 @@ fn add_lower_bound_clauses(
         inst.set_hole(h, spp);
     }
 
+    // Ignore non-outer states
+    let forward_candidate: HashMap<(State, usize), sp::SP> = forward_candidate
+        .into_iter()
+        .flat_map(|((q, n), sp)| match q {
+            inst::State::Outer(q) => Some(((q, n), sp)),
+            _ => None,
+        })
+        .collect();
+    let backward_top: HashMap<(State, usize), sp::SP> = backward_top
+        .into_iter()
+        .flat_map(|((q, n), sp)| match q {
+            inst::State::Outer(q) => Some(((q, n), sp)),
+            _ => None,
+        })
+        .collect();
+
     // Walk the raw AutWithHoles to enumerate hole sites.
-    let output_singleton = singleton_sp(store, &cex.output);
     let n = cex.trace.len();
     let start = inst.start_state();
     let sites = {
@@ -201,7 +220,6 @@ fn add_lower_bound_clauses(
             &mut aut_ref,
             start,
             n,
-            output_singleton,
             &forward_candidate,
             &backward_top,
             store,
@@ -238,7 +256,6 @@ fn collect_hole_sites(
     aut: &mut AutWithHoles,
     start: State,
     n: usize,
-    output_singleton: sp::SP,
     forward: &HashMap<(State, usize), sp::SP>,
     backward: &HashMap<(State, usize), sp::SP>,
     store: &mut spp::SPPstore,
@@ -286,21 +303,6 @@ fn collect_hole_sites(
                         out_sp,
                     });
                 }
-            }
-        }
-
-        let summands = aut.output(store, q);
-        for label in &summands {
-            if let EdgeLabel::Abstract(hole) = label {
-                let in_sp = forward.get(&(q, n - 1)).copied().unwrap_or(sp_zero);
-                if store.sp.is_zero(in_sp) {
-                    continue;
-                }
-                sites.push(HoleSite {
-                    hole: *hole,
-                    in_sp,
-                    out_sp: output_singleton,
-                });
             }
         }
     }

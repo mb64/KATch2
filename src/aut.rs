@@ -4,8 +4,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::hash::Hash;
-// An AExpr represents an automaton state.
-// This is essentially a compressed and hash-consed form of a NetKAT expression.
+
+/// An AExpr represents an automaton state.
+/// This is essentially a compressed and hash-consed form of a NetKAT expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum AExpr {
     SPP(spp::SPP), // We keep field tests and mutations and combinations thereof in SPP form
@@ -22,7 +23,7 @@ enum AExpr {
     Top,           // represents the set of all strings
 }
 
-// A State is an index into the Aut's expression table.
+/// A State is an index into the Aut's expression table.
 type State = usize;
 
 /// Symbolic transitions `ST<T>`.

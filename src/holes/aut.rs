@@ -169,6 +169,45 @@ pub trait DFA: NFA {
 
 // ---- Reference impls -------------------------------------------------------
 
+/// An SPP represents a dup-free NetKAT program, and dup-free NetKAT programs are NetKAT programs
+/// too.
+///
+/// An SPP can be an automaton with just one state and no transitions :)
+impl ENFA for spp::SPP {
+    type State = ();
+
+    #[expect(clippy::unused_unit)]
+    fn start(&self, _store: &mut spp::SPPstore) -> Self::State {
+        ()
+    }
+
+    fn is_visible(&self, _store: &mut spp::SPPstore, _q: &Self::State) -> bool {
+        // This doesn't matter actually, since visibility only matters for states _after_ the start
+        // state, and there are no transitions.
+        //
+        // However, the contract of the `NFA` trait is that `is_visible` must always return `true`,
+        // so for that reason we have to return `true`.
+        true
+    }
+
+    /// No transitions!
+    fn transitions(
+        &self,
+        _store: &mut spp::SPPstore,
+        _q: &Self::State,
+    ) -> Vec<(spp::SPP, Self::State)> {
+        vec![]
+    }
+
+    /// The output from the start state is the SPP itself
+    fn output(&self, _store: &mut spp::SPPstore, _q: &Self::State) -> spp::SPP {
+        *self
+    }
+}
+
+impl NFA for spp::SPP {}
+impl DFA for spp::SPP {}
+
 // Blanket impls so that `&T` is itself an ENFA / NFA / DFA whenever `T` is.
 // Lets callers borrow automata into wrappers (`Complement<&T>`, `Union<&A, &B>`,
 // etc.) instead of cloning them.
