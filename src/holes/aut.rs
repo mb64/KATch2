@@ -1006,7 +1006,7 @@ pub mod ops {
 /// state `i`, indexed by dense `usize`.  As a true DFA there is exactly one
 /// start state (with implicit identity start SPP).  Fields are public so
 /// callers can avoid going through the trait when raw access is needed.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ExplicitDFA {
     pub start: usize,
     pub transitions: Vec<Vec<(spp::SPP, usize)>>,
