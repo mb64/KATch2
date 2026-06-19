@@ -1,36 +1,39 @@
-//! CEGIS loop: synthesize a concrete SPP for a single hole such that
-//! `lower_bound ⊆ expr[hole] ⊆ upper_bound`.
+//! CEGIS loop: synthesize a concrete candidate per hole such that
+//! `lower_bound ⊆ expr[holes] ⊆ upper_bound`.
+//!
+//! Generic over the candidate kind `C: Candidate` — either [`spp::SPP`] or
+//! [`crate::holes::cand::Cand`].  Each candidate-specific step (slot allocation,
+//! reading the solution back, the all-top fallback, and the two
+//! counterexample → literal conversions) is a [`Candidate`] trait method.
 //!
 //! # Algorithm
 //!
-//! 1. Ask the [`SmtLearner`] for a candidate SPP.
-//! 2. Plug it into the [`Instantiate`] for the hole-bearing expression.
+//! 1. Ask the [`SmtLearner`] for a candidate per hole.
+//! 2. Plug them into the [`Instantiate`] for the hole-bearing expression.
 //! 3. Check `expr[candidate] ⊆ upper_bound` via
-//!    [`Instantiate::check_less_than`].  If it fails, the witness is a list
-//!    of `(hole, (in, out))` pairs from a single counterexample trace; we
-//!    convert it into a negative-literal clause for the learner: "the hole
-//!    cannot accept all of these pairs simultaneously".
+//!    [`Instantiate::check_less_than`].  If it fails, each hole's witness
+//!    becomes a negative literal ([`Candidate::reject_literal`]): "the hole
+//!    cannot accept all of these simultaneously".
 //! 4. Check `lower_bound ⊆ expr[candidate]` via
-//!    [`Instantiate::check_greater_than`].  If it fails, we'd need to add
-//!    clauses involving existential variables — that processing is stubbed.
-//! 5. If both checks pass, return the candidate.
-//! 6. Otherwise, ask the learner for a refined candidate and loop.  If the
+//!    [`Instantiate::check_greater_than`].  If it fails, each viable hole site
+//!    becomes a positive literal ([`Candidate::accept_literal`]).
+//! 5. If both checks pass, return the candidates.
+//! 6. Otherwise, ask the learner for refined candidates and loop.  If the
 //!    learner returns `InconsistentError`, the original problem is
 //!    infeasible.
 //!
 //! # Limitations
 //!
-//! * Single-hole only — the [`SmtLearner`] currently learns one SPP.
-//! * Lower-bound counterexample processing is a stub
-//!   ([`Instantiate::check_greater_than`] is `todo!()`); callers that
-//!   exercise it will panic.
+//! * Lower-bound (`accept_literal`) is implemented for [`spp::SPP`] only;
+//!   [`crate::holes::cand::Cand`] panics if a lower-bound counterexample arises.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::holes::aut::{DFA, NFA, backward_reachable, forward_reachable};
+use crate::holes::aut::{ENFA, ExplicitDFA, NFA, backward_reachable, forward_reachable};
+use crate::holes::candidate::Candidate;
 use crate::holes::inst::{self, Instantiate, LowerBoundCounterexample};
 use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Hole, State};
-use crate::holes::smt::{AbstractBit, AbstractClause, Existential, Literal, SmtLearner, SppVar};
+use crate::holes::smt::{AbstractClause, SmtLearner};
 use crate::sp;
 use crate::spp;
 
@@ -48,93 +51,96 @@ pub enum CegisError {
 /// [`crate::holes::nk_with_holes::AutWithHoles`] state machine; `holes` is
 /// the set of hole labels that may appear in it (every hole the expression
 /// reaches must be listed, otherwise [`Instantiate`] will panic when it
-/// hits an unmapped one).  On success, returns one synthesized SPP per
+/// hits an unmapped one).  On success, returns one synthesized candidate per
 /// hole.
-pub fn run<L: NFA, U: DFA>(
+///
+/// `C` is the candidate kind ([`spp::SPP`] or [`crate::holes::cand::Cand`]); the
+/// upper bound is a concrete [`ExplicitDFA`], which also serves as the DFA that
+/// [`crate::holes::cand::Cand`] candidates pull their states from.
+pub fn run<'a, C: Candidate<'a>, L: NFA>(
     aut: AutWithHoles,
     start: State,
     holes: &[Hole],
     lower_bound: &L,
-    upper_bound: &U,
+    upper_bound: &'a ExplicitDFA,
     store: &mut spp::SPPstore,
-) -> Result<HashMap<Hole, spp::SPP>, CegisError> {
+) -> Result<HashMap<Hole, C>, CegisError>
+where
+    <C as ENFA>::State: Ord,
+{
     let mut learner = SmtLearner::new(store.num_vars());
 
-    let mut hole_to_var: HashMap<Hole, SppVar> = HashMap::new();
+    let mut hole_to_var: HashMap<Hole, C::Var> = HashMap::new();
     for &h in holes {
-        hole_to_var.insert(h, learner.fresh_spp());
+        hole_to_var.insert(h, C::fresh_var(&mut learner, upper_bound));
     }
 
-    let mut cands = learner
+    let sol = learner
         .extract(store)
-        .expect("haven't added any constraints yet")
-        .spps;
-    let mut inst = Instantiate::new(aut, start, holes_map(&hole_to_var, &cands));
+        .expect("haven't added any constraints yet");
+    let initial: HashMap<Hole, C> = hole_to_var
+        .iter()
+        .map(|(&h, &v)| (h, C::from_solution(&sol, v)))
+        .collect();
+    let mut inst = Instantiate::new(aut, start, initial);
 
     loop {
         match inst.check_less_than(store, upper_bound) {
             Ok(()) => match inst.check_greater_than(store, lower_bound) {
-                Ok(()) => return Ok(holes_map(&hole_to_var, &cands)),
+                Ok(()) => return Ok(inst.holes().clone()),
                 Err(cex) => {
                     println!("New lower bound cex: {cex:?}");
-                    add_lower_bound_clauses(cex, &mut inst, &hole_to_var, &mut learner, store);
+                    add_lower_bound_clauses(
+                        cex,
+                        &mut inst,
+                        &hole_to_var,
+                        &mut learner,
+                        store,
+                        upper_bound,
+                    );
                 }
             },
             Err(witnesses) => {
-                let witnesses: Vec<_> = witnesses
-                    .into_iter()
-                    .map(|(hole, (start, _, end))| (hole, (start, end)))
-                    .collect();
-                println!("New upper bound cex: {witnesses:?}");
-                add_upper_bound_clause(witnesses, &hole_to_var, &mut learner);
+                println!("New upper bound cex");
+                add_upper_bound_clause::<C>(witnesses, &hole_to_var, &mut learner);
             }
         }
 
-        cands = match learner.extract(store) {
-            Ok(sol) => sol.spps,
+        let sol = match learner.extract(store) {
+            Ok(sol) => sol,
             Err(_) => return Err(CegisError::Infeasible),
         };
-        for (h, v) in &hole_to_var {
-            inst.set_hole(*h, cands[v]);
+        for (&h, &v) in &hole_to_var {
+            inst.set_hole(h, C::from_solution(&sol, v));
         }
     }
 }
 
-/// Project a `SppVar → SPP` candidate map back through `hole_to_var` to get
-/// a `Hole → SPP` map suitable for [`Instantiate`].
-fn holes_map(
-    hole_to_var: &HashMap<Hole, SppVar>,
-    cands: &HashMap<SppVar, spp::SPP>,
-) -> HashMap<Hole, spp::SPP> {
-    hole_to_var.iter().map(|(&h, &v)| (h, cands[&v])).collect()
-}
-
-/// Convert an upper-bound counterexample (a list of `(hole, (in, out))` pairs
-/// recorded along a single violating trace) into a clause for the learner.
+/// Convert an upper-bound counterexample (per-hole `(in, inner_trace, out)`
+/// witnesses recorded along a single violating trace) into a clause for the
+/// learner.
 ///
-/// Semantics: each pair `(in_i, out_i)` is a place the trace relied on the
-/// hole accepting that pair.  To kill the counterexample, the hole's SPP
-/// must *not* accept at least one of them.  That's a disjunction of
-/// negative literals — exactly one [`AbstractClause`], each literal targeting
-/// the hole's [`SppVar`].
+/// Semantics: each witness is a place the trace relied on the hole accepting
+/// that traversal.  To kill the counterexample, at least one hole must *not*
+/// accept its witness — a disjunction of negative literals, exactly one
+/// [`AbstractClause`].  Each [`Candidate::reject_literal`] decides how to encode
+/// its own witness.
 ///
 /// An empty witness vec means the violation was purely concrete (no hole
 /// involvement).  Adding an empty clause makes the learner immediately
 /// UNSAT, which is correct: no choice of hole can resolve a concrete
 /// violation.
-fn add_upper_bound_clause(
-    witnesses: Vec<(Hole, (Vec<bool>, Vec<bool>))>,
-    hole_to_var: &HashMap<Hole, SppVar>,
-    learner: &mut SmtLearner,
+fn add_upper_bound_clause<'a, C: Candidate<'a>>(
+    witnesses: Vec<(
+        Hole,
+        (Vec<bool>, Vec<(<C as ENFA>::State, Vec<bool>)>, Vec<bool>),
+    )>,
+    hole_to_var: &HashMap<Hole, C::Var>,
+    learner: &mut SmtLearner<'a>,
 ) {
     let literals = witnesses
         .into_iter()
-        .map(|(h, (p1, p2))| Literal::Spp {
-            spp: hole_to_var[&h],
-            ap1: p1.into_iter().map(AbstractBit::Concrete).collect(),
-            ap2: p2.into_iter().map(AbstractBit::Concrete).collect(),
-            polarity: false,
-        })
+        .map(|(h, (start, inner, end))| C::reject_literal(hole_to_var[&h], &start, &inner, &end))
         .collect();
     learner.add_clause(AbstractClause { literals });
 }
@@ -173,25 +179,28 @@ struct HoleSite {
 /// Empty sites list → empty clause → instant UNSAT → `CegisError::Infeasible`
 /// on the next learner extraction (correct: no extension at any site can fix
 /// this counterexample).
-fn add_lower_bound_clauses(
+fn add_lower_bound_clauses<'a, C: Candidate<'a>>(
     cex: LowerBoundCounterexample,
-    inst: &mut Instantiate<spp::SPP>,
-    hole_to_var: &HashMap<Hole, SppVar>,
-    learner: &mut SmtLearner,
+    inst: &mut Instantiate<C>,
+    hole_to_var: &HashMap<Hole, C::Var>,
+    learner: &mut SmtLearner<'a>,
     store: &mut spp::SPPstore,
-) {
+    upper_bound: &'a ExplicitDFA,
+) where
+    <C as ENFA>::State: Ord,
+{
     // Forward reach under the *current* candidate.
     let forward_candidate = forward_reachable(&*inst, store, &cex.trace);
 
     // Backward reach under all-top: temporarily swap, compute, restore.
-    let saved: HashMap<Hole, spp::SPP> = inst.holes().clone();
-    let top = store.top;
+    let saved: HashMap<Hole, C> = inst.holes().clone();
+    let top = C::top(store, upper_bound);
     for &h in hole_to_var.keys() {
-        inst.set_hole(h, top);
+        inst.set_hole(h, top.clone());
     }
     let backward_top = backward_reachable(&*inst, store, &cex.trace, &cex.output);
-    for (&h, &spp) in &saved {
-        inst.set_hole(h, spp);
+    for (h, candidate) in saved {
+        inst.set_hole(h, candidate);
     }
 
     // Ignore non-outer states
@@ -225,24 +234,18 @@ fn add_lower_bound_clauses(
         )
     };
 
-    // For each site, allocate existentials, constrain to (in_sp, out_sp),
-    // emit a positive literal over the hole's SPP.
-    let num_vars = store.num_vars() as usize;
-    let literals: Vec<Literal> = sites
+    // For each site, ask the candidate to emit a positive literal constraining
+    // it to accept some `(ap1 ∈ in_sp, ap2 ∈ out_sp)`.
+    let literals = sites
         .into_iter()
         .map(|site| {
-            let in_vars: Vec<Existential> =
-                (0..num_vars).map(|_| learner.fresh_existential()).collect();
-            let out_vars: Vec<Existential> =
-                (0..num_vars).map(|_| learner.fresh_existential()).collect();
-            learner.add_sp_membership(site.in_sp, &in_vars, &store.sp);
-            learner.add_sp_membership(site.out_sp, &out_vars, &store.sp);
-            Literal::Spp {
-                spp: hole_to_var[&site.hole],
-                ap1: in_vars.into_iter().map(AbstractBit::Exist).collect(),
-                ap2: out_vars.into_iter().map(AbstractBit::Exist).collect(),
-                polarity: true,
-            }
+            C::accept_literal(
+                hole_to_var[&site.hole],
+                learner,
+                store,
+                site.in_sp,
+                site.out_sp,
+            )
         })
         .collect();
     learner.add_clause(AbstractClause { literals });
@@ -313,6 +316,7 @@ fn collect_hole_sites(
 mod tests {
     use super::*;
     use crate::holes::aut::ExplicitDFA;
+    use crate::holes::cand::{Cand, Input};
     use crate::holes::nk_with_holes::Expr;
 
     fn mk_store() -> spp::SPPstore {
@@ -345,7 +349,7 @@ mod tests {
         let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store);
-        let result = run(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
+        let result = run::<spp::SPP, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
         assert_eq!(result[&Hole(0)], store.zero);
     }
 
@@ -361,7 +365,7 @@ mod tests {
         let start = aut.expr_to_state(&mut store, &Expr::spp(top));
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
-        let err = run(aut, start, &[], &lb, &ub, &mut store).unwrap_err();
+        let err = run::<spp::SPP, _>(aut, start, &[], &lb, &ub, &mut store).unwrap_err();
         assert_eq!(err, CegisError::Infeasible);
     }
 
@@ -375,7 +379,7 @@ mod tests {
         let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
-        let result = run(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
+        let result = run::<spp::SPP, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
         assert_eq!(result[&Hole(0)], store.zero);
     }
 
@@ -392,7 +396,8 @@ mod tests {
         );
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store);
-        let result = run(aut, start, &[Hole(0), Hole(1)], &lb, &ub, &mut store).unwrap();
+        let result =
+            run::<spp::SPP, _>(aut, start, &[Hole(0), Hole(1)], &lb, &ub, &mut store).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[&Hole(0)], store.zero);
         assert_eq!(result[&Hole(1)], store.zero);
@@ -410,7 +415,8 @@ mod tests {
         );
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
-        let result = run(aut, start, &[Hole(0), Hole(1)], &lb, &ub, &mut store).unwrap();
+        let result =
+            run::<spp::SPP, _>(aut, start, &[Hole(0), Hole(1)], &lb, &ub, &mut store).unwrap();
         assert_eq!(result[&Hole(0)], store.zero);
         assert_eq!(result[&Hole(1)], store.zero);
     }
@@ -459,11 +465,61 @@ mod tests {
         let mut aut = AutWithHoles::new();
         let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
 
-        let result = run(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
+        let result = run::<spp::SPP, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
         let h0 = result[&Hole(0)];
         assert!(
             store.accepts(h0, &trace0, &output_pkt),
             "refined hole SPP must accept the lower-bound's witness pair"
         );
+    }
+
+    /// `0 ⊆ Hole ⊆ top` with `Cand` candidates: converges on the first
+    /// iteration (both checks vacuous), returning the unconstrained Cand, which
+    /// accepts everything.  Exercises the whole `run::<Cand, _>` pipeline —
+    /// fresh_cand, from_solution, and the `Instantiate<Cand>` embedding.
+    #[test]
+    fn cand_trivial_bounds_converge() {
+        let mut store = mk_store();
+        let mut aut = AutWithHoles::new();
+        let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
+        let lb = zero_dfa(&store);
+        let ub = top_dfa(&store); // one state ⇒ Cand has num_states == 1
+        let result = run::<Cand, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
+        let cand = &result[&Hole(0)];
+        assert!(cand.accepts_input(
+            &mut store,
+            &Input {
+                pkt_in: vec![false, false, false],
+                pkt_start: vec![true, false, true],
+                states: vec![0],
+                pkt_end: vec![false, true, false],
+                pkt_out: vec![true, true, false],
+            },
+        ));
+    }
+
+    /// `0 ⊆ Hole ⊆ 0` with `Cand` candidates: the upper bound rejects
+    /// everything, so the accept-all default must be refined (via reject
+    /// literals) down to a Cand that makes the expression empty.  Exercises the
+    /// upper-bound refinement loop and `Cand::reject_literal`.
+    #[test]
+    fn cand_upper_bound_refinement() {
+        let mut store = spp::SPPstore::new(1);
+        let mut aut = AutWithHoles::new();
+        let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
+        let lb = zero_dfa(&store);
+        let ub = zero_dfa(&store);
+        let result = run::<Cand, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
+        let cand = &result[&Hole(0)];
+        assert!(!cand.accepts_input(
+            &mut store,
+            &Input {
+                pkt_in: vec![false],
+                pkt_start: vec![false],
+                states: vec![0],
+                pkt_end: vec![false],
+                pkt_out: vec![false],
+            },
+        ));
     }
 }

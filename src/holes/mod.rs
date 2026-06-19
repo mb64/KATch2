@@ -93,6 +93,7 @@
 
 pub mod aut;
 pub mod cand;
+pub mod candidate;
 pub mod cegis;
 pub mod inst;
 pub mod nk_with_holes;
@@ -100,7 +101,7 @@ pub mod smt;
 
 use std::collections::HashMap;
 
-use crate::holes::aut::{DFA, NFA};
+use crate::holes::aut::{ExplicitDFA, NFA};
 use crate::holes::cegis::{CegisError, run};
 use crate::holes::nk_with_holes::{AutWithHoles, Expr, Hole};
 use crate::spp;
@@ -115,16 +116,16 @@ use crate::spp;
 ///
 /// Returns [`CegisError::Infeasible`] if the constraints are mutually
 /// unsatisfiable (no assignment can land inside the interval).
-pub fn solve_holes<L: NFA, U: DFA>(
+pub fn solve_holes<L: NFA>(
     expr: &Expr,
     holes: &[Hole],
     lower_bound: &L,
-    upper_bound: &U,
+    upper_bound: &ExplicitDFA,
     store: &mut spp::SPPstore,
 ) -> Result<HashMap<Hole, spp::SPP>, CegisError> {
     let mut aut = AutWithHoles::new();
     let start = aut.expr_to_state(store, expr);
-    run(aut, start, holes, lower_bound, upper_bound, store)
+    run::<spp::SPP, L>(aut, start, holes, lower_bound, upper_bound, store)
 }
 
 #[cfg(test)]
