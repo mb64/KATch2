@@ -18,7 +18,7 @@ use std::collections::HashMap;
 ///
 /// A single trace accepted by the lower bound but not by `self`: a sequence
 /// of input packets visited between dup-crossings, plus the final output
-/// packet.  Converting this into clauses for the [`crate::spp::existential_learner`]
+/// packet.  Converting this into clauses for the [`crate::holes::smt`]
 /// is not yet implemented.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LowerBoundCounterexample {

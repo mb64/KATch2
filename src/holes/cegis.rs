@@ -3,7 +3,7 @@
 //!
 //! # Algorithm
 //!
-//! 1. Ask the [`ExistentialLearner`] for a candidate SPP.
+//! 1. Ask the [`SmtLearner`] for a candidate SPP.
 //! 2. Plug it into the [`Instantiate`] for the hole-bearing expression.
 //! 3. Check `expr[candidate] ⊆ upper_bound` via
 //!    [`Instantiate::check_less_than`].  If it fails, the witness is a list
@@ -20,7 +20,7 @@
 //!
 //! # Limitations
 //!
-//! * Single-hole only — the [`ExistentialLearner`] currently learns one SPP.
+//! * Single-hole only — the [`SmtLearner`] currently learns one SPP.
 //! * Lower-bound counterexample processing is a stub
 //!   ([`Instantiate::check_greater_than`] is `todo!()`); callers that
 //!   exercise it will panic.
@@ -30,11 +30,9 @@ use std::collections::{HashMap, HashSet};
 use crate::holes::aut::{DFA, NFA, backward_reachable, forward_reachable};
 use crate::holes::inst::{self, Instantiate, LowerBoundCounterexample};
 use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Hole, State};
+use crate::holes::smt::{AbstractBit, AbstractClause, Existential, Literal, SmtLearner, SppVar};
 use crate::sp;
 use crate::spp;
-use crate::spp::existential_learner::{
-    AbstractBit, AbstractClause, Existential, ExistentialLearner, Literal, SppVar,
-};
 
 /// Why the CEGIS loop gave up.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +58,7 @@ pub fn run<L: NFA, U: DFA>(
     upper_bound: &U,
     store: &mut spp::SPPstore,
 ) -> Result<HashMap<Hole, spp::SPP>, CegisError> {
-    let mut learner = ExistentialLearner::new(store.num_vars());
+    let mut learner = SmtLearner::new(store.num_vars());
 
     let mut hole_to_var: HashMap<Hole, SppVar> = HashMap::new();
     for &h in holes {
@@ -69,7 +67,8 @@ pub fn run<L: NFA, U: DFA>(
 
     let mut cands = learner
         .extract(store)
-        .expect("haven't added any constraints yet");
+        .expect("haven't added any constraints yet")
+        .spps;
     let mut inst = Instantiate::new(aut, start, holes_map(&hole_to_var, &cands));
 
     loop {
@@ -92,7 +91,7 @@ pub fn run<L: NFA, U: DFA>(
         }
 
         cands = match learner.extract(store) {
-            Ok(c) => c,
+            Ok(sol) => sol.spps,
             Err(_) => return Err(CegisError::Infeasible),
         };
         for (h, v) in &hole_to_var {
@@ -126,11 +125,11 @@ fn holes_map(
 fn add_upper_bound_clause(
     witnesses: Vec<(Hole, (Vec<bool>, Vec<bool>))>,
     hole_to_var: &HashMap<Hole, SppVar>,
-    learner: &mut ExistentialLearner,
+    learner: &mut SmtLearner,
 ) {
     let literals = witnesses
         .into_iter()
-        .map(|(h, (p1, p2))| Literal {
+        .map(|(h, (p1, p2))| Literal::Spp {
             spp: hole_to_var[&h],
             ap1: p1.into_iter().map(AbstractBit::Concrete).collect(),
             ap2: p2.into_iter().map(AbstractBit::Concrete).collect(),
@@ -178,7 +177,7 @@ fn add_lower_bound_clauses(
     cex: LowerBoundCounterexample,
     inst: &mut Instantiate<spp::SPP>,
     hole_to_var: &HashMap<Hole, SppVar>,
-    learner: &mut ExistentialLearner,
+    learner: &mut SmtLearner,
     store: &mut spp::SPPstore,
 ) {
     // Forward reach under the *current* candidate.
@@ -238,7 +237,7 @@ fn add_lower_bound_clauses(
                 (0..num_vars).map(|_| learner.fresh_existential()).collect();
             learner.add_sp_membership(site.in_sp, &in_vars, &store.sp);
             learner.add_sp_membership(site.out_sp, &out_vars, &store.sp);
-            Literal {
+            Literal::Spp {
                 spp: hole_to_var[&site.hole],
                 ap1: in_vars.into_iter().map(AbstractBit::Exist).collect(),
                 ap2: out_vars.into_iter().map(AbstractBit::Exist).collect(),

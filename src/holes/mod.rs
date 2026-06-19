@@ -22,7 +22,7 @@
 //!   ([`aut::forward_reachable`]) and backward ([`aut::backward_reachable`])
 //!   reachability used to mine hole sites.
 //! * [`cegis`] — the synthesis loop, driving the
-//!   [`crate::spp::existential_learner::ExistentialLearner`] with clauses
+//!   [`crate::holes::smt::SmtLearner`] with clauses
 //!   derived from each bound check.
 //!
 //! # Convenience entry point
@@ -96,6 +96,7 @@ pub mod cand;
 pub mod cegis;
 pub mod inst;
 pub mod nk_with_holes;
+pub mod smt;
 
 use std::collections::HashMap;
 

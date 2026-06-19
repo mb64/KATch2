@@ -3,8 +3,6 @@
 // Unlike traditional BDDs, we do not leave out any levels of the BDD:
 // each path down the BDD has precisely the same depth, namely the number of variables, i.e. the packet size in bits.
 
-pub mod clause_learner;
-pub mod existential_learner;
 pub mod learner;
 
 use rand::seq::SliceRandom;
