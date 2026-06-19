@@ -675,4 +675,99 @@ mod tests {
             assert_consistent(&cand, &mut store, &examples);
         }
     }
+
+    // ---- Cand ENFA over a transition-bearing DFA (`dup; dup`) ----------
+    //
+    // Every test above uses `example_dfa`, which has *no* transitions, so a
+    // `Middle` state is always a dead end and the ENFA only ever accepts
+    // length-2 traces.  These tests use a real DFA whose states have
+    // transitions: `dup; dup`, whose DFA is `0 -one-> 1 -one-> 2` with state 2
+    // the only (dead) accepting state, accepting exactly `[p, p, p] -> p`.
+
+    use crate::expr::Expr;
+    use crate::holes::aut::expr_to_dfa;
+
+    fn two_dup_dfa(store: &mut spp::SPPstore) -> ExplicitDFA {
+        expr_to_dfa(&Expr::sequence(Expr::dup(), Expr::dup()), store)
+    }
+
+    /// Sanity: `dup; dup` accepts exactly the length-3 trace `[p, p, p] -> p`
+    /// (two dup-crossings), and nothing of length 2 or 4.
+    #[test]
+    fn two_dup_dfa_accepts_only_length_three() {
+        let mut store = spp::SPPstore::new(1);
+        let dfa = two_dup_dfa(&mut store);
+        let p = vec![false];
+        assert!(!dfa.dfa_accepts(&mut store, &[p.clone(), p.clone()], &p));
+        assert!(dfa.dfa_accepts(&mut store, &[p.clone(), p.clone(), p.clone()], &p));
+        assert!(!dfa.dfa_accepts(
+            &mut store,
+            &[p.clone(), p.clone(), p.clone(), p.clone()],
+            &p
+        ));
+    }
+
+    /// Contrast / control: over the *single*-`dup` DFA (`0 -one-> 1`, state 1
+    /// dead-accepting), the most-permissive `Cand` reaches `Middle(_, [0, 1])`
+    /// after one step.  That `Middle` already has no outgoing transitions (the
+    /// dead state 1 can't step), but `dup` only needs the length-2 trace
+    /// `[p, p] -> p`, which the ENFA *does* reach via the `Start -> Middle ->
+    /// output` path.  So a single dup is representable — the stall only bites
+    /// when a second step is needed.
+    #[test]
+    fn top_cand_over_one_dup_accepts_its_length_two_trace() {
+        let mut store = spp::SPPstore::new(1);
+        let dfa = expr_to_dfa(&Expr::dup(), &mut store);
+        let top = Cand::from_examples(&mut store, &dfa, &[]).unwrap();
+        let p = vec![false];
+        assert!(top.dfa_accepts(&mut store, &[p.clone(), p.clone()], &p));
+    }
+
+    /// BUG (localized to the `Cand` ENFA / its use of `Exponential`):
+    /// `Cand::from_examples(.., &[])` is the most-permissive candidate
+    /// (`Cand::top`, documented "accepts everything"), yet over the `dup; dup`
+    /// DFA its ENFA accepts only length-2 traces.
+    ///
+    /// From `Start` it reaches `Middle(_, [0, 1, 2])` (the *identity* state
+    /// vector).  `Exponential::transitions` requires every component to step
+    /// simultaneously (it intersects the per-component SPPs), but component 2 —
+    /// the dead accepting state — has no transition, so the whole vector is
+    /// stuck and `Middle([0,1,2])` has no outgoing edges.  Hence the ENFA can't
+    /// produce the length-3 trace `[p, p, p] -> p` that `dup; dup` accepts, so
+    /// `top ⊉ dup; dup`.  Because CEGIS starts from `top` and only ever shrinks
+    /// it, this makes `solve_holes_full` wrongly report `Hole == dup; dup`
+    /// infeasible (see `holes::mod::full_wrongly_infeasible_chained_dup`).
+    ///
+    /// Asserts the current (buggy) behaviour as a tripwire; once the ENFA is
+    /// fixed the length-3 trace should be accepted and these assertions flipped.
+    #[test]
+    fn top_cand_over_two_dups_stalls_at_length_two() {
+        let mut store = spp::SPPstore::new(1);
+        let dfa = two_dup_dfa(&mut store);
+        let top = Cand::from_examples(&mut store, &dfa, &[]).unwrap();
+        let p = vec![false];
+
+        // One routing edge out of Start, into a Middle that is then stuck.
+        let start = top.start(&mut store);
+        let edges = top.transitions(&mut store, &start);
+        assert_eq!(edges.len(), 1, "Start has a single routing edge");
+        let middle = edges[0].1.clone();
+        assert!(
+            matches!(middle, State::Middle(_, ref v) if *v == vec![0, 1, 2]),
+            "Start lands in Middle with the identity state vector"
+        );
+        assert!(
+            top.transitions(&mut store, &middle).is_empty(),
+            "BUG: Middle([0,1,2]) has no transitions — Exponential stalls on \
+             the dead state 2, so the ENFA can never advance past length 2"
+        );
+
+        // Length 2 is accepted; the length-3 trace `dup; dup` accepts is not.
+        assert!(top.dfa_accepts(&mut store, &[p.clone(), p.clone()], &p));
+        assert!(
+            !top.dfa_accepts(&mut store, &[p.clone(), p.clone(), p.clone()], &p),
+            "BUG: the most-permissive Cand should accept every trace dup;dup \
+             does, including the length-3 [p, p, p] -> p"
+        );
+    }
 }

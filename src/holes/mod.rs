@@ -66,7 +66,7 @@
 //! let target_dfa = expr_to_dfa(&target, &mut store);
 //! let hole_expr = HExpr::sequence(HExpr::dup(), HExpr::hole(Hole(0)));
 //! let result = solve_holes(
-//!     &hole_expr, &[Hole(0)], &target_dfa, &target_dfa, &mut store,
+//!     &hole_expr, &[Hole(0)], &target_dfa, &target_dfa, &mut store, None,
 //! ).unwrap();
 //! let h0 = result[&Hole(0)];
 //!
@@ -100,7 +100,7 @@
 //! let target = expr_to_dfa(&Expr::dup(), &mut store);
 //! let hole_expr = HExpr::hole(Hole(0));   // no `dup` — length-1 traces only
 //! let result = solve_holes(
-//!     &hole_expr, &[Hole(0)], &target, &target, &mut store,
+//!     &hole_expr, &[Hole(0)], &target, &target, &mut store, None,
 //! );
 //! assert!(matches!(result, Err(CegisError::Infeasible)));
 //! ```
@@ -118,7 +118,7 @@
 //! let target = expr_to_dfa(&Expr::dup(), &mut store);
 //! let hole_expr = HExpr::hole(Hole(0));
 //! let result = solve_holes_full(
-//!     &hole_expr, &[Hole(0)], &target, &target, &mut store,
+//!     &hole_expr, &[Hole(0)], &target, &target, &mut store, None,
 //! );
 //! assert!(result.is_ok());
 //! ```
@@ -160,10 +160,19 @@ pub fn solve_holes_general<'a, L: NFA, C: Candidate<'a>>(
     lower_bound: &L,
     upper_bound: &'a ExplicitDFA,
     store: &mut spp::SPPstore,
+    max_iters: Option<usize>,
 ) -> Result<HashMap<Hole, C>, CegisError> {
     let mut aut = AutWithHoles::new();
     let start = aut.expr_to_state(store, expr);
-    run::<C, L>(aut, start, holes, lower_bound, upper_bound, store)
+    run::<C, L>(
+        aut,
+        start,
+        holes,
+        lower_bound,
+        upper_bound,
+        store,
+        max_iters,
+    )
 }
 
 /// Solve `lower_bound ⊆ expr[holes] ⊆ upper_bound`, filling each hole with a
@@ -176,8 +185,9 @@ pub fn solve_holes<L: NFA>(
     lower_bound: &L,
     upper_bound: &ExplicitDFA,
     store: &mut spp::SPPstore,
+    max_iters: Option<usize>,
 ) -> Result<HashMap<Hole, spp::SPP>, CegisError> {
-    solve_holes_general(expr, holes, lower_bound, upper_bound, store)
+    solve_holes_general(expr, holes, lower_bound, upper_bound, store, max_iters)
 }
 
 /// Solve `lower_bound ⊆ expr[holes] ⊆ upper_bound`, filling each hole with an
@@ -193,8 +203,9 @@ pub fn solve_holes_full<'a, L: NFA>(
     lower_bound: &L,
     upper_bound: &'a ExplicitDFA,
     store: &mut spp::SPPstore,
+    max_iters: Option<usize>,
 ) -> Result<HashMap<Hole, ops::Union<spp::SPP, cand::Cand<'a>>>, CegisError> {
-    solve_holes_general(expr, holes, lower_bound, upper_bound, store)
+    solve_holes_general(expr, holes, lower_bound, upper_bound, store, max_iters)
 }
 
 #[cfg(test)]
@@ -222,6 +233,7 @@ mod test {
             &target_dfa,
             &target_dfa,
             &mut store,
+            None,
         );
         assert!(result.is_ok());
     }
@@ -253,6 +265,7 @@ mod test {
             &target_dfa,
             &target_dfa,
             &mut store,
+            None,
         );
         assert!(result.is_err());
     }
@@ -288,7 +301,14 @@ mod test {
         let target = Expr::sequence(Expr::dup(), Expr::assign(0, true));
         let target_dfa = expr_to_dfa(&target, &mut store);
         let hole_expr = HExpr::sequence(HExpr::dup(), HExpr::hole(Hole(0)));
-        let result = solve_holes_full(&hole_expr, &[Hole(0)], &target_dfa, &target_dfa, &mut store);
+        let result = solve_holes_full(
+            &hole_expr,
+            &[Hole(0)],
+            &target_dfa,
+            &target_dfa,
+            &mut store,
+            None,
+        );
         assert!(result.is_ok());
     }
 
@@ -304,11 +324,12 @@ mod test {
         let hole_expr = HExpr::hole(Hole(0));
 
         // SPP-only is infeasible.
-        let spp_result = solve_holes(&hole_expr, &[Hole(0)], &target, &target, &mut store);
+        let spp_result = solve_holes(&hole_expr, &[Hole(0)], &target, &target, &mut store, None);
         assert!(matches!(spp_result, Err(CegisError::Infeasible)));
 
         // The full solver can realize `dup` with a dup-ful candidate.
-        let full_result = solve_holes_full(&hole_expr, &[Hole(0)], &target, &target, &mut store);
+        let full_result =
+            solve_holes_full(&hole_expr, &[Hole(0)], &target, &target, &mut store, None);
         assert!(full_result.is_ok());
     }
 
@@ -321,7 +342,469 @@ mod test {
         let lower = expr_to_dfa(&Expr::one(), &mut store);
         let upper = expr_to_dfa(&Expr::zero(), &mut store);
         let hole_expr = HExpr::hole(Hole(0));
-        let result = solve_holes_full(&hole_expr, &[Hole(0)], &lower, &upper, &mut store);
+        let result = solve_holes_full(&hole_expr, &[Hole(0)], &lower, &upper, &mut store, None);
         assert!(matches!(result, Err(CegisError::Infeasible)));
+    }
+
+    // ---- randomized round-trip fuzzing of the hole solvers ------------
+    //
+    // We never hand a solver a problem we don't already know is satisfiable.
+    // The recipe:
+    //
+    //   1. Pick a random program for each hole, drawn from the candidate kind
+    //      the solver searches: *dup-free* (a single SPP) for `solve_holes`,
+    //      possibly *dup-ful* (a multi-step sub-program) for `solve_holes_full`.
+    //   2. Build a random hole-bearing expression and, in lock-step, the
+    //      concrete target obtained by substituting each hole's program for the
+    //      hole.  (The hole-bearing side may contain `dup`; that combinator
+    //      lives identically in both worlds.)
+    //   3. Ask the solver to solve `hole_expr == target`, under an iteration
+    //      cap so a slow/diverging instance can't hang the suite.
+    //
+    // Because the per-hole programs we substituted are themselves a witness,
+    // the equation is satisfiable, so the solver must *never* report
+    // `Infeasible`.  It may return `Ok` (found an assignment — any assignment
+    // inside `target ⊆ . ⊆ target` is correct) or, if the search is slow, hit
+    // the cap (`IterationLimit`).  Both are acceptable; only `Infeasible` (or a
+    // panic) is a bug.  Capping low keeps the suite fast while still catching
+    // those bugs — `solve_holes_full` is known to diverge on some instances
+    // (see `roundtrip_full_dupful_nontermination`), and the cap turns that into
+    // a tolerated `IterationLimit` rather than a hang.
+
+    use katch2::expr::Exp;
+    use std::collections::BTreeSet;
+
+    /// Field count for the fuzzer.  Small keeps the SPPs (and DFAs) tiny.
+    const FUZZ_FIELDS: u32 = 2;
+
+    /// Iteration cap for fuzz solves.  Low enough to stay fast even when the
+    /// solver diverges, high enough that genuinely-converging instances (which
+    /// finish in a few dozen rounds) still converge.
+    const FUZZ_MAX_ITERS: usize = 200;
+
+    /// A random dup-free expression: leaves are `0`/`1`/`test`/`assign`, joined
+    /// by `union`/`sequence`/`star`.  No `dup`, so it denotes a single SPP and
+    /// is a valid `solve_holes` candidate.
+    fn random_dup_free(depth: u32) -> Exp {
+        if depth == 0 || rand::random::<f64>() < 0.4 {
+            return match rand::random_range(0..4u32) {
+                0 => Expr::one(),
+                1 => Expr::zero(),
+                2 => Expr::test(rand::random_range(0..FUZZ_FIELDS), rand::random()),
+                _ => Expr::assign(rand::random_range(0..FUZZ_FIELDS), rand::random()),
+            };
+        }
+        match rand::random_range(0..3u32) {
+            0 => Expr::union(random_dup_free(depth - 1), random_dup_free(depth - 1)),
+            1 => Expr::sequence(random_dup_free(depth - 1), random_dup_free(depth - 1)),
+            _ => Expr::star(random_dup_free(depth - 1)),
+        }
+    }
+
+    /// A random expression that *may* contain `dup`, so it can denote a
+    /// multi-step, dup-ful program.  Leaves add `dup` to the `random_dup_free`
+    /// repertoire; combinators are the same `union`/`sequence`/`star`.  This is
+    /// the candidate kind `solve_holes_full` searches.
+    fn random_maybe_dupful(depth: u32) -> Exp {
+        if depth == 0 || rand::random::<f64>() < 0.4 {
+            return match rand::random_range(0..5u32) {
+                0 => Expr::one(),
+                1 => Expr::zero(),
+                2 => Expr::test(rand::random_range(0..FUZZ_FIELDS), rand::random()),
+                3 => Expr::assign(rand::random_range(0..FUZZ_FIELDS), rand::random()),
+                _ => Expr::dup(),
+            };
+        }
+        match rand::random_range(0..3u32) {
+            0 => Expr::union(
+                random_maybe_dupful(depth - 1),
+                random_maybe_dupful(depth - 1),
+            ),
+            1 => Expr::sequence(
+                random_maybe_dupful(depth - 1),
+                random_maybe_dupful(depth - 1),
+            ),
+            _ => Expr::star(random_maybe_dupful(depth - 1)),
+        }
+    }
+
+    /// Build a random hole-bearing expression together with the concrete target
+    /// it becomes once each `Hole(i)` is replaced by `insts[i]`.  Every
+    /// primitive leaf is either a hole or `dup`, so all concrete packet-shuffling
+    /// in the target flows in through the instantiations.  Records which holes
+    /// actually appear in `used`.
+    fn random_template(depth: u32, insts: &[Exp], used: &mut BTreeSet<Hole>) -> (HExpr, Exp) {
+        if depth == 0 || rand::random::<f64>() < 0.4 {
+            // A leaf: usually a hole, occasionally a `dup`.
+            if rand::random::<f64>() < 0.85 {
+                let i = rand::random_range(0..insts.len());
+                used.insert(Hole(i as u32));
+                return (HExpr::hole(Hole(i as u32)), insts[i].clone());
+            }
+            return (HExpr::dup(), Expr::dup());
+        }
+        match rand::random_range(0..3u32) {
+            0 => {
+                let (a1, a2) = random_template(depth - 1, insts, used);
+                let (b1, b2) = random_template(depth - 1, insts, used);
+                (HExpr::union(a1, b1), Expr::union(a2, b2))
+            }
+            1 => {
+                let (a1, a2) = random_template(depth - 1, insts, used);
+                let (b1, b2) = random_template(depth - 1, insts, used);
+                (HExpr::sequence(a1, b1), Expr::sequence(a2, b2))
+            }
+            _ => {
+                let (a1, a2) = random_template(depth - 1, insts, used);
+                (HExpr::star(a1), Expr::star(a2))
+            }
+        }
+    }
+
+    /// Build a random satisfiable instance: a hole-bearing expression, the
+    /// substituted target, the holes that actually appear, and the per-hole
+    /// instantiations (kept for failure messages).  `inst_gen` chooses the
+    /// candidate kind — `random_dup_free` or `random_maybe_dupful`.
+    fn random_instance(
+        template_depth: u32,
+        inst_depth: u32,
+        inst_gen: fn(u32) -> Exp,
+    ) -> (HExpr, Exp, Vec<Hole>, Vec<Exp>) {
+        let num_holes = 1 + rand::random_range(0..3usize); // 1..=3 holes
+        let insts: Vec<Exp> = (0..num_holes).map(|_| inst_gen(inst_depth)).collect();
+        let mut used = BTreeSet::new();
+        let (hole_expr, target_expr) = random_template(template_depth, &insts, &mut used);
+        let holes: Vec<Hole> = used.into_iter().collect();
+        (hole_expr, target_expr, holes, insts)
+    }
+
+    /// Shared assertion: on a known-satisfiable instance the solver must never
+    /// report [`CegisError::Infeasible`] (a soundness bug) and must not panic.
+    /// `Ok` (found a solution) and `Err(IterationLimit)` (hit the cap — slow or
+    /// diverging) are both acceptable.  `result` is the solver's outcome with
+    /// its assignment dropped (the two solvers return different assignment
+    /// types, so we compare on the `Err` shape only).
+    fn assert_not_infeasible(
+        trial: usize,
+        solver: &str,
+        result: Result<(), CegisError>,
+        hole_expr: &HExpr,
+        target_expr: &Exp,
+        holes: &[Hole],
+        insts: &[Exp],
+    ) {
+        assert!(
+            !matches!(result, Err(CegisError::Infeasible)),
+            "trial {trial}: {solver} wrongly reported Infeasible on a known-satisfiable instance\n  \
+             hole_expr = {hole_expr:?}\n  target    = {target_expr:?}\n  \
+             insts     = {insts:?}\n  holes     = {holes:?}\n  result    = {result:?}"
+        );
+    }
+
+    /// Fast `solve_holes` round-trip: small dup-free fillings, many trials.
+    ///
+    /// `#[ignore]`d because it **currently fails intermittently** (~1 run in 8):
+    /// even with a dup-free hole *filling*, when the hole sits inside `dup`/`dup*`
+    /// structure `solve_holes` can wrongly return `Infeasible`.  Minimal
+    /// deterministic case pinned by [`solve_holes_wrongly_infeasible_under_dup`].
+    /// Run with `--ignored` to keep hunting; re-enable once that's fixed.
+    #[test]
+    #[ignore]
+    fn fuzz_solve_holes_roundtrip() {
+        for trial in 0..40 {
+            let mut store = SPPstore::new(FUZZ_FIELDS);
+            let (hole_expr, target_expr, holes, insts) = random_instance(3, 2, random_dup_free);
+            let target_dfa = expr_to_dfa(&target_expr, &mut store);
+            let result = solve_holes(
+                &hole_expr,
+                &holes,
+                &target_dfa,
+                &target_dfa,
+                &mut store,
+                Some(FUZZ_MAX_ITERS),
+            )
+            .map(|_| ());
+            assert_not_infeasible(
+                trial,
+                "solve_holes",
+                result,
+                &hole_expr,
+                &target_expr,
+                &holes,
+                &insts,
+            );
+        }
+    }
+
+    /// Heavier `solve_holes` round-trip: deeper expressions.  Slower, so opt-in.
+    #[test]
+    #[ignore]
+    fn fuzz_solve_holes_roundtrip_deep() {
+        for trial in 0..40 {
+            let mut store = SPPstore::new(FUZZ_FIELDS);
+            let (hole_expr, target_expr, holes, insts) = random_instance(4, 3, random_dup_free);
+            let target_dfa = expr_to_dfa(&target_expr, &mut store);
+            let result = solve_holes(
+                &hole_expr,
+                &holes,
+                &target_dfa,
+                &target_dfa,
+                &mut store,
+                Some(FUZZ_MAX_ITERS),
+            )
+            .map(|_| ());
+            assert_not_infeasible(
+                trial,
+                "solve_holes",
+                result,
+                &hole_expr,
+                &target_expr,
+                &holes,
+                &insts,
+            );
+        }
+    }
+
+    /// Randomized `solve_holes_full` round-trip: fillings may be *dup-ful*
+    /// (multi-step), exercising the `Union<SPP, Cand>` candidate space.
+    ///
+    /// The iteration cap means a slow/diverging instance surfaces as a tolerated
+    /// `IterationLimit` rather than a hang.  But this fuzzer **currently fails
+    /// intermittently** because it catches a real soundness bug: on some
+    /// satisfiable instances `solve_holes_full` wrongly returns `Infeasible`
+    /// (minimal case `Hole(0) == dup; dup`, pinned by
+    /// [`full_wrongly_infeasible_chained_dup`]).  So it's `#[ignore]`d — run it
+    /// manually (`--ignored`) to hunt for more such instances; re-enable once
+    /// the wrong-`Infeasible` bug is fixed.
+    #[test]
+    #[ignore]
+    fn fuzz_solve_holes_full_roundtrip() {
+        for trial in 0..30 {
+            let mut store = SPPstore::new(FUZZ_FIELDS);
+            let (hole_expr, target_expr, holes, insts) = random_instance(3, 2, random_maybe_dupful);
+            let target_dfa = expr_to_dfa(&target_expr, &mut store);
+            let result = solve_holes_full(
+                &hole_expr,
+                &holes,
+                &target_dfa,
+                &target_dfa,
+                &mut store,
+                Some(FUZZ_MAX_ITERS),
+            )
+            .map(|_| ());
+            assert_not_infeasible(
+                trial,
+                "solve_holes_full",
+                result,
+                &hole_expr,
+                &target_expr,
+                &holes,
+                &insts,
+            );
+        }
+    }
+
+    /// Heavier `solve_holes_full` round-trip.  `#[ignore]`d for the same
+    /// non-termination reason as [`fuzz_solve_holes_full_roundtrip`].
+    #[test]
+    #[ignore]
+    fn fuzz_solve_holes_full_roundtrip_deep() {
+        for trial in 0..30 {
+            let mut store = SPPstore::new(FUZZ_FIELDS);
+            let (hole_expr, target_expr, holes, insts) = random_instance(4, 3, random_maybe_dupful);
+            let target_dfa = expr_to_dfa(&target_expr, &mut store);
+            let result = solve_holes_full(
+                &hole_expr,
+                &holes,
+                &target_dfa,
+                &target_dfa,
+                &mut store,
+                Some(FUZZ_MAX_ITERS),
+            )
+            .map(|_| ());
+            assert_not_infeasible(
+                trial,
+                "solve_holes_full",
+                result,
+                &hole_expr,
+                &target_expr,
+                &holes,
+                &insts,
+            );
+        }
+    }
+
+    /// Regression test for a case the fuzzer first found: a hole filled with a
+    /// *nondeterministic* SPP (`(0:=false) + (1==true)`, whose summands overlap
+    /// when field 1 is true).  Counterexample-trace elaboration used to
+    /// forward-simulate greedily and could follow the wrong transition, tripping
+    /// an internal assertion in `aut::elaborate_step`/`elaborate_tail`.  The
+    /// equation is satisfiable by construction, so `solve_holes` must succeed.
+    #[test]
+    fn roundtrip_nondeterministic_hole_fill() {
+        let mut store = SPPstore::new(2);
+        // hole_expr = (Hole(1)* ; Hole(2)*)*
+        let hole_expr = HExpr::star(HExpr::sequence(
+            HExpr::star(HExpr::hole(Hole(1))),
+            HExpr::star(HExpr::hole(Hole(2))),
+        ));
+        // Hole(1) := (1==true ; 1==false)*  (denotes identity),
+        // Hole(2) := (0:=false) + (1==true)  (a nondeterministic SPP).
+        let h1 = Expr::star(Expr::sequence(Expr::test(1, true), Expr::test(1, false)));
+        let h2 = Expr::union(Expr::assign(0, false), Expr::test(1, true));
+        let target = Expr::star(Expr::sequence(Expr::star(h1), Expr::star(h2)));
+        let target_dfa = expr_to_dfa(&target, &mut store);
+        let result = solve_holes(
+            &hole_expr,
+            &[Hole(1), Hole(2)],
+            &target_dfa,
+            &target_dfa,
+            &mut store,
+            None,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// Minimal reproducer (found by `fuzz_solve_holes_full_roundtrip`) for
+    /// `solve_holes_full` **divergence**:
+    ///
+    /// ```text
+    /// Hole(0) ; Hole(2) ; Hole(2)  ==  dup        (2 fields)
+    /// ```
+    ///
+    /// Satisfiable by construction (e.g. `Hole(0) := dup`, `Hole(2) := 1`), so a
+    /// complete solver should return `Ok`.  Instead the CEGIS loop produces an
+    /// unbounded stream of *distinct* candidates (no candidate ever repeats —
+    /// each clause does exclude the previous one) without ever converging: the
+    /// `Union<SPP, Cand>` candidate oscillates on its `SPP` component under the
+    /// alternating upper/lower-bound counterexamples while its `Cand` component
+    /// never grows.
+    ///
+    /// Minimal ingredients, each necessary (drop any one → solves in ms):
+    /// * the **same hole used more than once** (`Hole(2)` twice) — with all
+    ///   holes distinct it converges;
+    /// * **≥ 2 fields** — at 1 field it converges;
+    /// * the `Union<SPP, Cand>` candidate kind — pure `Cand` (or pure `SPP`)
+    ///   terminates;
+    /// * **both bounds active** (here `lower == upper`) — a single-sided bound
+    ///   converges.
+    ///
+    /// With a low iteration cap the divergence surfaces as `IterationLimit`
+    /// rather than a hang, so this test runs quickly.  Crucially it must *not*
+    /// be `Infeasible` (the instance is satisfiable).  If the divergence is ever
+    /// fixed this should start returning `Ok` — update the assertion then.
+    #[test]
+    fn roundtrip_full_dupful_nontermination() {
+        let mut store = SPPstore::new(2);
+        // Hole(0) ; Hole(2) ; Hole(2)  ==  dup
+        let hole_expr = HExpr::sequence(
+            HExpr::sequence(HExpr::hole(Hole(0)), HExpr::hole(Hole(2))),
+            HExpr::hole(Hole(2)),
+        );
+        let target_dfa = expr_to_dfa(&Expr::dup(), &mut store);
+        let result = solve_holes_full(
+            &hole_expr,
+            &[Hole(0), Hole(2)],
+            &target_dfa,
+            &target_dfa,
+            &mut store,
+            Some(FUZZ_MAX_ITERS),
+        )
+        .map(|_| ());
+        assert_eq!(
+            result,
+            Err(CegisError::IterationLimit),
+            "expected the known divergence to hit the cap (not Infeasible, not Ok)"
+        );
+    }
+
+    /// Minimal reproducer (found by `fuzz_solve_holes_full_roundtrip`) for a
+    /// `solve_holes_full` **soundness bug** — a wrong `Infeasible` verdict:
+    ///
+    /// ```text
+    /// Hole(0)  ==  dup ; dup
+    /// ```
+    ///
+    /// This is trivially satisfiable (`Hole(0) := dup; dup`), and a single dup
+    /// works (`Hole(0) == dup` solves fine), but `solve_holes_full` reports
+    /// `Infeasible` for any hole that must emit **two or more** chained `dup`s
+    /// (also `dup;dup;dup`, `(dup+dup);(dup+1)`, …) — its `Union<SPP, Cand>`
+    /// candidate apparently can't realize a multi-step (length ≥ 3 trace) hole.
+    /// Deterministic: returns `Infeasible` on every run, at 1 or 2 fields.
+    ///
+    /// This test pins the current (buggy) behaviour so it can't regress
+    /// silently; when the bug is fixed it should return `Ok` and this assertion
+    /// must be updated.
+    #[test]
+    fn full_wrongly_infeasible_chained_dup() {
+        let mut store = SPPstore::new(1);
+        let target = Expr::sequence(Expr::dup(), Expr::dup());
+        let target_dfa = expr_to_dfa(&target, &mut store);
+        let result = solve_holes_full(
+            &HExpr::hole(Hole(0)),
+            &[Hole(0)],
+            &target_dfa,
+            &target_dfa,
+            &mut store,
+            Some(FUZZ_MAX_ITERS),
+        )
+        .map(|_| ());
+        assert_eq!(
+            result,
+            Err(CegisError::Infeasible),
+            "KNOWN BUG: solve_holes_full should solve `Hole(0) == dup;dup` \
+             (witness `dup;dup`); if this now returns Ok, the bug is fixed — \
+             update this assertion"
+        );
+    }
+
+    /// Minimal reproducer (found by `fuzz_solve_holes_roundtrip`) for a
+    /// `solve_holes` (SPP) **soundness bug** — a wrong `Infeasible`, even though
+    /// the hole only needs a plain dup-free SPP:
+    ///
+    /// ```text
+    /// (dup* ; (Hole(0) ; dup))*  ==  (dup* ; (0:=false ; dup))*       (2 fields)
+    /// ```
+    ///
+    /// Satisfiable by `Hole(0) := 0:=false` (a dup-free SPP, exactly what
+    /// `solve_holes` searches), yet it returns `Infeasible`.  Unlike
+    /// [`full_wrongly_infeasible_chained_dup`] the *hole* is dup-free here — the
+    /// trouble is the hole sitting inside `dup`/`dup*` structure, so the
+    /// multi-step counterexample handling mis-builds a clause and the learner
+    /// goes UNSAT.  (With the [`crate::holes::aut::elaborate_step`] fix this is a
+    /// graceful wrong `Infeasible`; without it the same instance panics in trace
+    /// elaboration — so the underlying logic bug predates that fix.)
+    /// Deterministic: `Infeasible` on every run.
+    ///
+    /// Pins the current (buggy) behaviour; should become `Ok` once fixed.
+    #[test]
+    fn solve_holes_wrongly_infeasible_under_dup() {
+        let mut store = SPPstore::new(2);
+        // (dup* ; (Hole(0) ; dup))*
+        let hole_expr = HExpr::star(HExpr::sequence(
+            HExpr::star(HExpr::dup()),
+            HExpr::sequence(HExpr::hole(Hole(0)), HExpr::dup()),
+        ));
+        // target with Hole(0) := 0:=false
+        let target = Expr::star(Expr::sequence(
+            Expr::star(Expr::dup()),
+            Expr::sequence(Expr::assign(0, false), Expr::dup()),
+        ));
+        let target_dfa = expr_to_dfa(&target, &mut store);
+        let result = solve_holes(
+            &hole_expr,
+            &[Hole(0)],
+            &target_dfa,
+            &target_dfa,
+            &mut store,
+            Some(FUZZ_MAX_ITERS),
+        )
+        .map(|_| ());
+        assert_eq!(
+            result,
+            Err(CegisError::Infeasible),
+            "KNOWN BUG: solve_holes should solve this with `Hole(0) := 0:=false`; \
+             if this now returns Ok, the bug is fixed — update this assertion"
+        );
     }
 }

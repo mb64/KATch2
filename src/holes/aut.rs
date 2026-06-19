@@ -1724,33 +1724,32 @@ pub fn elaborate_step<T: ENFA>(
         zero_spp,
     };
 
-    let trace_result = get_any_trace(&helper, store)
+    // Recover the helper's *actual* state path rather than re-simulating the
+    // packet trace through `inner`: when `inner` is nondeterministic, several
+    // transitions can accept the same packet pair, so a greedy forward
+    // simulation may follow a different path than the helper found and land in
+    // the wrong state.  `get_any_trace_with_states` hands back the exact states.
+    let (path_full, _output_pkt) = get_any_trace_with_states(&helper, store)
         .expect("elaborate_step: no inner ENFA path between source and dest");
-    let (pkt_trace_full, _output_pkt) = trace_result;
-    // pkt_trace_full[0] is the (arbitrary) packet at PreStart; pkt_trace_full[1]
-    // is `p_source` at `Inner(q_source)`; the rest are the inner-state packets.
-    let pkt_trace: Vec<Vec<bool>> = pkt_trace_full.into_iter().skip(2).collect();
+    // path_full[0] is `(PreStart, _)`; path_full[1] is `(Inner(q_source), p_source)`;
+    // the rest are the inner intermediates ending at `(Inner(q_dest), p_dest)`.
+    let path: Vec<(T::State, Vec<bool>)> = path_full
+        .into_iter()
+        .skip(2)
+        .map(|(q, p)| match q {
+            HelperState::Inner(s) => (s, p),
+            HelperState::PreStart => unreachable!("PreStart only occurs at the trace head"),
+        })
+        .collect();
 
-    let mut path: Vec<(T::State, Vec<bool>)> = Vec::new();
-    let mut state = q_source.clone();
-    let mut pkt: Vec<bool> = p_source.to_vec();
-    for next_pkt in pkt_trace {
-        let mut found: Option<T::State> = None;
-        for (spp, q_next) in inner.transitions(store, &state) {
-            if store.accepts(spp, &pkt, &next_pkt) {
-                found = Some(q_next);
-                break;
-            }
-        }
-        let q_next = found
-            .expect("forward simulation must find a transition matching the helper's trace step");
-        state = q_next;
-        pkt = next_pkt;
-        path.push((state.clone(), pkt.clone()));
-    }
-
-    debug_assert!(state == *q_dest);
-    debug_assert!(pkt == p_dest);
+    // The last visited state/packet must be the destination (or, when no inner
+    // step was needed, the source itself — which must then equal the dest).
+    let (final_state, final_pkt) = path
+        .last()
+        .map(|(s, p)| (s, p.as_slice()))
+        .unwrap_or((q_source, p_source));
+    debug_assert!(final_state == q_dest);
+    debug_assert!(final_pkt == p_dest);
 
     path
 }
@@ -1846,34 +1845,21 @@ pub fn elaborate_tail<T: ENFA>(
         zero_spp,
     };
 
-    let (pkt_trace_full, _output_pkt) = get_any_trace(&helper, store)
+    // As in `elaborate_step`, read the helper's actual state path instead of
+    // re-simulating: greedy forward simulation can pick the wrong transition
+    // when `inner` is nondeterministic.
+    let (path_full, _output_pkt) = get_any_trace_with_states(&helper, store)
         .expect("elaborate_tail: no inner ε-path emits the trace's output packet");
-    // pkt_trace_full[0] is the (arbitrary) PreStart packet; [1] is `p_last` at
-    // `Inner(q_last)`; the rest are the spliced invisible-state packets.
-    let pkt_trace: Vec<Vec<bool>> = pkt_trace_full.into_iter().skip(2).collect();
-
-    let mut path: Vec<(T::State, Vec<bool>)> = Vec::new();
-    let mut state = q_last.clone();
-    let mut pkt: Vec<bool> = p_last.to_vec();
-    for next_pkt in pkt_trace {
-        let mut found: Option<T::State> = None;
-        for (spp, q_next) in inner.transitions(store, &state) {
-            if inner.is_visible(store, &q_next) {
-                continue;
-            }
-            if store.accepts(spp, &pkt, &next_pkt) {
-                found = Some(q_next);
-                break;
-            }
-        }
-        let q_next = found
-            .expect("forward simulation must find an invisible transition matching the trace step");
-        state = q_next;
-        pkt = next_pkt;
-        path.push((state.clone(), pkt.clone()));
-    }
-
-    path
+    // path_full[0] is `(PreStart, _)`; path_full[1] is `(Inner(q_last), p_last)`;
+    // the rest are the spliced invisible inner states.
+    path_full
+        .into_iter()
+        .skip(2)
+        .map(|(q, p)| match q {
+            HelperState::Inner(s) => (s, p),
+            HelperState::PreStart => unreachable!("PreStart only occurs at the trace head"),
+        })
+        .collect()
 }
 
 #[cfg(test)]

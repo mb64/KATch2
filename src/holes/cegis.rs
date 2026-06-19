@@ -43,6 +43,11 @@ pub enum CegisError {
     /// The accumulated clauses became unsatisfiable: no SPP value for the
     /// hole can simultaneously satisfy the lower and upper bounds.
     Infeasible,
+    /// The loop hit the caller's iteration cap (`max_iters`) before either
+    /// converging or proving infeasibility.  Unlike [`CegisError::Infeasible`]
+    /// this is *inconclusive*: a solution may still exist (the loop may just be
+    /// converging slowly, or diverging).  Raising the cap may resolve it.
+    IterationLimit,
 }
 
 /// Solve `lower_bound ⊆ expr[holes] ⊆ upper_bound` for multiple holes.
@@ -57,6 +62,10 @@ pub enum CegisError {
 /// `C` is the candidate kind ([`spp::SPP`] or [`crate::holes::cand::Cand`]); the
 /// upper bound is a concrete [`ExplicitDFA`], which also serves as the DFA that
 /// [`crate::holes::cand::Cand`] candidates pull their states from.
+///
+/// `max_iters` caps the number of refinement rounds: pass `Some(n)` to return
+/// [`CegisError::IterationLimit`] after `n` rounds without convergence, or
+/// `None` to loop unboundedly (the historical behaviour).
 pub fn run<'a, C: Candidate<'a>, L: NFA>(
     aut: AutWithHoles,
     start: State,
@@ -64,6 +73,7 @@ pub fn run<'a, C: Candidate<'a>, L: NFA>(
     lower_bound: &L,
     upper_bound: &'a ExplicitDFA,
     store: &mut spp::SPPstore,
+    max_iters: Option<usize>,
 ) -> Result<HashMap<Hole, C>, CegisError> {
     let mut learner = SmtLearner::new(store.num_vars());
 
@@ -81,7 +91,15 @@ pub fn run<'a, C: Candidate<'a>, L: NFA>(
         .collect();
     let mut inst = Instantiate::new(aut, start, initial);
 
+    let mut iters: usize = 0;
     loop {
+        if let Some(cap) = max_iters
+            && iters >= cap
+        {
+            return Err(CegisError::IterationLimit);
+        }
+        iters += 1;
+
         match inst.check_less_than(store, upper_bound) {
             Ok(()) => match inst.check_greater_than(store, lower_bound) {
                 Ok(()) => return Ok(inst.holes().clone()),
@@ -356,7 +374,8 @@ mod tests {
         let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store);
-        let result = run::<spp::SPP, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
+        let result =
+            run::<spp::SPP, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store, None).unwrap();
         assert_eq!(result[&Hole(0)], store.zero);
     }
 
@@ -372,7 +391,7 @@ mod tests {
         let start = aut.expr_to_state(&mut store, &Expr::spp(top));
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
-        let err = run::<spp::SPP, _>(aut, start, &[], &lb, &ub, &mut store).unwrap_err();
+        let err = run::<spp::SPP, _>(aut, start, &[], &lb, &ub, &mut store, None).unwrap_err();
         assert_eq!(err, CegisError::Infeasible);
     }
 
@@ -386,7 +405,8 @@ mod tests {
         let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
-        let result = run::<spp::SPP, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
+        let result =
+            run::<spp::SPP, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store, None).unwrap();
         assert_eq!(result[&Hole(0)], store.zero);
     }
 
@@ -404,7 +424,8 @@ mod tests {
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store);
         let result =
-            run::<spp::SPP, _>(aut, start, &[Hole(0), Hole(1)], &lb, &ub, &mut store).unwrap();
+            run::<spp::SPP, _>(aut, start, &[Hole(0), Hole(1)], &lb, &ub, &mut store, None)
+                .unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[&Hole(0)], store.zero);
         assert_eq!(result[&Hole(1)], store.zero);
@@ -423,7 +444,8 @@ mod tests {
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
         let result =
-            run::<spp::SPP, _>(aut, start, &[Hole(0), Hole(1)], &lb, &ub, &mut store).unwrap();
+            run::<spp::SPP, _>(aut, start, &[Hole(0), Hole(1)], &lb, &ub, &mut store, None)
+                .unwrap();
         assert_eq!(result[&Hole(0)], store.zero);
         assert_eq!(result[&Hole(1)], store.zero);
     }
@@ -472,7 +494,8 @@ mod tests {
         let mut aut = AutWithHoles::new();
         let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
 
-        let result = run::<spp::SPP, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
+        let result =
+            run::<spp::SPP, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store, None).unwrap();
         let h0 = result[&Hole(0)];
         assert!(
             store.accepts(h0, &trace0, &output_pkt),
@@ -491,7 +514,7 @@ mod tests {
         let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store); // one state ⇒ Cand has num_states == 1
-        let result = run::<Cand, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
+        let result = run::<Cand, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store, None).unwrap();
         let cand = &result[&Hole(0)];
         assert!(cand.accepts_input(
             &mut store,
@@ -516,7 +539,7 @@ mod tests {
         let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
-        let result = run::<Cand, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store).unwrap();
+        let result = run::<Cand, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store, None).unwrap();
         let cand = &result[&Hole(0)];
         assert!(!cand.accepts_input(
             &mut store,
