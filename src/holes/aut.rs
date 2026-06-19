@@ -998,6 +998,36 @@ pub mod ops {
 
     impl<A: NFA, B: NFA> NFA for Intersection<A, B> {}
     impl<A: DFA, B: DFA> DFA for Intersection<A, B> {}
+
+    /// n-tuples of states from `T`
+    pub struct Exponential<A> {
+        pub inner: A,
+    }
+
+    impl<A: NFA> Exponential<A> {
+        pub fn transitions(
+            &self,
+            store: &mut spp::SPPstore,
+            q: &[A::State],
+        ) -> Vec<(spp::SPP, Vec<A::State>)> {
+            match q {
+                [] => vec![(store.top, vec![])],
+                [init @ .., last] => {
+                    let trans_a = self.transitions(store, init);
+                    let trans_b = self.inner.transitions(store, last);
+                    let mut out = Vec::with_capacity(trans_a.len() * trans_b.len());
+                    for &(spp_a, ref target_a) in &trans_a {
+                        for &(spp_b, ref target_b) in &trans_b {
+                            let mut target = target_a.clone();
+                            target.push(target_b.clone());
+                            out.push((store.intersect(spp_a, spp_b), target));
+                        }
+                    }
+                    out
+                }
+            }
+        }
+    }
 }
 
 // ---- ExplicitDFA -----------------------------------------------------------

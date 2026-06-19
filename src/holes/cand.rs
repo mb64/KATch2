@@ -10,7 +10,7 @@
 //!
 //! It's essentially an OBDD, like an SP or SPP, but the implementation is slightly different.
 
-use crate::holes::aut::ExplicitDFA;
+use crate::holes::aut::{DFA, ENFA, ExplicitDFA, NFA, ops};
 use crate::spp;
 
 use std::collections::HashMap;
@@ -47,6 +47,92 @@ pub struct Input {
     pub pkt_out: Vec<bool>,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum State {
+    Start,
+    Middle(CandIdx, Vec<usize>),
+}
+
+impl<'a> ENFA for Cand<'a> {
+    type State = State;
+
+    fn start(&self, _store: &mut spp::SPPstore) -> State {
+        State::Start
+    }
+
+    fn is_visible(&self, _store: &mut spp::SPPstore, _q: &State) -> bool {
+        true
+    }
+
+    fn transitions(&self, store: &mut spp::SPPstore, q: &State) -> Vec<(spp::SPP, Self::State)> {
+        match *q {
+            State::Start => {
+                // First, collect all the nodes at the appropriate level
+                let mut nodes = vec![self.head];
+                for _ in 0..store.num_vars() as usize {
+                    let new_nodes = nodes
+                        .into_iter()
+                        .flat_map(|n| {
+                            let CandNode::NextField { b00, b01, b10, b11 } = *self.get_node(n)
+                            else {
+                                unreachable!("malformed")
+                            };
+                            [b00, b01, b10, b11].into_iter()
+                        })
+                        .collect();
+                    nodes = new_nodes;
+                    nodes.sort();
+                    nodes.dedup();
+                }
+
+                // Each field-bottom node is entered via the SPP routing
+                // `(pkt_in, pkt_start)` to it, landing in `Middle` with the
+                // identity state vector (one token per DFA state).
+                let init: Vec<usize> = (0..self.dfa.num_states()).collect();
+                nodes
+                    .into_iter()
+                    .map(|n| (self.spp_to(store, n), State::Middle(n, init.clone())))
+                    .collect()
+            }
+            State::Middle(node, ref states) => {
+                debug_assert_eq!(states.len(), self.dfa.num_states());
+                let exp = ops::Exponential { inner: self.dfa };
+                exp.transitions(store, states)
+                    .into_iter()
+                    .map(|(spp, target)| (spp, State::Middle(node, target)))
+                    .collect()
+            }
+        }
+    }
+
+    fn output(&self, store: &mut spp::SPPstore, q: &State) -> spp::SPP {
+        let State::Middle(mut node, ref states) = *q else {
+            return store.zero;
+        };
+
+        assert_eq!(states.len(), self.dfa.num_states());
+        for &state in states {
+            let CandNode::NextState(children) = self.get_node(node) else {
+                unreachable!("malformed")
+            };
+            node = children[state];
+        }
+
+        let CandNode::Root(spp) = *self.get_node(node) else {
+            unreachable!("malformed")
+        };
+
+        spp
+    }
+}
+
+// A `Cand`'s transitions are disjoint by construction: the `Start` transitions
+// partition `(pkt_in, pkt_start)` (each pair routes to exactly one field-bottom
+// node), and the `Exponential` of a DFA keeps per-component transitions
+// disjoint.  So a `Cand` is a deterministic automaton.
+impl<'a> NFA for Cand<'a> {}
+impl<'a> DFA for Cand<'a> {}
+
 /// Error returned when two examples conflict: the same concrete [`Input`] is
 /// supplied with both `true` and `false`.
 #[derive(Debug, Clone)]
@@ -59,6 +145,44 @@ impl std::fmt::Display for ConflictError {
 }
 
 impl<'a> Cand<'a> {
+    /// The SPP relating `(pkt_in, pkt_start)` pairs that route from [`Self::head`]
+    /// to `target` through the field region.
+    ///
+    /// The field region (the `NextField` nodes) is shaped exactly like an SPP —
+    /// each level is a 4-way branch on a `(pkt_in[i], pkt_start[i])` bit pair —
+    /// so this just rebuilds that sub-diagram as an [`spp::SPP`], with `target`
+    /// as the sole accepting field-bottom node.
+    fn spp_to(&self, store: &mut spp::SPPstore, target: CandIdx) -> spp::SPP {
+        let mut memo: HashMap<CandIdx, spp::SPP> = HashMap::new();
+        self.spp_to_rec(store, self.head, target, &mut memo)
+    }
+
+    fn spp_to_rec(
+        &self,
+        store: &mut spp::SPPstore,
+        node: CandIdx,
+        target: CandIdx,
+        memo: &mut HashMap<CandIdx, spp::SPP>,
+    ) -> spp::SPP {
+        if let Some(&spp) = memo.get(&node) {
+            return spp;
+        }
+        let spp = match *self.get_node(node) {
+            CandNode::NextField { b00, b01, b10, b11 } => {
+                let s00 = self.spp_to_rec(store, b00, target, memo);
+                let s01 = self.spp_to_rec(store, b01, target, memo);
+                let s10 = self.spp_to_rec(store, b10, target, memo);
+                let s11 = self.spp_to_rec(store, b11, target, memo);
+                store.mk(s00, s01, s10, s11)
+            }
+            // Field-bottom node (a `NextState` or `Root`): a depth-0 SPP that
+            // accepts iff we landed on `target`.
+            _ => spp::SPP::new((node == target) as u32),
+        };
+        memo.insert(node, spp);
+        spp
+    }
+
     /// Generalize a `Cand` from examples.
     ///
     /// `num_vars` is the packet width (length of every `pkt_*`); `num_states`
@@ -469,6 +593,68 @@ mod tests {
         let dfa = example_dfa(&mut store, 2);
         let cand = Cand::from_examples(&mut store, &dfa, &examples).unwrap();
         assert_consistent(&cand, &mut store, &examples);
+    }
+
+    /// The `ENFA` view must agree with `accepts_input`.
+    ///
+    /// `example_dfa` has no transitions, so (for `num_states >= 1`) a `Middle`
+    /// node is a dead end and every accepted trace has length 2:
+    /// `[pkt_in, pkt_start]`.  After the `Start` step the automaton sits in
+    /// `Middle(n, identity)` with the last packet equal to `pkt_start`, and its
+    /// `output` is the `Root` SPP reached by walking `n` through the identity
+    /// state vector.  That is exactly `accepts_input` on the input whose
+    /// `states` is the identity and whose `pkt_end` is `pkt_start`.
+    #[test]
+    fn enfa_matches_accepts_input() {
+        const NV: u32 = 2;
+        const NS: usize = 2;
+
+        let bits = |n: u32| {
+            (0..n)
+                .map(|_| rand::random::<bool>())
+                .collect::<Vec<bool>>()
+        };
+        let identity: Vec<usize> = (0..NS).collect();
+
+        for _ in 0..50 {
+            let mut store = spp::SPPstore::new(NV);
+            let dfa = example_dfa(&mut store, NS);
+
+            // Build from random (deduplicated) examples.
+            let mut seen: HashMap<Vec<usize>, bool> = HashMap::new();
+            let mut examples: Vec<(Input, bool)> = Vec::new();
+            for _ in 0..20 {
+                let states: Vec<usize> = (0..NS).map(|_| rand::random_range(0..NS)).collect();
+                let inp = input(&bits(NV), &bits(NV), &states, &bits(NV), &bits(NV));
+                let label = rand::random::<bool>();
+                let mut key: Vec<usize> = Vec::new();
+                key.extend(inp.pkt_in.iter().map(|&b| b as usize));
+                key.extend(inp.pkt_start.iter().map(|&b| b as usize));
+                key.extend(&inp.states);
+                key.extend(inp.pkt_end.iter().map(|&b| b as usize));
+                key.extend(inp.pkt_out.iter().map(|&b| b as usize));
+                if seen.insert(key, label).is_none() {
+                    examples.push((inp, label));
+                }
+            }
+            let cand = Cand::from_examples(&mut store, &dfa, &examples).unwrap();
+
+            // The two evaluation paths must agree on arbitrary queries.
+            for _ in 0..20 {
+                let pkt_in = bits(NV);
+                let pkt_start = bits(NV);
+                let pkt_out = bits(NV);
+
+                let via_input = cand.accepts_input(
+                    &mut store,
+                    &input(&pkt_in, &pkt_start, &identity, &pkt_start, &pkt_out),
+                );
+                let trace = vec![pkt_in, pkt_start];
+                let via_enfa = cand.dfa_accepts(&mut store, &trace, &pkt_out);
+
+                assert_eq!(via_input, via_enfa, "ENFA disagrees with accepts_input");
+            }
+        }
     }
 
     #[test]
