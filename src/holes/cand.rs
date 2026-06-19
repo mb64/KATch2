@@ -96,7 +96,12 @@ impl<'a> ENFA for Cand<'a> {
             }
             State::Middle(node, ref states) => {
                 debug_assert_eq!(states.len(), self.dfa.num_states());
-                let exp = ops::Exponential { inner: self.dfa };
+                // Step over the *completed* DFA so a component sitting on a
+                // dead state flows into the sink instead of stalling the whole
+                // product (see `ops::CompletedDfa`).
+                let exp = ops::Exponential {
+                    inner: ops::CompletedDfa::new(self.dfa),
+                };
                 exp.transitions(store, states)
                     .into_iter()
                     .map(|(spp, target)| (spp, State::Middle(node, target)))
@@ -217,7 +222,9 @@ impl<'a> Cand<'a> {
                     path.push(2 * input.pkt_in[i] as usize + input.pkt_start[i] as usize);
                 }
                 for &s in &input.states {
-                    assert!(s < ns, "state value out of range");
+                    // `ns` is the sink value (see `ops::CompletedDfa`); real
+                    // states are `0..ns`, so a state value may be up to `ns`.
+                    assert!(s <= ns, "state value out of range");
                     path.push(s);
                 }
                 for i in 0..nv {
@@ -242,8 +249,10 @@ impl<'a> Cand<'a> {
         // Empty input: we just accept everything
         if examples.is_empty() {
             let mut node = builder.mk(CandNode::Root(store.top));
+            // `ns` state levels, each a `NextState` with `ns + 1` children (one
+            // per real state plus the `CompletedDfa` sink).
             for _ in 0..ns {
-                node = builder.mk(CandNode::NextState(vec![node; ns]));
+                node = builder.mk(CandNode::NextState(vec![node; ns + 1]));
             }
             for _ in 0..nv {
                 node = builder.mk(CandNode::NextField {
@@ -279,9 +288,10 @@ impl<'a> Cand<'a> {
             cand_map.insert(e, node);
         }
 
-        // State levels (width `num_states`).
+        // State levels: `ns` levels, each a `NextState` of width `ns + 1`
+        // (real states `0..ns` plus the `CompletedDfa` sink at index `ns`).
         for depth in (nv..nv + ns).rev() {
-            cand_map = build_layer(ns, depth, &decisions, &cand_map, |row| {
+            cand_map = build_layer(ns + 1, depth, &decisions, &cand_map, |row| {
                 builder.mk(CandNode::NextState(row.to_vec()))
             });
         }
@@ -723,31 +733,26 @@ mod tests {
         assert!(top.dfa_accepts(&mut store, &[p.clone(), p.clone()], &p));
     }
 
-    /// BUG (localized to the `Cand` ENFA / its use of `Exponential`):
+    /// Regression test for the `Cand` ENFA stall over a transition-bearing DFA,
+    /// fixed by stepping over [`ops::CompletedDfa`].
+    ///
     /// `Cand::from_examples(.., &[])` is the most-permissive candidate
-    /// (`Cand::top`, documented "accepts everything"), yet over the `dup; dup`
-    /// DFA its ENFA accepts only length-2 traces.
-    ///
-    /// From `Start` it reaches `Middle(_, [0, 1, 2])` (the *identity* state
-    /// vector).  `Exponential::transitions` requires every component to step
-    /// simultaneously (it intersects the per-component SPPs), but component 2 —
-    /// the dead accepting state — has no transition, so the whole vector is
-    /// stuck and `Middle([0,1,2])` has no outgoing edges.  Hence the ENFA can't
-    /// produce the length-3 trace `[p, p, p] -> p` that `dup; dup` accepts, so
-    /// `top ⊉ dup; dup`.  Because CEGIS starts from `top` and only ever shrinks
-    /// it, this makes `solve_holes_full` wrongly report `Hole == dup; dup`
-    /// infeasible (see `holes::mod::full_wrongly_infeasible_chained_dup`).
-    ///
-    /// Asserts the current (buggy) behaviour as a tripwire; once the ENFA is
-    /// fixed the length-3 trace should be accepted and these assertions flipped.
+    /// (`Cand::top`, "accepts everything"), so over the `dup; dup` DFA it must
+    /// accept the length-3 trace `[p, p, p] -> p` that `dup; dup` produces.
+    /// Before the fix, the `Middle` reached from `Start` carried the identity
+    /// vector `[0, 1, 2]` and had *no* outgoing transitions — `Exponential`
+    /// stalled because the dead accepting state 2 couldn't step — capping the
+    /// ENFA at length-2 traces and making `solve_holes_full` wrongly report
+    /// `Hole == dup; dup` infeasible.  Now the dead component flows into the
+    /// sink and the product keeps stepping.
     #[test]
-    fn top_cand_over_two_dups_stalls_at_length_two() {
+    fn top_cand_over_two_dups_reaches_length_three() {
         let mut store = spp::SPPstore::new(1);
         let dfa = two_dup_dfa(&mut store);
         let top = Cand::from_examples(&mut store, &dfa, &[]).unwrap();
         let p = vec![false];
 
-        // One routing edge out of Start, into a Middle that is then stuck.
+        // The first `Middle` (identity vector) now steps instead of stalling.
         let start = top.start(&mut store);
         let edges = top.transitions(&mut store, &start);
         assert_eq!(edges.len(), 1, "Start has a single routing edge");
@@ -757,17 +762,36 @@ mod tests {
             "Start lands in Middle with the identity state vector"
         );
         assert!(
-            top.transitions(&mut store, &middle).is_empty(),
-            "BUG: Middle([0,1,2]) has no transitions — Exponential stalls on \
-             the dead state 2, so the ENFA can never advance past length 2"
+            !top.transitions(&mut store, &middle).is_empty(),
+            "Middle now has outgoing transitions (dead component routes to sink)"
         );
 
-        // Length 2 is accepted; the length-3 trace `dup; dup` accepts is not.
+        // The most-permissive Cand accepts every trace `dup; dup` does — in
+        // particular the length-3 `[p, p, p] -> p` (and, being permissive,
+        // longer traces too).
         assert!(top.dfa_accepts(&mut store, &[p.clone(), p.clone()], &p));
-        assert!(
-            !top.dfa_accepts(&mut store, &[p.clone(), p.clone(), p.clone()], &p),
-            "BUG: the most-permissive Cand should accept every trace dup;dup \
-             does, including the length-3 [p, p, p] -> p"
-        );
+        assert!(top.dfa_accepts(&mut store, &[p.clone(), p.clone(), p.clone()], &p));
+    }
+
+    /// [`ops::CompletedDfa`] totalizes the transition function: the dead state 2
+    /// of `dup; dup` gains an edge to the sink (index 3), the sink absorbs
+    /// everything, and a live state both keeps its real edge and routes the
+    /// uncovered packet pairs to the sink.
+    #[test]
+    fn completed_dfa_totalizes_dead_state() {
+        let mut store = spp::SPPstore::new(1);
+        let dfa = two_dup_dfa(&mut store); // states 0,1,2 with 2 dead
+        let comp = ops::CompletedDfa::new(&dfa);
+        assert_eq!(comp.num_states(), 4); // 3 real states + sink
+        let sink = 3usize;
+
+        // Dead state 2 now steps to the sink on every packet pair.
+        assert_eq!(comp.transitions(&mut store, &2), vec![(store.top, sink)]);
+        // The sink absorbs everything.
+        assert_eq!(comp.transitions(&mut store, &sink), vec![(store.top, sink)]);
+        // A live state keeps its real successor and routes the rest to the sink.
+        let t0 = comp.transitions(&mut store, &0);
+        assert!(t0.iter().any(|&(_, tgt)| tgt == 1));
+        assert!(t0.iter().any(|&(_, tgt)| tgt == sink));
     }
 }

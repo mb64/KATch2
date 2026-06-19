@@ -192,10 +192,14 @@ impl<'a> Candidate<'a> for Cand<'a> {
 
         // The state vector starts at the identity (one token per DFA state) and
         // evolves by the upper-bound DFA's exponential over the consumed
-        // subtrace.  If some component has no transition for a packet pair, the
-        // DFA can't follow this subtrace and there is no valid traversal.
+        // subtrace.  We step the *completed* DFA (see `ops::CompletedDfa`) — the
+        // same view `Cand`'s ENFA uses — so a component on a dead state flows
+        // into the sink rather than stalling the product (which would otherwise
+        // wrongly make the subtrace untraversable).
         let mut states: Vec<usize> = (0..upper_bound.num_states()).collect();
-        let exp = ops::Exponential { inner: upper_bound };
+        let exp = ops::Exponential {
+            inner: ops::CompletedDfa::new(upper_bound),
+        };
         for pair in trace.windows(2) {
             let next = exp
                 .transitions(store, &states)

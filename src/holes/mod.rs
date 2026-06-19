@@ -569,13 +569,13 @@ mod test {
     /// (multi-step), exercising the `Union<SPP, Cand>` candidate space.
     ///
     /// The iteration cap means a slow/diverging instance surfaces as a tolerated
-    /// `IterationLimit` rather than a hang.  But this fuzzer **currently fails
-    /// intermittently** because it catches a real soundness bug: on some
-    /// satisfiable instances `solve_holes_full` wrongly returns `Infeasible`
-    /// (minimal case `Hole(0) == dup; dup`, pinned by
-    /// [`full_wrongly_infeasible_chained_dup`]).  So it's `#[ignore]`d — run it
-    /// manually (`--ignored`) to hunt for more such instances; re-enable once
-    /// the wrong-`Infeasible` bug is fixed.
+    /// `IterationLimit` rather than a hang.  The `Cand` ENFA stall is now fixed
+    /// (see [`full_solves_chained_dup`] and `ops::CompletedDfa`), so the
+    /// chained-dup family of wrong-`Infeasible`s is gone.  But this fuzzer
+    /// **still fails intermittently**: `solve_holes_full` retains *residual*
+    /// wrong-`Infeasible` bugs on more complex instances (the deep variant trips
+    /// them more readily).  So it stays `#[ignore]`d — run it manually
+    /// (`--ignored`) to hunt for those; re-enable once they're fixed.
     #[test]
     #[ignore]
     fn fuzz_solve_holes_full_roundtrip() {
@@ -676,18 +676,18 @@ mod test {
     /// complete solver should return `Ok`.  Instead the CEGIS loop produces an
     /// unbounded stream of *distinct* candidates (no candidate ever repeats —
     /// each clause does exclude the previous one) without ever converging: the
-    /// `Union<SPP, Cand>` candidate oscillates on its `SPP` component under the
-    /// alternating upper/lower-bound counterexamples while its `Cand` component
-    /// never grows.
+    /// `Union<SPP, Cand>` candidate oscillates under the alternating
+    /// upper/lower-bound counterexamples.
     ///
-    /// Minimal ingredients, each necessary (drop any one → solves in ms):
-    /// * the **same hole used more than once** (`Hole(2)` twice) — with all
-    ///   holes distinct it converges;
-    /// * **≥ 2 fields** — at 1 field it converges;
-    /// * the `Union<SPP, Cand>` candidate kind — pure `Cand` (or pure `SPP`)
-    ///   terminates;
-    /// * **both bounds active** (here `lower == upper`) — a single-sided bound
-    ///   converges.
+    /// Note this is a *separate* problem from the `Cand` ENFA stall (now fixed
+    /// via [`crate::holes::aut::ops::CompletedDfa`]): that fix lets the `Cand`
+    /// grow and makes single-hole chained-dup cases like
+    /// [`full_solves_chained_dup`] converge, but this instance — a hole used
+    /// **more than once** under both bounds — still diverges.  Minimal
+    /// ingredients, each necessary (drop any one → solves in ms): the same hole
+    /// used more than once (`Hole(2)` twice; distinct holes converge), ≥ 2
+    /// fields (1 field converges), and both bounds active (a single-sided bound
+    /// converges).
     ///
     /// With a low iteration cap the divergence surfaces as `IterationLimit`
     /// rather than a hang, so this test runs quickly.  Crucially it must *not*
@@ -718,25 +718,20 @@ mod test {
         );
     }
 
-    /// Minimal reproducer (found by `fuzz_solve_holes_full_roundtrip`) for a
-    /// `solve_holes_full` **soundness bug** — a wrong `Infeasible` verdict:
+    /// Regression test: `solve_holes_full` synthesizes a hole that must emit
+    /// **two chained `dup`s**:
     ///
     /// ```text
     /// Hole(0)  ==  dup ; dup
     /// ```
     ///
-    /// This is trivially satisfiable (`Hole(0) := dup; dup`), and a single dup
-    /// works (`Hole(0) == dup` solves fine), but `solve_holes_full` reports
-    /// `Infeasible` for any hole that must emit **two or more** chained `dup`s
-    /// (also `dup;dup;dup`, `(dup+dup);(dup+1)`, …) — its `Union<SPP, Cand>`
-    /// candidate apparently can't realize a multi-step (length ≥ 3 trace) hole.
-    /// Deterministic: returns `Infeasible` on every run, at 1 or 2 fields.
-    ///
-    /// This test pins the current (buggy) behaviour so it can't regress
-    /// silently; when the bug is fixed it should return `Ok` and this assertion
-    /// must be updated.
+    /// This once wrongly returned `Infeasible` (the `Cand` ENFA stalled and
+    /// couldn't realize a length-≥3 hole; see
+    /// [`crate::holes::cand`]'s `top_cand_over_two_dups_reaches_length_three`).
+    /// Fixed by stepping `Cand` over [`crate::holes::aut::ops::CompletedDfa`];
+    /// it now solves (witness `dup; dup`).
     #[test]
-    fn full_wrongly_infeasible_chained_dup() {
+    fn full_solves_chained_dup() {
         let mut store = SPPstore::new(1);
         let target = Expr::sequence(Expr::dup(), Expr::dup());
         let target_dfa = expr_to_dfa(&target, &mut store);
@@ -747,15 +742,8 @@ mod test {
             &target_dfa,
             &mut store,
             Some(FUZZ_MAX_ITERS),
-        )
-        .map(|_| ());
-        assert_eq!(
-            result,
-            Err(CegisError::Infeasible),
-            "KNOWN BUG: solve_holes_full should solve `Hole(0) == dup;dup` \
-             (witness `dup;dup`); if this now returns Ok, the bug is fixed — \
-             update this assertion"
         );
+        assert!(result.is_ok(), "{:?}", result.map(|_| ()));
     }
 
     /// Minimal reproducer (found by `fuzz_solve_holes_roundtrip`) for a

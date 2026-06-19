@@ -1030,6 +1030,86 @@ pub mod ops {
             }
         }
     }
+
+    // ---- CompletedDfa ----------------------------------------------------
+
+    /// A *totalized* view of an [`ExplicitDFA`].  Every real state gains an
+    /// extra transition, for exactly the `(in, out)` packet pairs its real
+    /// edges don't already cover, routing them to a synthesized absorbing
+    /// **sink** state at index `inner.num_states()`.  The sink loops to itself
+    /// on `top` and is non-accepting (`output` is `zero`).
+    ///
+    /// Because the transition function is now *total*, [`Exponential`] over a
+    /// `CompletedDfa` never stalls: a component whose real run would have died
+    /// (a state with no matching edge) instead flows into the sink and stays
+    /// there, while the live components keep stepping.  Completion adds no
+    /// accepting behaviour, so it preserves the DFA's language.
+    ///
+    /// States are plain `usize`s (`0..inner.num_states()` are the real states,
+    /// `inner.num_states()` is the sink), so an [`Exponential`] state vector
+    /// stays a `Vec<usize>`.
+    #[derive(Clone, Copy)]
+    pub struct CompletedDfa<'a> {
+        inner: &'a ExplicitDFA,
+    }
+
+    impl<'a> CompletedDfa<'a> {
+        pub fn new(inner: &'a ExplicitDFA) -> Self {
+            CompletedDfa { inner }
+        }
+
+        /// Number of states including the sink (`inner.num_states() + 1`).
+        pub fn num_states(&self) -> usize {
+            self.inner.num_states() + 1
+        }
+
+        /// Index of the synthesized sink state.
+        fn sink(&self) -> usize {
+            self.inner.num_states()
+        }
+    }
+
+    impl<'a> ENFA for CompletedDfa<'a> {
+        type State = usize;
+
+        fn start(&self, _store: &mut spp::SPPstore) -> usize {
+            self.inner.start
+        }
+
+        fn is_visible(&self, _store: &mut spp::SPPstore, _q: &usize) -> bool {
+            true
+        }
+
+        fn transitions(&self, store: &mut spp::SPPstore, q: &usize) -> Vec<(spp::SPP, usize)> {
+            let sink = self.sink();
+            if *q == sink {
+                return vec![(store.top, sink)];
+            }
+            let inner_trans = self.inner.transitions(store, q);
+            let mut covered = store.zero;
+            let mut result: Vec<(spp::SPP, usize)> = Vec::with_capacity(inner_trans.len() + 1);
+            for (spp, q_next) in inner_trans {
+                covered = store.union(covered, spp);
+                result.push((spp, q_next));
+            }
+            let missing = store.difference(store.top, covered);
+            if missing != store.zero {
+                result.push((missing, sink));
+            }
+            result
+        }
+
+        fn output(&self, store: &mut spp::SPPstore, q: &usize) -> spp::SPP {
+            if *q == self.sink() {
+                store.zero
+            } else {
+                self.inner.outputs[*q]
+            }
+        }
+    }
+
+    impl<'a> NFA for CompletedDfa<'a> {}
+    impl<'a> DFA for CompletedDfa<'a> {}
 }
 
 // ---- ExplicitDFA -----------------------------------------------------------
