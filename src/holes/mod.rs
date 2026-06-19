@@ -746,27 +746,16 @@ mod test {
         assert!(result.is_ok(), "{:?}", result.map(|_| ()));
     }
 
-    /// Minimal reproducer (found by `fuzz_solve_holes_roundtrip`) for a
-    /// `solve_holes` (SPP) **soundness bug** — a wrong `Infeasible`, even though
-    /// the hole only needs a plain dup-free SPP:
+    /// Regression test for a bug found by `fuzz_solve_holes_roundtrip`.
     ///
     /// ```text
     /// (dup* ; (Hole(0) ; dup))*  ==  (dup* ; (0:=false ; dup))*       (2 fields)
     /// ```
     ///
-    /// Satisfiable by `Hole(0) := 0:=false` (a dup-free SPP, exactly what
-    /// `solve_holes` searches), yet it returns `Infeasible`.  Unlike
-    /// [`full_wrongly_infeasible_chained_dup`] the *hole* is dup-free here — the
-    /// trouble is the hole sitting inside `dup`/`dup*` structure, so the
-    /// multi-step counterexample handling mis-builds a clause and the learner
-    /// goes UNSAT.  (With the [`crate::holes::aut::elaborate_step`] fix this is a
-    /// graceful wrong `Infeasible`; without it the same instance panics in trace
-    /// elaboration — so the underlying logic bug predates that fix.)
-    /// Deterministic: `Infeasible` on every run.
-    ///
-    /// Pins the current (buggy) behaviour; should become `Ok` once fixed.
+    /// This was caused by a bug in [`crate::holes::aut::elaborate_step`], which
+    /// has been fixed.
     #[test]
-    fn solve_holes_wrongly_infeasible_under_dup() {
+    fn dup_in_a_loop() {
         let mut store = SPPstore::new(2);
         // (dup* ; (Hole(0) ; dup))*
         let hole_expr = HExpr::star(HExpr::sequence(
@@ -788,66 +777,42 @@ mod test {
             Some(FUZZ_MAX_ITERS),
         )
         .map(|_| ());
-        assert_eq!(
-            result,
-            Err(CegisError::Infeasible),
-            "KNOWN BUG: solve_holes should solve this with `Hole(0) := 0:=false`; \
-             if this now returns Ok, the bug is fixed — update this assertion"
-        );
+        result.expect("should have a solution");
     }
 
     /// Residual `solve_holes_full` wrong-`Infeasible` (found by
-    /// `fuzz_solve_holes_full_roundtrip`), minimized:
+    /// `fuzz_solve_holes_full_roundtrip`), minimized to a **deterministic** case:
     ///
     /// ```text
-    /// Hole(0)*  ==  (dup; dup  +  0:=true)*        (1 field)
+    /// Hole(0)*  ==  (0:=true; dup)*        (1 field)
     /// ```
     ///
-    /// Satisfiable by `Hole(0) := dup; dup + 0:=true`.  The `CompletedDfa` fix
-    /// cleared the basic chained-dup stall, and the neighbours all solve now:
-    /// `Hole(0) == dup; dup` ([`full_solves_chained_dup`]), `(hole)* == dup*`,
-    /// `(hole)* == (dup; dup)*`, the un-starred union `hole == dup; dup + 0:=true`,
-    /// and the union with the identity `(dup; dup + 1)*`.  But chained-dup
-    /// **unioned with a non-identity SPP, under a star** still trips a wrong
-    /// `Infeasible`.
+    /// Satisfiable by `Hole(0) := 0:=true; dup`.  The `CompletedDfa` fix cleared
+    /// the basic chained-dup stall — `Hole(0) == dup; dup`
+    /// ([`full_solves_chained_dup`]), `(hole)* == dup*` and `(hole)* ==
+    /// (dup; dup)*` all solve — but a hole that **assigns then dups, under a
+    /// star** still trips a wrong `Infeasible`, on every run at 1 field.  The
+    /// order matters: `0:=true; dup` fails, yet `0==true; dup` (a *test* before
+    /// the dup) solves — so it's specifically an assignment's output
+    /// interacting with the dup under the star.
     ///
-    /// Unlike the earlier bugs this one is **nondeterministic** (it depends on
-    /// `HashMap` iteration order): most runs are `Infeasible`, but it
-    /// occasionally solves.  So we sample several fresh attempts and assert the
-    /// bug appears at least once — when it's fixed every attempt returns `Ok`,
-    /// the count drops to zero, and this fires.  Remove the test then.
+    /// `#[should_panic]` documents that this test is currently failing.
     #[test]
-    fn full_residual_wrong_infeasible_dupdup_union_under_star() {
-        // Hole(0)*  ==  (dup; dup + 0:=true)*   (structure is store-independent)
+    #[should_panic] // BUG
+    fn full_residual_wrong_infeasible_assign_dup_under_star() {
+        let mut store = SPPstore::new(1);
+        // Hole(0)*  ==  (0:=true; dup)*
         let hole_expr = HExpr::star(HExpr::hole(Hole(0)));
-        let attempts = 16;
-        let mut infeasible = 0;
-        for _ in 0..attempts {
-            let mut store = SPPstore::new(1);
-            let target = Expr::star(Expr::union(
-                Expr::sequence(Expr::dup(), Expr::dup()),
-                Expr::assign(0, true),
-            ));
-            let target_dfa = expr_to_dfa(&target, &mut store);
-            let result = solve_holes_full(
-                &hole_expr,
-                &[Hole(0)],
-                &target_dfa,
-                &target_dfa,
-                &mut store,
-                Some(FUZZ_MAX_ITERS),
-            )
-            .map(|_| ());
-            if result == Err(CegisError::Infeasible) {
-                infeasible += 1;
-            }
-        }
-        assert!(
-            infeasible > 0,
-            "KNOWN BUG: solve_holes_full wrongly returns Infeasible for \
-             `Hole(0)* == (dup;dup + 0:=true)*` (satisfiable by the target \
-             itself) on most runs, but saw 0/{attempts} Infeasible — if the bug \
-             is fixed, remove this test"
+        let target = Expr::star(Expr::sequence(Expr::assign(0, true), Expr::dup()));
+        let target_dfa = expr_to_dfa(&target, &mut store);
+        let result = solve_holes_full(
+            &hole_expr,
+            &[Hole(0)],
+            &target_dfa,
+            &target_dfa,
+            &mut store,
+            Some(FUZZ_MAX_ITERS),
         );
+        result.expect("should have a solution");
     }
 }

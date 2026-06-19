@@ -19,7 +19,7 @@ use std::hash::Hash;
 /// underlying automaton may use to compute SPPs on demand.  Implementations
 /// that don't need the store may simply ignore it.
 pub trait ENFA {
-    type State: Clone + Eq + Hash;
+    type State: Clone + Eq + Hash + std::fmt::Debug;
 
     /// The unique start state.
     fn start(&self, store: &mut spp::SPPstore) -> Self::State;
@@ -413,22 +413,24 @@ impl<T: ENFA> EpsilonClosure<T> {
         visible_path: &[(T::State, Vec<bool>)],
         output_pkt: &[bool],
     ) -> Vec<(T::State, Vec<bool>)> {
+        assert!(!visible_path.is_empty());
+
         // `elaborate_step` fills the between-states gaps; `elaborate_tail`
         // recovers the trailing ε-path to where the output is emitted.
         let mut full: Vec<(T::State, Vec<bool>)> = Vec::new();
-        if let Some(first) = visible_path.first() {
-            full.push(first.clone());
-        }
+        full.push(visible_path[0].clone());
         for w in visible_path.windows(2) {
             let (q_curr, p_curr) = &w[0];
             let (q_next, p_next) = &w[1];
             let step = elaborate_step(self.inner(), store, q_curr, p_curr, q_next, p_next);
+            println!("-> elaborate_trace: from {q_curr:?} to {q_next:?}: {step:?}");
             full.extend(step);
         }
-        if let Some((q_last, p_last)) = visible_path.last() {
-            let tail = elaborate_tail(self.inner(), store, q_last, p_last, output_pkt);
-            full.extend(tail);
-        }
+
+        let (q_last, p_last) = visible_path.last().unwrap();
+        let tail = elaborate_tail(self.inner(), store, q_last, p_last, output_pkt);
+        full.extend(tail);
+
         full
     }
 
@@ -778,7 +780,7 @@ pub mod ops {
     /// `(in, out)` packet pair.  The sink loops to itself with `top` and has
     /// `top` as its output, so any packet pair in any extension of the trace
     /// is accepted by the complement once it's reached.
-    #[derive(Clone, PartialEq, Eq, Hash)]
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum CompState<S> {
         Inner(S),
         Sink,
@@ -850,7 +852,7 @@ pub mod ops {
 
     /// State of [`Union`]: a fresh `Start` that fans out into either side's
     /// start, plus tagged inner states.
-    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum UnionState<L, R> {
         Start,
         Left(L),
@@ -1718,16 +1720,16 @@ pub fn forward_reachable<A: ENFA>(
 /// transition pins the inner source packet to `p_source` via
 /// `force_output_spp(p_source)`.  Output is non-zero only at `q_dest`
 /// (filtered to `p_dest`).
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum HelperState<S> {
-    PreStart,
+    Start,
     Inner(S),
 }
 
 struct ElaborateStepHelper<'a, T: ENFA> {
     inner: &'a T,
     /// `force_output_spp(p_source)`: relates anything to `p_source`.
-    pre_to_source_spp: spp::SPP,
+    start_to_source_spp: spp::SPP,
     source: T::State,
     end: T::State,
     end_output: spp::SPP,
@@ -1738,7 +1740,7 @@ impl<'a, T: ENFA> ENFA for ElaborateStepHelper<'a, T> {
     type State = HelperState<T::State>;
 
     fn start(&self, _store: &mut spp::SPPstore) -> Self::State {
-        HelperState::PreStart
+        HelperState::Start
     }
 
     fn is_visible(&self, _store: &mut spp::SPPstore, _q: &Self::State) -> bool {
@@ -1751,10 +1753,17 @@ impl<'a, T: ENFA> ENFA for ElaborateStepHelper<'a, T> {
         q: &Self::State,
     ) -> Vec<(spp::SPP, Self::State)> {
         match q {
-            HelperState::PreStart => vec![(
-                self.pre_to_source_spp,
-                HelperState::Inner(self.source.clone()),
-            )],
+            HelperState::Start => self
+                .inner
+                .transitions(store, &self.source)
+                .into_iter()
+                .map(|(spp, q_next)| {
+                    (
+                        store.sequence(self.start_to_source_spp, spp),
+                        HelperState::Inner(q_next),
+                    )
+                })
+                .collect(),
             HelperState::Inner(s) => self
                 .inner
                 .transitions(store, s)
@@ -1766,7 +1775,7 @@ impl<'a, T: ENFA> ENFA for ElaborateStepHelper<'a, T> {
 
     fn output(&self, _store: &mut spp::SPPstore, q: &Self::State) -> spp::SPP {
         match q {
-            HelperState::PreStart => self.zero_spp,
+            HelperState::Start => self.zero_spp,
             HelperState::Inner(s) if *s == self.end => self.end_output,
             HelperState::Inner(_) => self.zero_spp,
         }
@@ -1797,7 +1806,7 @@ pub fn elaborate_step<T: ENFA>(
 
     let helper = ElaborateStepHelper {
         inner,
-        pre_to_source_spp: start_spp,
+        start_to_source_spp: start_spp,
         source: q_source.clone(),
         end: q_dest.clone(),
         end_output: output_spp,
@@ -1811,14 +1820,14 @@ pub fn elaborate_step<T: ENFA>(
     // the wrong state.  `get_any_trace_with_states` hands back the exact states.
     let (path_full, _output_pkt) = get_any_trace_with_states(&helper, store)
         .expect("elaborate_step: no inner ENFA path between source and dest");
-    // path_full[0] is `(PreStart, _)`; path_full[1] is `(Inner(q_source), p_source)`;
-    // the rest are the inner intermediates ending at `(Inner(q_dest), p_dest)`.
+    // path_full[0] is `(Start, _)`; the rest are the inner intermediates ending
+    // at `(Inner(q_dest), p_dest)`.
     let path: Vec<(T::State, Vec<bool>)> = path_full
         .into_iter()
-        .skip(2)
+        .skip(1)
         .map(|(q, p)| match q {
             HelperState::Inner(s) => (s, p),
-            HelperState::PreStart => unreachable!("PreStart only occurs at the trace head"),
+            HelperState::Start => unreachable!("Start only occurs at the trace head"),
         })
         .collect();
 
@@ -1842,7 +1851,7 @@ pub fn elaborate_step<T: ENFA>(
 struct ElaborateTailHelper<'a, T: ENFA> {
     inner: &'a T,
     /// `force_output_spp(p_source)`: relates anything to `p_source`.
-    pre_to_source_spp: spp::SPP,
+    start_to_source_spp: spp::SPP,
     source: T::State,
     /// `force_output_spp(output_pkt)`: intersected with each state's inner
     /// output so a trace is accepting only when it can emit `output_pkt`.
@@ -1850,11 +1859,13 @@ struct ElaborateTailHelper<'a, T: ENFA> {
     zero_spp: spp::SPP,
 }
 
+/// TODO: Fix this up, like the above. Figure out if it's correct or has the same bug as the above
+/// one did.
 impl<'a, T: ENFA> ENFA for ElaborateTailHelper<'a, T> {
     type State = HelperState<T::State>;
 
     fn start(&self, _store: &mut spp::SPPstore) -> Self::State {
-        HelperState::PreStart
+        HelperState::Start
     }
 
     fn is_visible(&self, _store: &mut spp::SPPstore, _q: &Self::State) -> bool {
@@ -1867,8 +1878,8 @@ impl<'a, T: ENFA> ENFA for ElaborateTailHelper<'a, T> {
         q: &Self::State,
     ) -> Vec<(spp::SPP, Self::State)> {
         match q {
-            HelperState::PreStart => vec![(
-                self.pre_to_source_spp,
+            HelperState::Start => vec![(
+                self.start_to_source_spp,
                 HelperState::Inner(self.source.clone()),
             )],
             HelperState::Inner(s) => {
@@ -1887,7 +1898,7 @@ impl<'a, T: ENFA> ENFA for ElaborateTailHelper<'a, T> {
 
     fn output(&self, store: &mut spp::SPPstore, q: &Self::State) -> spp::SPP {
         match q {
-            HelperState::PreStart => self.zero_spp,
+            HelperState::Start => self.zero_spp,
             HelperState::Inner(s) => {
                 let out = self.inner.output(store, s);
                 store.intersect(out, self.force_output)
@@ -1919,7 +1930,7 @@ pub fn elaborate_tail<T: ENFA>(
 
     let helper = ElaborateTailHelper {
         inner,
-        pre_to_source_spp: start_spp,
+        start_to_source_spp: start_spp,
         source: q_last.clone(),
         force_output,
         zero_spp,
@@ -1930,14 +1941,14 @@ pub fn elaborate_tail<T: ENFA>(
     // when `inner` is nondeterministic.
     let (path_full, _output_pkt) = get_any_trace_with_states(&helper, store)
         .expect("elaborate_tail: no inner ε-path emits the trace's output packet");
-    // path_full[0] is `(PreStart, _)`; path_full[1] is `(Inner(q_last), p_last)`;
+    // path_full[0] is `(Start, _)`; `path_full[1]` is the real start state;
     // the rest are the spliced invisible inner states.
     path_full
         .into_iter()
         .skip(2)
         .map(|(q, p)| match q {
             HelperState::Inner(s) => (s, p),
-            HelperState::PreStart => unreachable!("PreStart only occurs at the trace head"),
+            HelperState::Start => unreachable!("PreStart only occurs at the trace head"),
         })
         .collect()
 }

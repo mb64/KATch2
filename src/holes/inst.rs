@@ -107,7 +107,6 @@ impl<Inner: NFA> Instantiate<Inner> {
         let Some((visible_path, output_pkt)) = get_any_trace_with_states(&product, store) else {
             return Ok(());
         };
-
         // Project onto the self-side state component.
         let self_visible_path: Vec<(State<_>, Vec<bool>)> = visible_path
             .into_iter()

@@ -104,7 +104,7 @@ pub fn run<'a, C: Candidate<'a>, L: NFA>(
             Ok(()) => match inst.check_greater_than(store, lower_bound) {
                 Ok(()) => return Ok(inst.holes().clone()),
                 Err(cex) => {
-                    println!("New lower bound cex: {cex:?}");
+                    // println!("New lower bound cex: {cex:?}");
                     add_lower_bound_clauses(
                         cex,
                         &mut inst,
@@ -116,14 +116,17 @@ pub fn run<'a, C: Candidate<'a>, L: NFA>(
                 }
             },
             Err(witnesses) => {
-                println!("New upper bound cex");
+                // println!("New upper bound cex");
                 add_upper_bound_clause::<C>(witnesses, &hole_to_var, &mut learner);
             }
         }
 
         let sol = match learner.extract(store) {
             Ok(sol) => sol,
-            Err(_) => return Err(CegisError::Infeasible),
+            Err(_) => {
+                // LEARNER UNSAT -> Infeasible
+                return Err(CegisError::Infeasible);
+            }
         };
         for (&h, &v) in &hole_to_var {
             inst.set_hole(h, C::from_solution(&sol, v));
