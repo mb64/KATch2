@@ -6,19 +6,19 @@
 //! own slot, read itself back out of a [`Solution`], and turn CEGIS
 //! counterexamples into learner [`Literal`]s.
 //!
-//! Two implementations:
+//! Three implementations:
 //!
-//! * [`spp::SPP`] — a single dup-free step; the historical candidate.
+//! * [`spp::SPP`] — a single dup-free step
 //! * [`Cand`] — a richer, DFA-state-dependent sub-program that pulls its states
-//!   from the **upper-bound** DFA.  Its lower-bound (`accept_literal`) hook is
-//!   not yet implemented.
+//!   from the **upper-bound** DFA.
+//! * [`ops::Union`] -- union together an `SPP` and a `Cand` to actually solve full NetKAT synthesis
 //!
 //! The upper-bound DFA is passed to the context-needing methods as
 //! `&'a ExplicitDFA`; the SPP implementation ignores it.
 
 use std::hash::Hash;
 
-use crate::holes::aut::{ENFA, ExplicitDFA, NFA};
+use crate::holes::aut::{ENFA, ExplicitDFA, NFA, ops};
 use crate::holes::cand::{Cand, State as CandState};
 use crate::holes::smt::{AbstractBit, CandVar, Existential, Literal, SmtLearner, Solution, SppVar};
 use crate::sp::SP;
@@ -53,16 +53,24 @@ pub trait Candidate<'a>: NFA + Clone {
         pkt_out: &[bool],
     ) -> Literal;
 
-    /// Build the lower-bound literal for one hole site: "`var` must accept some
-    /// `(ap1 ∈ in_sp, ap2 ∈ out_sp)`."  May allocate existentials / membership
-    /// constraints on `learner` as a side effect.
+    /// Build the lower-bound literal for one hole site and span: "`var` must
+    /// accept a traversal that enters with `ap1 ∈ in_sp`, consumes `trace`
+    /// internally, and leaves with `ap2 ∈ out_sp`."  May allocate existentials /
+    /// membership constraints on `learner` as a side effect.
+    ///
+    /// `trace` is the subtrace the hole consumes between its in- and out-side
+    /// (empty if it consumes nothing).  Returns `None` if this candidate kind
+    /// cannot realize a traversal that consumes exactly `trace` (e.g. an
+    /// [`spp::SPP`] consumes nothing, so any non-empty `trace` is `None`).
     fn accept_literal(
         var: Self::Var,
         learner: &mut SmtLearner<'a>,
         store: &mut SPPstore,
+        upper_bound: &'a ExplicitDFA,
         in_sp: SP,
         out_sp: SP,
-    ) -> Literal;
+        trace: &[Vec<bool>],
+    ) -> Option<Literal>;
 }
 
 /// Concrete-packet abstract bits.
@@ -88,9 +96,10 @@ impl<'a> Candidate<'a> for SPP {
     fn reject_literal(
         var: SppVar,
         pkt_in: &[bool],
-        _inner: &[((), Vec<bool>)],
+        inner: &[((), Vec<bool>)],
         pkt_out: &[bool],
     ) -> Literal {
+        assert!(inner.is_empty());
         Literal::Spp {
             spp: var,
             ap1: concrete(pkt_in),
@@ -103,20 +112,26 @@ impl<'a> Candidate<'a> for SPP {
         var: SppVar,
         learner: &mut SmtLearner<'a>,
         store: &mut SPPstore,
+        _upper_bound: &'a ExplicitDFA,
         in_sp: SP,
         out_sp: SP,
-    ) -> Literal {
+        trace: &[Vec<bool>],
+    ) -> Option<Literal> {
+        // An SPP is a single dup-free step: it consumes no trace internally.
+        if !trace.is_empty() {
+            return None;
+        }
         let n = store.num_vars() as usize;
         let in_vars: Vec<Existential> = (0..n).map(|_| learner.fresh_existential()).collect();
         let out_vars: Vec<Existential> = (0..n).map(|_| learner.fresh_existential()).collect();
         learner.add_sp_membership(in_sp, &in_vars, &store.sp);
         learner.add_sp_membership(out_sp, &out_vars, &store.sp);
-        Literal::Spp {
+        Some(Literal::Spp {
             spp: var,
             ap1: in_vars.into_iter().map(AbstractBit::Exist).collect(),
             ap2: out_vars.into_iter().map(AbstractBit::Exist).collect(),
             polarity: true,
-        }
+        })
     }
 }
 
@@ -163,12 +178,103 @@ impl<'a> Candidate<'a> for Cand<'a> {
     }
 
     fn accept_literal(
-        _var: CandVar,
-        _learner: &mut SmtLearner<'a>,
-        _store: &mut SPPstore,
-        _in_sp: SP,
-        _out_sp: SP,
+        var: CandVar,
+        learner: &mut SmtLearner<'a>,
+        store: &mut SPPstore,
+        upper_bound: &'a ExplicitDFA,
+        in_sp: SP,
+        out_sp: SP,
+        trace: &[Vec<bool>],
+    ) -> Option<Literal> {
+        // A Cand hole consumes at least one packet (the `Start -> Middle` step).
+        let (pkt_start, rest) = trace.split_first()?;
+        let pkt_end = rest.last().unwrap_or(pkt_start);
+
+        // The state vector starts at the identity (one token per DFA state) and
+        // evolves by the upper-bound DFA's exponential over the consumed
+        // subtrace.  If some component has no transition for a packet pair, the
+        // DFA can't follow this subtrace and there is no valid traversal.
+        let mut states: Vec<usize> = (0..upper_bound.num_states()).collect();
+        let exp = ops::Exponential { inner: upper_bound };
+        for pair in trace.windows(2) {
+            let next = exp
+                .transitions(store, &states)
+                .into_iter()
+                .find(|(spp, _)| store.accepts(*spp, &pair[0], &pair[1]))
+                .map(|(_, target)| target)?;
+            states = next;
+        }
+
+        // Existentials pin the carry-in / carry-out packets to (in_sp, out_sp).
+        let nv = store.num_vars() as usize;
+        let in_vars: Vec<Existential> = (0..nv).map(|_| learner.fresh_existential()).collect();
+        let out_vars: Vec<Existential> = (0..nv).map(|_| learner.fresh_existential()).collect();
+        learner.add_sp_membership(in_sp, &in_vars, &store.sp);
+        learner.add_sp_membership(out_sp, &out_vars, &store.sp);
+
+        Some(Literal::Cand {
+            cand: var,
+            pkt_in: in_vars.into_iter().map(AbstractBit::Exist).collect(),
+            pkt_start: concrete(pkt_start),
+            states,
+            pkt_end: concrete(pkt_end),
+            pkt_out: out_vars.into_iter().map(AbstractBit::Exist).collect(),
+            polarity: true,
+        })
+    }
+}
+
+impl<'a> Candidate<'a> for ops::Union<SPP, Cand<'a>> {
+    type Var = (
+        <SPP as Candidate<'a>>::Var,
+        <Cand<'a> as Candidate<'a>>::Var,
+    );
+
+    fn fresh_var(learner: &mut SmtLearner<'a>, upper_bound: &'a ExplicitDFA) -> Self::Var {
+        (
+            SPP::fresh_var(learner, upper_bound),
+            Cand::fresh_var(learner, upper_bound),
+        )
+    }
+
+    fn from_solution(solution: &Solution<'a>, var: Self::Var) -> Self {
+        ops::union(
+            SPP::from_solution(solution, var.0),
+            Cand::from_solution(solution, var.1),
+        )
+    }
+
+    fn top(store: &mut SPPstore, upper_bound: &'a ExplicitDFA) -> Self {
+        ops::union(SPP::top(store, upper_bound), Cand::top(store, upper_bound))
+    }
+
+    fn reject_literal(
+        var: Self::Var,
+        pkt_in: &[bool],
+        inner: &[(<Self as ENFA>::State, Vec<bool>)],
+        pkt_out: &[bool],
     ) -> Literal {
-        unimplemented!("lower-bound clause generation for Cand is not yet implemented")
+        if inner.is_empty() {
+            SPP::reject_literal(var.0, pkt_in, &[], pkt_out)
+        } else {
+            let inner: Vec<(CandState, Vec<bool>)> = inner.iter().map(|(q, pk)| todo!()).collect();
+            Cand::reject_literal(var.1, pkt_in, &inner, pkt_out)
+        }
+    }
+
+    fn accept_literal(
+        var: Self::Var,
+        learner: &mut SmtLearner<'a>,
+        store: &mut SPPstore,
+        upper_bound: &'a ExplicitDFA,
+        in_sp: SP,
+        out_sp: SP,
+        trace: &[Vec<bool>],
+    ) -> Option<Literal> {
+        if trace.is_empty() {
+            SPP::accept_literal(var.0, learner, store, upper_bound, in_sp, out_sp, trace)
+        } else {
+            Cand::accept_literal(var.1, learner, store, upper_bound, in_sp, out_sp, trace)
+        }
     }
 }

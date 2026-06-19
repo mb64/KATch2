@@ -939,6 +939,8 @@ pub mod ops {
         }
     }
 
+    impl<A: NFA, B: NFA> NFA for Union<A, B> {}
+
     // ---- Intersection ----------------------------------------------------
 
     /// Intersection of two NFAs via the product construction: each state is

@@ -147,12 +147,17 @@ fn add_upper_bound_clause<'a, C: Candidate<'a>>(
 
 /// A single hole site discovered while walking the product of the
 /// hole-bearing automaton and the trace.
-struct HoleSite {
+struct HoleSite<'a> {
     hole: Hole,
-    /// SP of carry packets at the in-side that *are* forward-reachable
+
+    /// SP of carry-on packets at the in-side that *are* forward-reachable
     /// under the current candidate (set (1) in the design notes).
     in_sp: sp::SP,
-    /// SP of carry packets at the out-side that (a) plausibly let the rest
+
+    /// Trace accumulated by the hole
+    trace: &'a [Vec<bool>],
+
+    /// SP of carry-on packets at the out-side that (a) plausibly let the rest
     /// of the trace continue under the all-top instantiation (set (3)) and
     /// (b) are *not* already forward-reachable under the current candidate
     /// (complement of set (2)).  Adding an entry whose out-packet falls in
@@ -220,14 +225,13 @@ fn add_lower_bound_clauses<'a, C: Candidate<'a>>(
         .collect();
 
     // Walk the raw AutWithHoles to enumerate hole sites.
-    let n = cex.trace.len();
     let start = inst.start_state();
     let sites = {
         let mut aut_ref = inst.aut();
         collect_hole_sites(
             &mut aut_ref,
             start,
-            n,
+            &cex.trace,
             &forward_candidate,
             &backward_top,
             store,
@@ -238,13 +242,15 @@ fn add_lower_bound_clauses<'a, C: Candidate<'a>>(
     // it to accept some `(ap1 ∈ in_sp, ap2 ∈ out_sp)`.
     let literals = sites
         .into_iter()
-        .map(|site| {
+        .flat_map(|site| {
             C::accept_literal(
                 hole_to_var[&site.hole],
                 learner,
                 store,
+                upper_bound,
                 site.in_sp,
                 site.out_sp,
+                site.trace,
             )
         })
         .collect();
@@ -254,14 +260,15 @@ fn add_lower_bound_clauses<'a, C: Candidate<'a>>(
 /// Walk every state forward-reachable from `start` in `aut` and collect a
 /// [`HoleSite`] for each hole-bearing edge or output summand that has
 /// non-empty `(in_sp, out_sp)` under the supplied reachability maps.
-fn collect_hole_sites(
+fn collect_hole_sites<'a>(
     aut: &mut AutWithHoles,
     start: State,
-    n: usize,
+    trace: &'a [Vec<bool>],
     forward: &HashMap<(State, usize), sp::SP>,
     backward: &HashMap<(State, usize), sp::SP>,
     store: &mut spp::SPPstore,
-) -> Vec<HoleSite> {
+) -> Vec<HoleSite<'a>> {
+    let n = trace.len();
     let mut sites = Vec::new();
     let mut seen: HashSet<State> = HashSet::new();
     let mut stack = vec![start];
@@ -280,30 +287,33 @@ fn collect_hole_sites(
             if let EdgeLabel::Abstract(hole) = label {
                 let qp_visible = aut.is_visible(*qp);
                 for i in 0..n {
-                    let i_target = if qp_visible {
-                        if i + 1 >= n {
+                    for j in i..n {
+                        let j_target = if qp_visible {
+                            if j + 1 >= n {
+                                continue;
+                            }
+                            j + 1
+                        } else {
+                            j
+                        };
+                        let in_sp = forward.get(&(q, i)).copied().unwrap_or(sp_zero);
+                        if store.sp.is_zero(in_sp) {
                             continue;
                         }
-                        i + 1
-                    } else {
-                        i
-                    };
-                    let in_sp = forward.get(&(q, i)).copied().unwrap_or(sp_zero);
-                    if store.sp.is_zero(in_sp) {
-                        continue;
+                        let already = forward.get(&(*qp, j_target)).copied().unwrap_or(sp_zero);
+                        let plausible = backward.get(&(*qp, j_target)).copied().unwrap_or(sp_zero);
+                        let not_already = store.sp.complement(already);
+                        let out_sp = store.sp.intersect(plausible, not_already);
+                        if store.sp.is_zero(out_sp) {
+                            continue;
+                        }
+                        sites.push(HoleSite {
+                            hole: *hole,
+                            in_sp,
+                            trace: &trace[i..j],
+                            out_sp,
+                        });
                     }
-                    let already = forward.get(&(*qp, i_target)).copied().unwrap_or(sp_zero);
-                    let plausible = backward.get(&(*qp, i_target)).copied().unwrap_or(sp_zero);
-                    let not_already = store.sp.complement(already);
-                    let out_sp = store.sp.intersect(plausible, not_already);
-                    if store.sp.is_zero(out_sp) {
-                        continue;
-                    }
-                    sites.push(HoleSite {
-                        hole: *hole,
-                        in_sp,
-                        out_sp,
-                    });
                 }
             }
         }
