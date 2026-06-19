@@ -79,18 +79,15 @@
 //! assert!(!store.accepts(h0, &[true, true], &[false, true]));
 //! ```
 //!
-//! # Example: when the candidate kind matters
+//! # Example: `Hole(0) == dup`
 //!
-//! Here we ask for `Hole(0) == dup`.  An [`spp::SPP`] contributes no trace
-//! step, while `dup` is the operation that produces length-2 traces, so no
-//! single SPP can realize it — the *search space* of [`solve_holes`], not the
-//! bounds themselves, is what makes this infeasible.
+//! Here we ask for `Hole(0) == dup`.
 //!
-//! For [`solve_holes`], the lower-bound check fires on the first iteration;
-//! site collection finds zero viable hole sites (the only candidate site is
-//! `Hole(0)`'s output summand, but `forward_candidate[(start, 1)]` is empty
-//! since the expression has no way to advance the trace position), so an empty
-//! clause is added and the next extraction is immediately UNSAT:
+//! * Filling holes with [`spp::SPP`]'s, this is, of course, infeasible, since they are `dup`-free.
+//!   So [`solve_holes`] gives an error, after just a couple CEGIS iterations.
+//!
+//! * On the other hand, if you allow `dup`s is is very easily satisfied by just putting `dup` in the
+//!   hole. So [`solve_holes_full`] gives a successfull assignment.
 //!
 //! ```
 //! # use katch2::expr::Expr;
