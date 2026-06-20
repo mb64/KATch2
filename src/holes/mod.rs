@@ -503,13 +503,12 @@ mod test {
 
     /// Fast `solve_holes` round-trip: small dup-free fillings, many trials.
     ///
-    /// `#[ignore]`d because it **currently fails intermittently** (~1 run in 8):
-    /// even with a dup-free hole *filling*, when the hole sits inside `dup`/`dup*`
-    /// structure `solve_holes` can wrongly return `Infeasible`.  Minimal
-    /// deterministic case pinned by [`solve_holes_wrongly_infeasible_under_dup`].
-    /// Run with `--ignored` to keep hunting; re-enable once that's fixed.
+    /// Asserts `solve_holes` never wrongly reports `Infeasible` on a
+    /// satisfiable-by-construction instance (a cap-hit `IterationLimit` is
+    /// tolerated as merely slow).  This used to fail intermittently — a dup-free
+    /// hole inside `dup`/`dup*` structure could be wrongly rejected — but that
+    /// bug is now fixed, so the fuzzer runs by default again.
     #[test]
-    #[ignore]
     fn fuzz_solve_holes_roundtrip() {
         for trial in 0..40 {
             let mut store = SPPstore::new(FUZZ_FIELDS);
@@ -569,15 +568,12 @@ mod test {
     /// (multi-step), exercising the `Union<SPP, Cand>` candidate space.
     ///
     /// The iteration cap means a slow/diverging instance surfaces as a tolerated
-    /// `IterationLimit` rather than a hang.  The `Cand` ENFA stall is now fixed
-    /// (see [`full_solves_chained_dup`] and `ops::CompletedDfa`), so the
-    /// chained-dup family of wrong-`Infeasible`s is gone.  But this fuzzer
-    /// **still fails intermittently**: `solve_holes_full` retains *residual*
-    /// wrong-`Infeasible` bugs on more complex instances (the deep variant trips
-    /// them more readily).  So it stays `#[ignore]`d — run it manually
-    /// (`--ignored`) to hunt for those; re-enable once they're fixed.
+    /// `IterationLimit` rather than a hang.  Asserts `solve_holes_full` never
+    /// wrongly reports `Infeasible` on a satisfiable-by-construction instance.
+    /// The known wrong-`Infeasible` bugs are now fixed (the `Cand` ENFA stall
+    /// via `ops::CompletedDfa`, and the lower-bound hole-site trace misalignment
+    /// in `cegis::collect_hole_sites`), so this runs by default again.
     #[test]
-    #[ignore]
     fn fuzz_solve_holes_full_roundtrip() {
         for trial in 0..30 {
             let mut store = SPPstore::new(FUZZ_FIELDS);
@@ -604,8 +600,10 @@ mod test {
         }
     }
 
-    /// Heavier `solve_holes_full` round-trip.  `#[ignore]`d for the same
-    /// non-termination reason as [`fuzz_solve_holes_full_roundtrip`].
+    /// Heavier `solve_holes_full` round-trip: deeper expressions.  No longer
+    /// finds wrong-`Infeasible`s, but stays `#[ignore]`d (opt-in) because the
+    /// deeper, larger generated DFAs make it slow and can occasionally trip the
+    /// `crate::aut` derivative-size limit — environmental, not a solver bug.
     #[test]
     #[ignore]
     fn fuzz_solve_holes_full_roundtrip_deep() {
@@ -780,26 +778,15 @@ mod test {
         result.expect("should have a solution");
     }
 
-    /// Residual `solve_holes_full` wrong-`Infeasible` (found by
-    /// `fuzz_solve_holes_full_roundtrip`), minimized to a **deterministic** case:
+    /// Regression test for a bug found by `fuzz_solve_holes_full_roundtrip`.
     ///
     /// ```text
     /// Hole(0)*  ==  (0:=true; dup)*        (1 field)
     /// ```
     ///
-    /// Satisfiable by `Hole(0) := 0:=true; dup`.  The `CompletedDfa` fix cleared
-    /// the basic chained-dup stall — `Hole(0) == dup; dup`
-    /// ([`full_solves_chained_dup`]), `(hole)* == dup*` and `(hole)* ==
-    /// (dup; dup)*` all solve — but a hole that **assigns then dups, under a
-    /// star** still trips a wrong `Infeasible`, on every run at 1 field.  The
-    /// order matters: `0:=true; dup` fails, yet `0==true; dup` (a *test* before
-    /// the dup) solves — so it's specifically an assignment's output
-    /// interacting with the dup under the star.
-    ///
-    /// `#[should_panic]` documents that this test is currently failing.
+    /// Caused by a bug in [`cegis::collect_hole_sites`], which has been fixed.
     #[test]
-    #[should_panic] // BUG
-    fn full_residual_wrong_infeasible_assign_dup_under_star() {
+    fn full_solves_assign_dup_under_star() {
         let mut store = SPPstore::new(1);
         // Hole(0)*  ==  (0:=true; dup)*
         let hole_expr = HExpr::star(HExpr::hole(Hole(0)));

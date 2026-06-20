@@ -104,7 +104,6 @@ pub fn run<'a, C: Candidate<'a>, L: NFA>(
             Ok(()) => match inst.check_greater_than(store, lower_bound) {
                 Ok(()) => return Ok(inst.holes().clone()),
                 Err(cex) => {
-                    // println!("New lower bound cex: {cex:?}");
                     add_lower_bound_clauses(
                         cex,
                         &mut inst,
@@ -116,17 +115,13 @@ pub fn run<'a, C: Candidate<'a>, L: NFA>(
                 }
             },
             Err(witnesses) => {
-                // println!("New upper bound cex");
                 add_upper_bound_clause::<C>(witnesses, &hole_to_var, &mut learner);
             }
         }
 
         let sol = match learner.extract(store) {
             Ok(sol) => sol,
-            Err(_) => {
-                // LEARNER UNSAT -> Infeasible
-                return Err(CegisError::Infeasible);
-            }
+            Err(_) => return Err(CegisError::Infeasible),
         };
         for (&h, &v) in &hole_to_var {
             inst.set_hole(h, C::from_solution(&sol, v));
@@ -328,7 +323,10 @@ fn collect_hole_sites<'a>(
                         sites.push(HoleSite {
                             hole: *hole,
                             in_sp,
-                            trace: &trace[i..j],
+                            // The hole's internal sub-trace is its *dup'd*
+                            // packets, at positions `i+1 ..= j_target`.
+                            // The carry-in packet is at position `i.
+                            trace: &trace[i + 1..j_target + 1],
                             out_sp,
                         });
                     }
