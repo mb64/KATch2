@@ -367,9 +367,9 @@ mod test {
     // inside `target ⊆ . ⊆ target` is correct) or, if the search is slow, hit
     // the cap (`IterationLimit`).  Both are acceptable; only `Infeasible` (or a
     // panic) is a bug.  Capping low keeps the suite fast while still catching
-    // those bugs — `solve_holes_full` is known to diverge on some instances
-    // (see `roundtrip_full_dupful_nontermination`), and the cap turns that into
-    // a tolerated `IterationLimit` rather than a hang.
+    // those bugs — the search is known to blow up on some instances
+    // (see `roundtrip_three_hole_chain_blowup`), and the cap turns that into
+    // a tolerated `IterationLimit` rather than a (very long) wait.
 
     use katch2::expr::Exp;
     use std::collections::BTreeSet;
@@ -663,56 +663,62 @@ mod test {
         assert!(result.is_ok(), "{result:?}");
     }
 
-    /// Minimal reproducer (found by `fuzz_solve_holes_full_roundtrip`) for
-    /// `solve_holes_full` **divergence**:
+    /// CEGIS **blowup** on a chain of three sequenced holes (2 fields, target as
+    /// both bounds). The search blows up combinatorially (like a pigeonhole
+    /// instance for a SAT solver): it terminates in principle, but in practice
+    /// the cap surfaces it as `IterationLimit` rather than `Ok`/`Infeasible`:
     ///
-    /// ```text
-    /// Hole(0) ; Hole(2) ; Hole(2)  ==  dup        (2 fields)
-    /// ```
+    /// - `H0;H2;H2 == dup` (`solve_holes_full`) — sat; slow
+    /// - `H0;H1;H2 == 1` (`solve_holes`) — sat; slow
+    /// - `H0;H0;H0 == 1` (`solve_holes`) — sat; fast
+    /// - `H0;H0;H0 == dup` (`solve_holes_full`) — unsat; slow
+    /// - `H0;H0;H0 == dup;dup;dup` (`solve_holes_full`) — sat; slow
     ///
-    /// Satisfiable by construction (e.g. `Hole(0) := dup`, `Hole(2) := 1`), so a
-    /// complete solver should return `Ok`.  Instead the CEGIS loop produces an
-    /// unbounded stream of *distinct* candidates (no candidate ever repeats —
-    /// each clause does exclude the previous one) without ever converging: the
-    /// `Union<SPP, Cand>` candidate oscillates under the alternating
-    /// upper/lower-bound counterexamples.
-    ///
-    /// Note this is a *separate* problem from the `Cand` ENFA stall (now fixed
-    /// via [`crate::holes::aut::ops::CompletedDfa`]): that fix lets the `Cand`
-    /// grow and makes single-hole chained-dup cases like
-    /// [`full_solves_chained_dup`] converge, but this instance — a hole used
-    /// **more than once** under both bounds — still diverges.  Minimal
-    /// ingredients, each necessary (drop any one → solves in ms): the same hole
-    /// used more than once (`Hole(2)` twice; distinct holes converge), ≥ 2
-    /// fields (1 field converges), and both bounds active (a single-sided bound
-    /// converges).
-    ///
-    /// With a low iteration cap the divergence surfaces as `IterationLimit`
-    /// rather than a hang, so this test runs quickly.  Crucially it must *not*
-    /// be `Infeasible` (the instance is satisfiable).  If the divergence is ever
-    /// fixed this should start returning `Ok` — update the assertion then.
+    /// If the search is ever made efficient, the sat cases should return `Ok`
+    /// within the cap (and `H0;H0;H0 == dup` should resolve either way) — update
+    /// the assertions then.
     #[test]
-    fn roundtrip_full_dupful_nontermination() {
-        let mut store = SPPstore::new(2);
-        // Hole(0) ; Hole(2) ; Hole(2)  ==  dup
-        let hole_expr = HExpr::sequence(
-            HExpr::sequence(HExpr::hole(Hole(0)), HExpr::hole(Hole(2))),
-            HExpr::hole(Hole(2)),
-        );
-        let target_dfa = expr_to_dfa(&Expr::dup(), &mut store);
-        let result = solve_holes_full(
-            &hole_expr,
-            &[Hole(0), Hole(2)],
-            &target_dfa,
-            &target_dfa,
-            &mut store,
-            Some(FUZZ_MAX_ITERS),
-        )
-        .map(|_| ());
+    fn roundtrip_three_hole_chain_blowup() {
+        use CegisError::IterationLimit;
+        // `Ha ; Hb ; Hc`
+        let chain = |a: Hole, b: Hole, c: Hole| {
+            HExpr::sequence(
+                HExpr::sequence(HExpr::hole(a), HExpr::hole(b)),
+                HExpr::hole(c),
+            )
+        };
+        let dup = Expr::dup();
+        let dup2 = Expr::sequence(dup.clone(), dup.clone());
+        let dup3 = Expr::sequence(dup2.clone(), dup.clone());
+        // Run `chain == target` (target as both bounds) under the chosen solver.
+        let run = |full: bool, he: &HExpr, holes: &[Hole], target: &Expr| {
+            let mut store = SPPstore::new(2);
+            let dfa = expr_to_dfa(target, &mut store);
+            if full {
+                solve_holes_full(he, holes, &dfa, &dfa, &mut store, Some(FUZZ_MAX_ITERS))
+                    .map(|_| ())
+            } else {
+                solve_holes(he, holes, &dfa, &dfa, &mut store, Some(FUZZ_MAX_ITERS)).map(|_| ())
+            }
+        };
+
+        let [h0, h1, h2] = [Hole(0), Hole(1), Hole(2)];
         assert_eq!(
-            result,
-            Err(CegisError::IterationLimit),
-            "expected the known divergence to hit the cap (not Infeasible, not Ok)"
+            run(true, &chain(h0, h2, h2), &[h0, h2], &dup),
+            Err(IterationLimit)
+        );
+        assert_eq!(
+            run(false, &chain(h0, h1, h2), &[h0, h1, h2], &Expr::one()),
+            Err(IterationLimit)
+        );
+        assert_eq!(run(false, &chain(h0, h0, h0), &[h0], &Expr::one()), Ok(()));
+        assert_eq!(
+            run(true, &chain(h0, h0, h0), &[h0], &dup),
+            Err(IterationLimit)
+        );
+        assert_eq!(
+            run(true, &chain(h0, h0, h0), &[h0], &dup3),
+            Err(IterationLimit)
         );
     }
 
