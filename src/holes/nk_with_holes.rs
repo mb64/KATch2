@@ -98,6 +98,7 @@ pub struct State {
 /// Owns hash-consed expressions and lazy caches for the Antimirov
 /// derivative.  The SPP store is supplied externally to each method that
 /// needs it.
+#[derive(Debug, Clone)]
 pub struct AutWithHoles {
     aexprs: Vec<AExpr>,
     aexpr_map: HashMap<AExpr, AExprIdx>,

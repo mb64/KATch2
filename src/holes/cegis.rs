@@ -1,5 +1,13 @@
-//! CEGIS loop: synthesize a concrete candidate per hole such that
-//! `lower_bound ⊆ expr[holes] ⊆ upper_bound`.
+//! CEGIS loop: synthesize a concrete candidate per hole that satisfies a
+//! list of [`Constraint`]s simultaneously.
+//!
+//! Each [`Constraint`] relates a hole-bearing automaton
+//! ([`AutWithHoles`]) to a concrete [`ExplicitDFA`], asking that the
+//! instantiated automaton be contained in the DFA ([`Constraint::UpperBound`]),
+//! contain it ([`Constraint::LowerBound`]), or equal it
+//! ([`Constraint::Equality`]).  The synthesized candidates are shared across
+//! every constraint, so [`run`] looks for one assignment that satisfies them
+//! all.
 //!
 //! Generic over the candidate kind `C: Candidate` — either [`spp::SPP`] or
 //! [`crate::holes::cand::Cand`].  Each candidate-specific step (slot allocation,
@@ -8,19 +16,24 @@
 //!
 //! # Algorithm
 //!
-//! 1. Ask the [`SmtLearner`] for a candidate per hole.
-//! 2. Plug them into the [`Instantiate`] for the hole-bearing expression.
-//! 3. Check `expr[candidate] ⊆ upper_bound` via
-//!    [`Instantiate::check_less_than`].  If it fails, each hole's witness
-//!    becomes a negative literal ([`Candidate::reject_literal`]): "the hole
-//!    cannot accept all of these simultaneously".
-//! 4. Check `lower_bound ⊆ expr[candidate]` via
-//!    [`Instantiate::check_greater_than`].  If it fails, each viable hole site
-//!    becomes a positive literal ([`Candidate::accept_literal`]).
-//! 5. If both checks pass, return the candidates.
-//! 6. Otherwise, ask the learner for refined candidates and loop.  If the
-//!    learner returns `InconsistentError`, the original problem is
-//!    infeasible.
+//! 1. Ask the [`SmtLearner`] for a candidate per hole, allocating each slot
+//!    against the freestanding `reference_dfa` (this is the DFA whose states
+//!    [`crate::holes::cand::Cand`] candidates draw on).
+//! 2. Plug the candidates into one [`Instantiate`] per constraint.
+//! 3. Visit the constraints in order and ask each whether it is satisfied via
+//!    [`Constraint::check`]:
+//!    * an upper-bound check (`aut[candidate] ⊆ dfa`) uses
+//!      [`Instantiate::check_less_than`]; on failure each hole's witness
+//!      becomes a negative literal ([`Candidate::reject_literal`]): "the hole
+//!      cannot accept all of these simultaneously".
+//!    * a lower-bound check (`dfa ⊆ aut[candidate]`) uses
+//!      [`Instantiate::check_greater_than`]; on failure each viable hole site
+//!      becomes a positive literal ([`Candidate::accept_literal`]).
+//!
+//!    The first failing constraint adds its clause and stops the pass.
+//! 4. If every constraint is satisfied, return the candidates.
+//! 5. Otherwise, ask the learner for refined candidates and loop.  If the
+//!    learner returns an inconsistency, the original problem is infeasible.
 //!
 //! # Limitations
 //!
@@ -29,10 +42,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::holes::aut::{ENFA, ExplicitDFA, NFA, backward_reachable, forward_reachable};
+use crate::holes::aut::{ENFA, ExplicitDFA, backward_reachable, forward_reachable};
 use crate::holes::candidate::Candidate;
 use crate::holes::inst::{self, Instantiate, LowerBoundCounterexample};
-use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Hole, State};
+use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Expr, Hole, State};
 use crate::holes::smt::{AbstractClause, SmtLearner};
 use crate::sp;
 use crate::spp;
@@ -50,28 +63,163 @@ pub enum CegisError {
     IterationLimit,
 }
 
-/// Solve `lower_bound ⊆ expr[holes] ⊆ upper_bound` for multiple holes.
+/// A single constraint relating a hole-bearing automaton to a concrete DFA.
 ///
-/// `aut` and `start` describe the hole-bearing expression as a
-/// [`crate::holes::nk_with_holes::AutWithHoles`] state machine; `holes` is
-/// the set of hole labels that may appear in it (every hole the expression
-/// reaches must be listed, otherwise [`Instantiate`] will panic when it
-/// hits an unmapped one).  On success, returns one synthesized candidate per
-/// hole.
+/// Each variant pairs an [`AutWithHoles`] (with its pinned start [`State`])
+/// against an [`ExplicitDFA`].  Once the holes are filled with concrete
+/// candidates, the constraint asserts a containment between the resulting
+/// instantiated automaton and the DFA; see the variant docs for the
+/// direction.
 ///
-/// `C` is the candidate kind ([`spp::SPP`] or [`crate::holes::cand::Cand`]); the
-/// upper bound is a concrete [`ExplicitDFA`], which also serves as the DFA that
-/// [`crate::holes::cand::Cand`] candidates pull their states from.
+/// Build one with [`Constraint::upper_bound`], [`Constraint::lower_bound`], or
+/// [`Constraint::equality`], which compile a [`nk_with_holes::Expr`] into the
+/// underlying automaton for you.
+#[derive(Debug, Clone)]
+pub enum Constraint {
+    /// `dfa ⊆ aut[holes]`: the DFA is a lower bound on the instantiated
+    /// automaton (every triple the DFA accepts must also be accepted).
+    LowerBound {
+        aut: AutWithHoles,
+        start: State,
+        dfa: ExplicitDFA,
+    },
+    /// `aut[holes] ⊆ dfa`: the DFA is an upper bound on the instantiated
+    /// automaton (every triple the automaton accepts must also be accepted by
+    /// the DFA).
+    UpperBound {
+        aut: AutWithHoles,
+        start: State,
+        dfa: ExplicitDFA,
+    },
+    /// `aut[holes] == dfa`: the instantiated automaton must accept exactly the
+    /// DFA's language — both an upper and a lower bound at once.
+    Equality {
+        aut: AutWithHoles,
+        start: State,
+        dfa: ExplicitDFA,
+    },
+}
+
+impl Constraint {
+    /// Upper-bound constraint `expr[holes] ⊆ dfa`, compiling `expr` into the
+    /// hole-bearing automaton.
+    pub fn upper_bound(store: &mut spp::SPPstore, expr: &Expr, dfa: ExplicitDFA) -> Self {
+        let (aut, start) = compile(store, expr);
+        Constraint::UpperBound { aut, start, dfa }
+    }
+
+    /// Lower-bound constraint `dfa ⊆ expr[holes]`, compiling `expr` into the
+    /// hole-bearing automaton.
+    pub fn lower_bound(store: &mut spp::SPPstore, expr: &Expr, dfa: ExplicitDFA) -> Self {
+        let (aut, start) = compile(store, expr);
+        Constraint::LowerBound { aut, start, dfa }
+    }
+
+    /// Equality constraint `expr[holes] == dfa`, compiling `expr` into the
+    /// hole-bearing automaton.
+    pub fn equality(store: &mut spp::SPPstore, expr: &Expr, dfa: ExplicitDFA) -> Self {
+        let (aut, start) = compile(store, expr);
+        Constraint::Equality { aut, start, dfa }
+    }
+
+    /// The hole-bearing automaton this constraint is over.
+    pub fn aut(&self) -> &AutWithHoles {
+        match self {
+            Constraint::LowerBound { aut, .. }
+            | Constraint::UpperBound { aut, .. }
+            | Constraint::Equality { aut, .. } => aut,
+        }
+    }
+
+    /// The pinned start state of [`Constraint::aut`].
+    pub fn start(&self) -> State {
+        match self {
+            Constraint::LowerBound { start, .. }
+            | Constraint::UpperBound { start, .. }
+            | Constraint::Equality { start, .. } => *start,
+        }
+    }
+
+    /// The concrete DFA this constraint compares against.
+    pub fn dfa(&self) -> &ExplicitDFA {
+        match self {
+            Constraint::LowerBound { dfa, .. }
+            | Constraint::UpperBound { dfa, .. }
+            | Constraint::Equality { dfa, .. } => dfa,
+        }
+    }
+
+    /// Check whether `inst` (the constraint's automaton instantiated with the
+    /// current candidates) satisfies this constraint.
+    ///
+    /// Returns `true` if satisfied.  Otherwise records a refining clause on
+    /// `learner` — a [`Candidate::reject_literal`] disjunction for an
+    /// upper-bound violation, or a [`Candidate::accept_literal`] disjunction
+    /// for a lower-bound one — and returns `false`.  At most one clause is
+    /// added per call: an [`Constraint::Equality`] that fails its upper-bound
+    /// check stops before checking the lower bound.
+    fn check<'a, C: Candidate<'a>>(
+        &self,
+        inst: &mut Instantiate<C>,
+        hole_to_var: &HashMap<Hole, C::Var>,
+        learner: &mut SmtLearner<'a>,
+        store: &mut spp::SPPstore,
+        reference_dfa: &'a ExplicitDFA,
+    ) -> bool {
+        let dfa = self.dfa();
+
+        // Upper-bound half: `aut[candidate] ⊆ dfa`.
+        if matches!(
+            self,
+            Constraint::UpperBound { .. } | Constraint::Equality { .. }
+        ) && let Err(witnesses) = inst.check_less_than(store, dfa)
+        {
+            add_upper_bound_clause::<C>(witnesses, hole_to_var, learner);
+            return false;
+        }
+
+        // Lower-bound half: `dfa ⊆ aut[candidate]`.
+        if matches!(
+            self,
+            Constraint::LowerBound { .. } | Constraint::Equality { .. }
+        ) && let Err(cex) = inst.check_greater_than(store, dfa)
+        {
+            add_lower_bound_clauses(cex, inst, hole_to_var, learner, store, reference_dfa);
+            return false;
+        }
+
+        true
+    }
+}
+
+/// Compile a hole-bearing [`Expr`] into its automaton and visible start state.
+fn compile(store: &mut spp::SPPstore, expr: &Expr) -> (AutWithHoles, State) {
+    let mut aut = AutWithHoles::new();
+    let start = aut.expr_to_state(store, expr);
+    (aut, start)
+}
+
+/// Synthesize a candidate per hole satisfying every constraint in
+/// `constraints` simultaneously.
+///
+/// `holes` is the set of hole labels that may appear in the constraints'
+/// automata (every hole the automata reach must be listed, otherwise
+/// [`Instantiate`] will panic when it hits an unmapped one).  On success,
+/// returns one synthesized candidate per hole.
+///
+/// `C` is the candidate kind ([`spp::SPP`] or [`crate::holes::cand::Cand`]).
+/// `reference_dfa` is a freestanding DFA used only to allocate and ground the
+/// candidates — it is the DFA that [`crate::holes::cand::Cand`] candidates pull
+/// their states from, and the all-top fallback used in lower-bound processing.
+/// It is independent of any constraint's own DFA.
 ///
 /// `max_iters` caps the number of refinement rounds: pass `Some(n)` to return
 /// [`CegisError::IterationLimit`] after `n` rounds without convergence, or
 /// `None` to loop unboundedly (the historical behaviour).
-pub fn run<'a, C: Candidate<'a>, L: NFA>(
-    aut: AutWithHoles,
-    start: State,
+pub fn run<'a, C: Candidate<'a>>(
+    constraints: &[Constraint],
     holes: &[Hole],
-    lower_bound: &L,
-    upper_bound: &'a ExplicitDFA,
+    reference_dfa: &'a ExplicitDFA,
     store: &mut spp::SPPstore,
     max_iters: Option<usize>,
 ) -> Result<HashMap<Hole, C>, CegisError> {
@@ -79,17 +227,22 @@ pub fn run<'a, C: Candidate<'a>, L: NFA>(
 
     let mut hole_to_var: HashMap<Hole, C::Var> = HashMap::new();
     for &h in holes {
-        hole_to_var.insert(h, C::fresh_var(&mut learner, upper_bound));
+        hole_to_var.insert(h, C::fresh_var(&mut learner, reference_dfa));
     }
 
     let sol = learner
         .extract(store)
         .expect("haven't added any constraints yet");
-    let initial: HashMap<Hole, C> = hole_to_var
+    let mut candidates: HashMap<Hole, C> = hole_to_var
         .iter()
         .map(|(&h, &v)| (h, C::from_solution(&sol, v)))
         .collect();
-    let mut inst = Instantiate::new(aut, start, initial);
+
+    // One instantiation per constraint, all sharing the same hole assignment.
+    let mut insts: Vec<Instantiate<C>> = constraints
+        .iter()
+        .map(|c| Instantiate::new(c.aut().clone(), c.start(), candidates.clone()))
+        .collect();
 
     let mut iters: usize = 0;
     loop {
@@ -100,31 +253,31 @@ pub fn run<'a, C: Candidate<'a>, L: NFA>(
         }
         iters += 1;
 
-        match inst.check_less_than(store, upper_bound) {
-            Ok(()) => match inst.check_greater_than(store, lower_bound) {
-                Ok(()) => return Ok(inst.holes().clone()),
-                Err(cex) => {
-                    add_lower_bound_clauses(
-                        cex,
-                        &mut inst,
-                        &hole_to_var,
-                        &mut learner,
-                        store,
-                        upper_bound,
-                    );
-                }
-            },
-            Err(witnesses) => {
-                add_upper_bound_clause::<C>(witnesses, &hole_to_var, &mut learner);
+        // Visit constraints in order; the first failure adds its clause and
+        // ends the pass so we re-extract before re-checking.
+        let mut satisfied = true;
+        for (c, inst) in constraints.iter().zip(insts.iter_mut()) {
+            if !c.check(inst, &hole_to_var, &mut learner, store, reference_dfa) {
+                satisfied = false;
+                break;
             }
+        }
+        if satisfied {
+            return Ok(candidates);
         }
 
         let sol = match learner.extract(store) {
             Ok(sol) => sol,
             Err(_) => return Err(CegisError::Infeasible),
         };
-        for (&h, &v) in &hole_to_var {
-            inst.set_hole(h, C::from_solution(&sol, v));
+        candidates = hole_to_var
+            .iter()
+            .map(|(&h, &v)| (h, C::from_solution(&sol, v)))
+            .collect();
+        for inst in insts.iter_mut() {
+            for (&h, &v) in &hole_to_var {
+                inst.set_hole(h, C::from_solution(&sol, v));
+            }
         }
     }
 }
@@ -203,7 +356,7 @@ fn add_lower_bound_clauses<'a, C: Candidate<'a>>(
     hole_to_var: &HashMap<Hole, C::Var>,
     learner: &mut SmtLearner<'a>,
     store: &mut spp::SPPstore,
-    upper_bound: &'a ExplicitDFA,
+    reference_dfa: &'a ExplicitDFA,
 ) where
     <C as ENFA>::State: Ord,
 {
@@ -212,7 +365,7 @@ fn add_lower_bound_clauses<'a, C: Candidate<'a>>(
 
     // Backward reach under all-top: temporarily swap, compute, restore.
     let saved: HashMap<Hole, C> = inst.holes().clone();
-    let top = C::top(store, upper_bound);
+    let top = C::top(store, reference_dfa);
     for &h in hole_to_var.keys() {
         inst.set_hole(h, top.clone());
     }
@@ -260,7 +413,7 @@ fn add_lower_bound_clauses<'a, C: Candidate<'a>>(
                 hole_to_var[&site.hole],
                 learner,
                 store,
-                upper_bound,
+                reference_dfa,
                 site.in_sp,
                 site.out_sp,
                 site.trace,
@@ -365,18 +518,34 @@ mod tests {
         }
     }
 
+    /// Solve `lb ⊆ expr[holes] ⊆ ub` via a pair of [`Constraint`]s (an upper
+    /// and a lower bound over `expr`), grounding the candidates on `ub`.
+    fn run_bounds<'a, C: Candidate<'a>>(
+        store: &mut spp::SPPstore,
+        expr: &Expr,
+        holes: &[Hole],
+        lb: &ExplicitDFA,
+        ub: &'a ExplicitDFA,
+        max_iters: Option<usize>,
+    ) -> Result<HashMap<Hole, C>, CegisError> {
+        let constraints = vec![
+            Constraint::upper_bound(store, expr, ub.clone()),
+            Constraint::lower_bound(store, expr, lb.clone()),
+        ];
+        run::<C>(&constraints, holes, ub, store, max_iters)
+    }
+
     /// 0 ⊆ Hole ⊆ top: trivially solvable.  The learner returns the empty
     /// SPP (its default when unconstrained), the upper-bound check passes
     /// vacuously, the lower-bound check passes vacuously, done.
     #[test]
     fn trivial_bounds_converge_immediately() {
         let mut store = mk_store();
-        let mut aut = AutWithHoles::new();
-        let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store);
         let result =
-            run::<spp::SPP, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store, None).unwrap();
+            run_bounds::<spp::SPP>(&mut store, &Expr::hole(Hole(0)), &[Hole(0)], &lb, &ub, None)
+                .unwrap();
         assert_eq!(result[&Hole(0)], store.zero);
     }
 
@@ -388,11 +557,10 @@ mod tests {
     fn concrete_violation_is_infeasible() {
         let mut store = mk_store();
         let top = store.top;
-        let mut aut = AutWithHoles::new();
-        let start = aut.expr_to_state(&mut store, &Expr::spp(top));
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
-        let err = run::<spp::SPP, _>(aut, start, &[], &lb, &ub, &mut store, None).unwrap_err();
+        let err =
+            run_bounds::<spp::SPP>(&mut store, &Expr::spp(top), &[], &lb, &ub, None).unwrap_err();
         assert_eq!(err, CegisError::Infeasible);
     }
 
@@ -402,12 +570,11 @@ mod tests {
     #[test]
     fn hole_bounded_above_by_zero_yields_zero() {
         let mut store = mk_store();
-        let mut aut = AutWithHoles::new();
-        let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
         let result =
-            run::<spp::SPP, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store, None).unwrap();
+            run_bounds::<spp::SPP>(&mut store, &Expr::hole(Hole(0)), &[Hole(0)], &lb, &ub, None)
+                .unwrap();
         assert_eq!(result[&Hole(0)], store.zero);
     }
 
@@ -417,16 +584,11 @@ mod tests {
     #[test]
     fn two_holes_trivial_bounds() {
         let mut store = mk_store();
-        let mut aut = AutWithHoles::new();
-        let start = aut.expr_to_state(
-            &mut store,
-            &Expr::union(Expr::hole(Hole(0)), Expr::hole(Hole(1))),
-        );
+        let expr = Expr::union(Expr::hole(Hole(0)), Expr::hole(Hole(1)));
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store);
         let result =
-            run::<spp::SPP, _>(aut, start, &[Hole(0), Hole(1)], &lb, &ub, &mut store, None)
-                .unwrap();
+            run_bounds::<spp::SPP>(&mut store, &expr, &[Hole(0), Hole(1)], &lb, &ub, None).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[&Hole(0)], store.zero);
         assert_eq!(result[&Hole(1)], store.zero);
@@ -437,16 +599,11 @@ mod tests {
     #[test]
     fn two_holes_bounded_above_by_zero() {
         let mut store = mk_store();
-        let mut aut = AutWithHoles::new();
-        let start = aut.expr_to_state(
-            &mut store,
-            &Expr::union(Expr::hole(Hole(0)), Expr::hole(Hole(1))),
-        );
+        let expr = Expr::union(Expr::hole(Hole(0)), Expr::hole(Hole(1)));
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
         let result =
-            run::<spp::SPP, _>(aut, start, &[Hole(0), Hole(1)], &lb, &ub, &mut store, None)
-                .unwrap();
+            run_bounds::<spp::SPP>(&mut store, &expr, &[Hole(0), Hole(1)], &lb, &ub, None).unwrap();
         assert_eq!(result[&Hole(0)], store.zero);
         assert_eq!(result[&Hole(1)], store.zero);
     }
@@ -492,11 +649,9 @@ mod tests {
             outputs: vec![store.top],
         };
 
-        let mut aut = AutWithHoles::new();
-        let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
-
         let result =
-            run::<spp::SPP, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store, None).unwrap();
+            run_bounds::<spp::SPP>(&mut store, &Expr::hole(Hole(0)), &[Hole(0)], &lb, &ub, None)
+                .unwrap();
         let h0 = result[&Hole(0)];
         assert!(
             store.accepts(h0, &trace0, &output_pkt),
@@ -511,11 +666,11 @@ mod tests {
     #[test]
     fn cand_trivial_bounds_converge() {
         let mut store = mk_store();
-        let mut aut = AutWithHoles::new();
-        let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store); // one state ⇒ Cand has num_states == 1
-        let result = run::<Cand, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store, None).unwrap();
+        let result =
+            run_bounds::<Cand>(&mut store, &Expr::hole(Hole(0)), &[Hole(0)], &lb, &ub, None)
+                .unwrap();
         let cand = &result[&Hole(0)];
         assert!(cand.accepts_input(
             &mut store,
@@ -536,11 +691,11 @@ mod tests {
     #[test]
     fn cand_upper_bound_refinement() {
         let mut store = spp::SPPstore::new(1);
-        let mut aut = AutWithHoles::new();
-        let start = aut.expr_to_state(&mut store, &Expr::hole(Hole(0)));
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
-        let result = run::<Cand, _>(aut, start, &[Hole(0)], &lb, &ub, &mut store, None).unwrap();
+        let result =
+            run_bounds::<Cand>(&mut store, &Expr::hole(Hole(0)), &[Hole(0)], &lb, &ub, None)
+                .unwrap();
         let cand = &result[&Hole(0)];
         assert!(!cand.accepts_input(
             &mut store,
