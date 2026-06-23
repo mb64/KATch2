@@ -234,7 +234,7 @@ mod test {
             &target_dfa,
             &target_dfa,
             &mut store,
-            None,
+            Some(FUZZ_MAX_ITERS),
         );
         assert!(result.is_ok());
     }
@@ -266,7 +266,7 @@ mod test {
             &target_dfa,
             &target_dfa,
             &mut store,
-            None,
+            Some(FUZZ_MAX_ITERS),
         );
         assert!(result.is_err());
     }
@@ -308,7 +308,7 @@ mod test {
             &target_dfa,
             &target_dfa,
             &mut store,
-            None,
+            Some(FUZZ_MAX_ITERS),
         );
         assert!(result.is_ok());
     }
@@ -325,12 +325,25 @@ mod test {
         let hole_expr = HExpr::hole(Hole(0));
 
         // SPP-only is infeasible.
-        let spp_result = solve_holes(&hole_expr, &[Hole(0)], &target, &target, &mut store, None);
+        let spp_result = solve_holes(
+            &hole_expr,
+            &[Hole(0)],
+            &target,
+            &target,
+            &mut store,
+            Some(FUZZ_MAX_ITERS),
+        );
         assert!(matches!(spp_result, Err(CegisError::Infeasible)));
 
         // The full solver can realize `dup` with a dup-ful candidate.
-        let full_result =
-            solve_holes_full(&hole_expr, &[Hole(0)], &target, &target, &mut store, None);
+        let full_result = solve_holes_full(
+            &hole_expr,
+            &[Hole(0)],
+            &target,
+            &target,
+            &mut store,
+            Some(FUZZ_MAX_ITERS),
+        );
         assert!(full_result.is_ok());
     }
 
@@ -343,7 +356,14 @@ mod test {
         let lower = expr_to_dfa(&Expr::one(), &mut store);
         let upper = expr_to_dfa(&Expr::zero(), &mut store);
         let hole_expr = HExpr::hole(Hole(0));
-        let result = solve_holes_full(&hole_expr, &[Hole(0)], &lower, &upper, &mut store, None);
+        let result = solve_holes_full(
+            &hole_expr,
+            &[Hole(0)],
+            &lower,
+            &upper,
+            &mut store,
+            Some(FUZZ_MAX_ITERS),
+        );
         assert!(matches!(result, Err(CegisError::Infeasible)));
     }
 
@@ -381,7 +401,7 @@ mod test {
     /// Iteration cap for fuzz solves.  Low enough to stay fast even when the
     /// solver diverges, high enough that genuinely-converging instances (which
     /// finish in a few dozen rounds) still converge.
-    const FUZZ_MAX_ITERS: usize = 200;
+    const FUZZ_MAX_ITERS: usize = 64;
 
     /// A random dup-free expression: leaves are `0`/`1`/`test`/`assign`, joined
     /// by `union`/`sequence`/`star`.  No `dup`, so it denotes a single SPP and
@@ -659,7 +679,7 @@ mod test {
             &target_dfa,
             &target_dfa,
             &mut store,
-            None,
+            Some(FUZZ_MAX_ITERS),
         );
         assert!(result.is_ok(), "{result:?}");
     }
@@ -813,35 +833,16 @@ mod test {
         result.expect("should have a solution");
     }
 
-    /// Minimized reproducer for a **pre-existing, non-deterministic**
-    /// wrong-`Infeasible` in the lower-bound search of `solve_holes_full`
-    /// (first surfaced by `fuzz_solve_holes_full_roundtrip`).
+    /// Regression test for a bug found by `fuzz_solve_holes_full_roundtrip`.
     ///
     /// ```text
-    /// hole_expr = ((Hole(1) ∪ Hole(0)) ; Hole(0))  ∪  Hole(0)        (2 fields)
-    /// Hole(0) := dup ; 0:=false
-    /// Hole(1) := dup
+    /// ((Hole(1) ∪ Hole(0)) ; Hole(0)) ∪ Hole(0)  ==  target        (2 fields)
+    /// Hole(0) := dup;0:=false,   Hole(1) := dup   (target is that substitution)
     /// ```
     ///
-    /// `target` is `hole_expr` with each hole substituted by its program, so
-    /// `hole_expr == target` is satisfiable by construction (the substitution
-    /// is itself a witness) and `solve_holes_full` must never report
-    /// `Infeasible` — yet on roughly a quarter of process seeds it does.
-    ///
-    /// This is *not* a regression from the constraint refactor: measured over
-    /// 50 fresh-process runs each, the original code wrong-`Infeasible`d 4/50
-    /// and the refactored code 6/50 (indistinguishable). The root cause is an
-    /// unsound lower-bound clause from `cegis::collect_hole_sites` /
-    /// `Candidate::accept_literal`, selected based on per-process `HashMap`
-    /// iteration order. Minimization (40–60 runs/case) showed *both* unions and
-    /// the sequence are required: dropping the inner union, the outer union, or
-    /// merging the two holes drops the failure rate to ~0.
-    ///
-    /// `#[ignore]`d because it fails non-deterministically; run it in a loop
-    /// (e.g. `cargo test --release repro_fuzz_wrong_infeasible -- --ignored`)
-    /// to observe it. Un-ignore once the underlying soundness bug is fixed.
+    /// Caused by a bug in [`crate::holes::aut::elaborate_step`], which has been
+    /// fixed.
     #[test]
-    #[ignore = "non-deterministic pre-existing wrong-Infeasible; ~25% of seeds"]
     fn repro_fuzz_wrong_infeasible() {
         // Hole programs (the fuzzer's, simplified: dup∪dup = dup, dup;1 = dup).
         let h0: Exp = Expr::sequence(Expr::dup(), Expr::assign(0, false)); // dup ; 0:=false

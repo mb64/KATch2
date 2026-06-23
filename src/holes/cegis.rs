@@ -498,6 +498,11 @@ mod tests {
     use crate::holes::cand::{Cand, Input};
     use crate::holes::nk_with_holes::Expr;
 
+    /// Iteration cap for these unit tests.  Every case here converges (or
+    /// proves infeasible) in a couple of rounds, so this is purely a guard
+    /// against an unexpected divergence hanging the suite.
+    const MAX_ITERS: usize = 64;
+
     fn mk_store() -> spp::SPPstore {
         spp::SPPstore::new(3)
     }
@@ -543,9 +548,15 @@ mod tests {
         let mut store = mk_store();
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store);
-        let result =
-            run_bounds::<spp::SPP>(&mut store, &Expr::hole(Hole(0)), &[Hole(0)], &lb, &ub, None)
-                .unwrap();
+        let result = run_bounds::<spp::SPP>(
+            &mut store,
+            &Expr::hole(Hole(0)),
+            &[Hole(0)],
+            &lb,
+            &ub,
+            Some(MAX_ITERS),
+        )
+        .unwrap();
         assert_eq!(result[&Hole(0)], store.zero);
     }
 
@@ -560,7 +571,8 @@ mod tests {
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
         let err =
-            run_bounds::<spp::SPP>(&mut store, &Expr::spp(top), &[], &lb, &ub, None).unwrap_err();
+            run_bounds::<spp::SPP>(&mut store, &Expr::spp(top), &[], &lb, &ub, Some(MAX_ITERS))
+                .unwrap_err();
         assert_eq!(err, CegisError::Infeasible);
     }
 
@@ -572,9 +584,15 @@ mod tests {
         let mut store = mk_store();
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
-        let result =
-            run_bounds::<spp::SPP>(&mut store, &Expr::hole(Hole(0)), &[Hole(0)], &lb, &ub, None)
-                .unwrap();
+        let result = run_bounds::<spp::SPP>(
+            &mut store,
+            &Expr::hole(Hole(0)),
+            &[Hole(0)],
+            &lb,
+            &ub,
+            Some(MAX_ITERS),
+        )
+        .unwrap();
         assert_eq!(result[&Hole(0)], store.zero);
     }
 
@@ -587,8 +605,15 @@ mod tests {
         let expr = Expr::union(Expr::hole(Hole(0)), Expr::hole(Hole(1)));
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store);
-        let result =
-            run_bounds::<spp::SPP>(&mut store, &expr, &[Hole(0), Hole(1)], &lb, &ub, None).unwrap();
+        let result = run_bounds::<spp::SPP>(
+            &mut store,
+            &expr,
+            &[Hole(0), Hole(1)],
+            &lb,
+            &ub,
+            Some(MAX_ITERS),
+        )
+        .unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[&Hole(0)], store.zero);
         assert_eq!(result[&Hole(1)], store.zero);
@@ -602,8 +627,15 @@ mod tests {
         let expr = Expr::union(Expr::hole(Hole(0)), Expr::hole(Hole(1)));
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
-        let result =
-            run_bounds::<spp::SPP>(&mut store, &expr, &[Hole(0), Hole(1)], &lb, &ub, None).unwrap();
+        let result = run_bounds::<spp::SPP>(
+            &mut store,
+            &expr,
+            &[Hole(0), Hole(1)],
+            &lb,
+            &ub,
+            Some(MAX_ITERS),
+        )
+        .unwrap();
         assert_eq!(result[&Hole(0)], store.zero);
         assert_eq!(result[&Hole(1)], store.zero);
     }
@@ -649,9 +681,15 @@ mod tests {
             outputs: vec![store.top],
         };
 
-        let result =
-            run_bounds::<spp::SPP>(&mut store, &Expr::hole(Hole(0)), &[Hole(0)], &lb, &ub, None)
-                .unwrap();
+        let result = run_bounds::<spp::SPP>(
+            &mut store,
+            &Expr::hole(Hole(0)),
+            &[Hole(0)],
+            &lb,
+            &ub,
+            Some(MAX_ITERS),
+        )
+        .unwrap();
         let h0 = result[&Hole(0)];
         assert!(
             store.accepts(h0, &trace0, &output_pkt),
@@ -668,9 +706,15 @@ mod tests {
         let mut store = mk_store();
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store); // one state ⇒ Cand has num_states == 1
-        let result =
-            run_bounds::<Cand>(&mut store, &Expr::hole(Hole(0)), &[Hole(0)], &lb, &ub, None)
-                .unwrap();
+        let result = run_bounds::<Cand>(
+            &mut store,
+            &Expr::hole(Hole(0)),
+            &[Hole(0)],
+            &lb,
+            &ub,
+            Some(MAX_ITERS),
+        )
+        .unwrap();
         let cand = &result[&Hole(0)];
         assert!(cand.accepts_input(
             &mut store,
@@ -693,9 +737,15 @@ mod tests {
         let mut store = spp::SPPstore::new(1);
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
-        let result =
-            run_bounds::<Cand>(&mut store, &Expr::hole(Hole(0)), &[Hole(0)], &lb, &ub, None)
-                .unwrap();
+        let result = run_bounds::<Cand>(
+            &mut store,
+            &Expr::hole(Hole(0)),
+            &[Hole(0)],
+            &lb,
+            &ub,
+            Some(MAX_ITERS),
+        )
+        .unwrap();
         let cand = &result[&Hole(0)];
         assert!(!cand.accepts_input(
             &mut store,

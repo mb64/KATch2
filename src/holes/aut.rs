@@ -423,7 +423,6 @@ impl<T: ENFA> EpsilonClosure<T> {
             let (q_curr, p_curr) = &w[0];
             let (q_next, p_next) = &w[1];
             let step = elaborate_step(self.inner(), store, q_curr, p_curr, q_next, p_next);
-            println!("-> elaborate_trace: from {q_curr:?} to {q_next:?}: {step:?}");
             full.extend(step);
         }
 
@@ -1752,24 +1751,41 @@ impl<'a, T: ENFA> ENFA for ElaborateStepHelper<'a, T> {
         store: &mut spp::SPPstore,
         q: &Self::State,
     ) -> Vec<(spp::SPP, Self::State)> {
+        // Between two consecutive *visible* boundary states of an
+        // `EpsilonClosure` trace there are only invisible intermediates plus a
+        // single final hop onto the (visible) destination.  So from either the
+        // pinned source (`Start`) or an intermediate (`Inner`) we may traverse
+        // invisible inner states freely, but the only visible state we are
+        // allowed to step onto is the pinned `end`.  Following any *other*
+        // visible state would splice a spurious extra boundary (e.g. a dup
+        // inside a `Cand` hole, whose `Middle` states are visible) into the
+        // reconstruction and mis-attribute it as an additional hole traversal.
         match q {
-            HelperState::Start => self
-                .inner
-                .transitions(store, &self.source)
-                .into_iter()
-                .map(|(spp, q_next)| {
-                    (
+            HelperState::Start => {
+                let trans = self.inner.transitions(store, &self.source);
+                let mut result = Vec::new();
+                for (spp, q_next) in trans {
+                    if self.inner.is_visible(store, &q_next) && q_next != self.end {
+                        continue;
+                    }
+                    result.push((
                         store.sequence(self.start_to_source_spp, spp),
                         HelperState::Inner(q_next),
-                    )
-                })
-                .collect(),
-            HelperState::Inner(s) => self
-                .inner
-                .transitions(store, s)
-                .into_iter()
-                .map(|(spp, q_next)| (spp, HelperState::Inner(q_next)))
-                .collect(),
+                    ));
+                }
+                result
+            }
+            HelperState::Inner(s) => {
+                let trans = self.inner.transitions(store, s);
+                let mut result = Vec::new();
+                for (spp, q_next) in trans {
+                    if self.inner.is_visible(store, &q_next) && q_next != self.end {
+                        continue;
+                    }
+                    result.push((spp, HelperState::Inner(q_next)));
+                }
+                result
+            }
         }
     }
 
@@ -1837,8 +1853,8 @@ pub fn elaborate_step<T: ENFA>(
         .last()
         .map(|(s, p)| (s, p.as_slice()))
         .unwrap_or((q_source, p_source));
-    debug_assert!(final_state == q_dest);
-    debug_assert!(final_pkt == p_dest);
+    assert!(final_state == q_dest);
+    assert!(final_pkt == p_dest);
 
     path
 }
@@ -1859,8 +1875,6 @@ struct ElaborateTailHelper<'a, T: ENFA> {
     zero_spp: spp::SPP,
 }
 
-/// TODO: Fix this up, like the above. Figure out if it's correct or has the same bug as the above
-/// one did.
 impl<'a, T: ENFA> ENFA for ElaborateTailHelper<'a, T> {
     type State = HelperState<T::State>;
 
