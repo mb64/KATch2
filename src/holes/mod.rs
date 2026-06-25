@@ -135,6 +135,7 @@ pub mod cegis;
 pub mod inst;
 pub mod nk_with_holes;
 pub mod parser;
+pub mod problem;
 pub mod smt;
 
 use std::collections::HashMap;
@@ -142,8 +143,9 @@ use std::collections::HashMap;
 use crate::spp;
 use aut::{ExplicitDFA, ops};
 use candidate::Candidate;
-use cegis::{CegisError, Constraint, run};
+use cegis::{CegisError, run};
 use nk_with_holes::{Expr, Hole};
+use problem::Constraint;
 
 /// Solve `lower_bound ⊆ expr[holes] ⊆ upper_bound` for the holes appearing
 /// in `expr`, filling each hole with a candidate of kind `C`.
@@ -994,5 +996,76 @@ mod test {
         )
         .map(|_| ());
         assert_ne!(result, Err(CegisError::Infeasible), "wrong Infeasible");
+    }
+}
+
+/// End-to-end: parse a `.nksynth` source, lower it to a [`problem::ProblemInstance`],
+/// and solve it.
+#[cfg(test)]
+mod end_to_end {
+    use katch2::holes::cegis::CegisError;
+    use katch2::holes::parser::{desugar, parse_program};
+    use katch2::holes::problem::Hole;
+
+    /// `h == (x0 := 1)`: the dup-free solver finds the assignment SPP directly.
+    #[test]
+    fn solves_equality_with_spp() {
+        let prog = parse_program(
+            "hole h\n\
+             def target = x0 := 1\n\
+             assert h == target\n",
+        )
+        .unwrap();
+        let mut pi = desugar(&prog).unwrap();
+        let sol = pi.solve().expect("should be solvable");
+        let expected = pi.store.assign(0, true);
+        assert_eq!(sol[&Hole(0)], expected);
+    }
+
+    /// `a ; b == (x0 := 1)` with two holes: still solvable with SPP candidates.
+    #[test]
+    fn solves_two_hole_sequence() {
+        let prog = parse_program(
+            "hole a\n\
+             hole b\n\
+             assert (a ; b) == (x0 := 1)\n",
+        )
+        .unwrap();
+        let mut pi = desugar(&prog).unwrap();
+        let sol = pi.solve().expect("should be solvable");
+        assert_eq!(sol.len(), 2);
+        assert!(sol.contains_key(&Hole(0)) && sol.contains_key(&Hole(1)));
+    }
+
+    /// `h <= (x0 == 1)`: an upper-bound constraint; the empty program (`0`) is a
+    /// valid filling, so the dup-free solver succeeds.
+    #[test]
+    fn solves_upper_bound() {
+        let prog = parse_program("hole h\nassert h <= (x0 == 1)\n").unwrap();
+        let mut pi = desugar(&prog).unwrap();
+        assert!(pi.solve().is_ok());
+    }
+
+    /// `h == (x0 := 1) ; dup`: the hole must emit a `dup`, which a dup-free
+    /// [`SPP`](katch2::spp::SPP) cannot — so `solve` reports infeasible, while
+    /// `solve_full` synthesizes it (returning the hole as a DFA).
+    #[test]
+    fn full_solver_handles_dup() {
+        let prog = parse_program(
+            "hole h\n\
+             def target = (x0 := 1) ; dup\n\
+             assert h == target\n",
+        )
+        .unwrap();
+
+        // The dup-free solver cannot represent a `dup`.
+        let mut pi_spp = desugar(&prog).unwrap();
+        assert_eq!(pi_spp.solve(), Err(CegisError::Infeasible));
+
+        // The full solver can, returning one DFA per hole.
+        let mut pi_full = desugar(&prog).unwrap();
+        let sol = pi_full.solve_full().expect("full solver should succeed");
+        assert_eq!(sol.len(), 1);
+        assert!(sol.contains_key(&Hole(0)));
     }
 }

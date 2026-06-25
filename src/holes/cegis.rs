@@ -45,7 +45,8 @@ use std::collections::{HashMap, HashSet};
 use crate::holes::aut::{ENFA, ExplicitDFA, backward_reachable, forward_reachable};
 use crate::holes::candidate::Candidate;
 use crate::holes::inst::{self, Instantiate, LowerBoundCounterexample};
-use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Expr, Hole, State};
+use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Hole, State};
+use crate::holes::problem::Constraint;
 use crate::holes::smt::{AbstractClause, SmtLearner};
 use crate::sp;
 use crate::spp;
@@ -63,92 +64,7 @@ pub enum CegisError {
     IterationLimit,
 }
 
-/// A single constraint relating a hole-bearing automaton to a concrete DFA.
-///
-/// Each variant pairs an [`AutWithHoles`] (with its pinned start [`State`])
-/// against an [`ExplicitDFA`].  Once the holes are filled with concrete
-/// candidates, the constraint asserts a containment between the resulting
-/// instantiated automaton and the DFA; see the variant docs for the
-/// direction.
-///
-/// Build one with [`Constraint::upper_bound`], [`Constraint::lower_bound`], or
-/// [`Constraint::equality`], which compile a [`nk_with_holes::Expr`] into the
-/// underlying automaton for you.
-#[derive(Debug, Clone)]
-pub enum Constraint {
-    /// `dfa ⊆ aut[holes]`: the DFA is a lower bound on the instantiated
-    /// automaton (every triple the DFA accepts must also be accepted).
-    LowerBound {
-        aut: AutWithHoles,
-        start: State,
-        dfa: ExplicitDFA,
-    },
-    /// `aut[holes] ⊆ dfa`: the DFA is an upper bound on the instantiated
-    /// automaton (every triple the automaton accepts must also be accepted by
-    /// the DFA).
-    UpperBound {
-        aut: AutWithHoles,
-        start: State,
-        dfa: ExplicitDFA,
-    },
-    /// `aut[holes] == dfa`: the instantiated automaton must accept exactly the
-    /// DFA's language — both an upper and a lower bound at once.
-    Equality {
-        aut: AutWithHoles,
-        start: State,
-        dfa: ExplicitDFA,
-    },
-}
-
 impl Constraint {
-    /// Upper-bound constraint `expr[holes] ⊆ dfa`, compiling `expr` into the
-    /// hole-bearing automaton.
-    pub fn upper_bound(store: &mut spp::SPPstore, expr: &Expr, dfa: ExplicitDFA) -> Self {
-        let (aut, start) = compile(store, expr);
-        Constraint::UpperBound { aut, start, dfa }
-    }
-
-    /// Lower-bound constraint `dfa ⊆ expr[holes]`, compiling `expr` into the
-    /// hole-bearing automaton.
-    pub fn lower_bound(store: &mut spp::SPPstore, expr: &Expr, dfa: ExplicitDFA) -> Self {
-        let (aut, start) = compile(store, expr);
-        Constraint::LowerBound { aut, start, dfa }
-    }
-
-    /// Equality constraint `expr[holes] == dfa`, compiling `expr` into the
-    /// hole-bearing automaton.
-    pub fn equality(store: &mut spp::SPPstore, expr: &Expr, dfa: ExplicitDFA) -> Self {
-        let (aut, start) = compile(store, expr);
-        Constraint::Equality { aut, start, dfa }
-    }
-
-    /// The hole-bearing automaton this constraint is over.
-    pub fn aut(&self) -> &AutWithHoles {
-        match self {
-            Constraint::LowerBound { aut, .. }
-            | Constraint::UpperBound { aut, .. }
-            | Constraint::Equality { aut, .. } => aut,
-        }
-    }
-
-    /// The pinned start state of [`Constraint::aut`].
-    pub fn start(&self) -> State {
-        match self {
-            Constraint::LowerBound { start, .. }
-            | Constraint::UpperBound { start, .. }
-            | Constraint::Equality { start, .. } => *start,
-        }
-    }
-
-    /// The concrete DFA this constraint compares against.
-    pub fn dfa(&self) -> &ExplicitDFA {
-        match self {
-            Constraint::LowerBound { dfa, .. }
-            | Constraint::UpperBound { dfa, .. }
-            | Constraint::Equality { dfa, .. } => dfa,
-        }
-    }
-
     /// Check whether `inst` (the constraint's automaton instantiated with the
     /// current candidates) satisfies this constraint.
     ///
@@ -190,13 +106,6 @@ impl Constraint {
 
         true
     }
-}
-
-/// Compile a hole-bearing [`Expr`] into its automaton and visible start state.
-fn compile(store: &mut spp::SPPstore, expr: &Expr) -> (AutWithHoles, State) {
-    let mut aut = AutWithHoles::new();
-    let start = aut.expr_to_state(store, expr);
-    (aut, start)
 }
 
 /// Synthesize a candidate per hole satisfying every constraint in

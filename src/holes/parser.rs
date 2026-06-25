@@ -21,8 +21,8 @@
 use crate::desugar::{DesugarEnv, DesugarError, desugar_with_env};
 use crate::expr::{Exp, Expr, Hole};
 use crate::holes::aut::expr_to_dfa;
-use crate::holes::cegis::Constraint;
 use crate::holes::nk_with_holes::Expr as HExpr;
+use crate::holes::problem::{Constraint, ProblemInstance};
 use crate::parser::{Lexer, ParseError, Parser, Span, TokenKind};
 use crate::spp;
 
@@ -142,15 +142,6 @@ fn err(message: String, span: Span) -> ParseError {
 }
 
 // --- Desugaring a Program into a synthesis problem ----------------------------
-
-/// A `.nksynth` program lowered into a concrete synthesis problem: an SPP store
-/// sized to the program's fields, the holes to synthesize, and the constraints
-/// the holes must jointly satisfy.
-pub struct ProblemInstance {
-    pub store: spp::SPPstore,
-    pub holes: Vec<Hole>,
-    pub constraints: Vec<Constraint>,
-}
 
 /// The number of packet fields the program references: the max over the
 /// `num_fields` of every expression it mentions (definitions and both sides of

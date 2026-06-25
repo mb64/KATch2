@@ -20,7 +20,7 @@ use std::hash::Hash;
 
 use crate::holes::aut::{ENFA, ExplicitDFA, NFA, ops};
 use crate::holes::cand::{Cand, State as CandState};
-use crate::holes::cegis::Constraint;
+use crate::holes::problem::Constraint;
 use crate::holes::smt::{AbstractBit, CandVar, Existential, Literal, SmtLearner, Solution, SppVar};
 use crate::sp::SP;
 use crate::spp::{SPP, SPPstore};
