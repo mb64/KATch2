@@ -134,6 +134,7 @@ pub mod candidate;
 pub mod cegis;
 pub mod inst;
 pub mod nk_with_holes;
+pub mod parser;
 pub mod smt;
 
 use std::collections::HashMap;

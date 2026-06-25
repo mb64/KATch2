@@ -1,5 +1,12 @@
 use crate::pre::{Field, Value};
 
+/// A formal hole standing for an unknown sub-expression (an unknown SPP once
+/// compiled).  Holes are introduced by the `.nksynth` synthesis front-end and
+/// are *not* valid in expressions handed to `crate::aut`: they must be filled
+/// in before automaton construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Hole(pub u32);
+
 /// Represents different pattern types for matching
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pattern {
@@ -52,6 +59,7 @@ pub enum Expr {
     LtlNext(Exp),                            // X e
     LtlUntil(Exp, Exp),                      // e1 U e2
     End,                                     // end
+    Hole(Hole), // a synthesis hole (filled in before automaton construction)
 }
 
 /// Represents a boxed expression
@@ -150,6 +158,9 @@ impl Expr {
     pub fn end() -> Exp {
         Box::new(Expr::End)
     }
+    pub fn hole(hole: Hole) -> Exp {
+        Box::new(Expr::Hole(hole))
+    }
 
     /// Check if an expression is in the test fragment
     /// Test fragment consists of: 0, 1, logical operators (+, &, ^, -),
@@ -182,6 +193,7 @@ impl Expr {
             | Expr::IfThenElse(_, _, _)
             | Expr::Var(_)
             | Expr::Let(_, _, _)
+            | Expr::Hole(_)
             | Expr::LetBitRange(_, _, _, _) => false,
         }
     }
@@ -209,7 +221,8 @@ impl Expr {
             Expr::Complement(e) | Expr::TestNegation(e) | Expr::Star(e) | Expr::LtlNext(e) => {
                 e.num_fields()
             }
-            Expr::Var(_) => 0, // Variables don't directly reference fields
+            Expr::Var(_) => 0,  // Variables don't directly reference fields
+            Expr::Hole(_) => 0, // Holes don't directly reference fields
         }
     }
 
@@ -249,6 +262,7 @@ impl Expr {
             Expr::Top => Expr::top(),
             Expr::Dup => Expr::dup(),
             Expr::End => Expr::end(),
+            Expr::Hole(h) => Expr::hole(*h),
             Expr::Assign(f, v) => Expr::assign(*f, *v),
             Expr::Test(f, v) => Expr::test(*f, *v),
             Expr::VarAssign(var, bits) => Expr::var_assign(var.clone(), bits.clone()),
@@ -385,6 +399,7 @@ impl std::fmt::Display for Expr {
             Expr::Sequence(e1, e2) => write!(f, "({} ; {})", e1, e2),
             Expr::Star(e) => write!(f, "({})*", e),
             Expr::Dup => write!(f, "dup"),
+            Expr::Hole(Hole(h)) => write!(f, "?{}", h),
             Expr::LtlNext(e) => write!(f, "X({})", e),
             Expr::LtlUntil(e1, e2) => write!(f, "({} U {})", e1, e2),
             Expr::End => write!(f, "end"),

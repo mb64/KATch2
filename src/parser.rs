@@ -99,6 +99,7 @@ pub enum TokenKind {
     Top,                   // T
     Assign,                // :=
     Eq,                    // ==
+    Lte,                   // <=
     Plus,                  // +
     And,                   // &
     Xor,                   // ^
@@ -130,6 +131,8 @@ pub enum TokenKind {
     Let,                   // let keyword
     In,                    // in keyword
     End,                   // end keyword (for multiple expressions parsing)
+    Hole,                  // hole keyword (.nksynth hole declarations)
+    Def,                   // def keyword (.nksynth definitions)
     Eof,                   // End of input
 }
 
@@ -450,6 +453,17 @@ impl<'a> Lexer<'a> {
                             TokenKind::Eq
                         }
                     }
+                    '<' => {
+                        if self.peek_char() == Some(&'=') {
+                            self.next_char_with_pos(); // Consume '='
+                            TokenKind::Lte
+                        } else {
+                            return Err(ParseError::new(
+                                "Expected '<=' for inequality".to_string(),
+                                Span::new(start_pos, self.current_pos),
+                            ));
+                        }
+                    }
                     // Let all identifiers including 'x', 'x0', 'x1', etc. go through the general identifier handling
                     _ => {
                         // Check if it's a digit that could start a number
@@ -479,6 +493,8 @@ impl<'a> Lexer<'a> {
                                 "let" => TokenKind::Let,
                                 "dup" => TokenKind::Dup,
                                 "end" => TokenKind::End,
+                                "hole" => TokenKind::Hole,
+                                "def" => TokenKind::Def,
                                 // Single letter tokens
                                 "T" => TokenKind::Top,
                                 "X" => TokenKind::LtlX,
@@ -607,6 +623,20 @@ impl<'a> Parser<'a> {
         Parser {
             lexer: lexer.peekable(),
         }
+    }
+
+    /// Peek at the next token, returning an owned clone.
+    ///
+    /// Exposed so clients (e.g. the `.nksynth` front-end in
+    /// `crate::holes::parser`) can build a statement-level grammar on top of
+    /// [`Parser::parse_single_expression`] while driving the same lexer.
+    pub fn peek_cloned(&mut self) -> Result<Token, ParseError> {
+        self.peek_token().cloned()
+    }
+
+    /// Consume and return the next token.
+    pub fn advance(&mut self) -> Result<Token, ParseError> {
+        self.consume_token()
     }
 
     /// Parses a single complete expression.
@@ -1725,6 +1755,9 @@ impl<'a> Parser<'a> {
             | TokenKind::Else
             | TokenKind::Let
             | TokenKind::In
+            | TokenKind::Lte
+            | TokenKind::Hole
+            | TokenKind::Def
             | TokenKind::Eof => {
                 // Removed End from here due to unreachable pattern, it's handled below.
                 Err(ParseError::new(
@@ -2184,6 +2217,7 @@ fn token_kind_to_user_string(kind: &TokenKind) -> String {
         TokenKind::Top => "keyword 'T'".to_string(),
         TokenKind::Assign => "operator ':='".to_string(),
         TokenKind::Eq => "operator '=='".to_string(),
+        TokenKind::Lte => "operator '<='".to_string(),
         TokenKind::Plus => "operator '+'".to_string(),
         TokenKind::And => "operator '&'".to_string(),
         TokenKind::Xor => "operator '^'".to_string(),
@@ -2215,6 +2249,8 @@ fn token_kind_to_user_string(kind: &TokenKind) -> String {
         TokenKind::Let => "keyword 'let'".to_string(),
         TokenKind::In => "keyword 'in'".to_string(),
         TokenKind::End => "keyword 'end'".to_string(),
+        TokenKind::Hole => "keyword 'hole'".to_string(),
+        TokenKind::Def => "keyword 'def'".to_string(),
         TokenKind::Eof => "end of input".to_string(),
     }
 }

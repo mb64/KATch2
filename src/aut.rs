@@ -476,6 +476,12 @@ impl Aut {
             Expr::VarMatch(_, _) => {
                 panic!("VarMatch should have been eliminated during desugaring")
             }
+            Expr::Hole(_) => {
+                panic!(
+                    "Holes must be filled in before automaton construction; \
+                     expr_to_state cannot compile a Hole"
+                )
+            }
         }
     }
 

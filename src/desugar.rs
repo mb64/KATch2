@@ -106,7 +106,7 @@ pub fn desugar(expr: &Expr) -> Result<Exp, DesugarError> {
 }
 
 /// Desugar an expression with a given environment for variables and aliases
-fn desugar_with_env(expr: &Expr, env: &DesugarEnv) -> Result<Exp, DesugarError> {
+pub fn desugar_with_env(expr: &Expr, env: &DesugarEnv) -> Result<Exp, DesugarError> {
     match expr {
         // Base cases - no transformation needed
         Expr::Zero => Ok(Expr::zero()),
@@ -114,6 +114,7 @@ fn desugar_with_env(expr: &Expr, env: &DesugarEnv) -> Result<Exp, DesugarError> 
         Expr::Top => Ok(Expr::top()),
         Expr::Dup => Ok(Expr::dup()),
         Expr::End => Ok(Expr::end()),
+        Expr::Hole(h) => Ok(Expr::hole(*h)),
         Expr::Assign(f, v) => Ok(Expr::assign(*f, *v)),
         Expr::Test(f, v) => Ok(Expr::test(*f, *v)),
 

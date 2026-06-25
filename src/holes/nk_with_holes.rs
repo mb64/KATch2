@@ -19,9 +19,10 @@
 use crate::spp;
 use std::collections::HashMap;
 
-/// A formal hole standing for an unknown SPP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Hole(pub u32);
+/// A formal hole standing for an unknown SPP.  The canonical definition now
+/// lives in [`crate::expr`]; re-exported here so existing `nk_with_holes::Hole`
+/// references keep working.
+pub use crate::expr::Hole;
 
 /// User-facing NetKAT-with-holes expression.
 ///
