@@ -1,0 +1,6 @@
+// Two holes whose sequence must equal an assignment.
+//   (a ; b) == (x0 := 1)
+// Solvable with dup-free candidates (e.g. a := (x0 := 1), b := 1).  => SAT
+hole a
+hole b
+assert (a ; b) == (x0 := 1)

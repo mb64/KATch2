@@ -1,0 +1,6 @@
+// Synthesize a single dup-free hole that exactly matches a target assignment.
+//   h == (x0 := 1)
+// Solvable by the default (dup-free) solver: h := (x0 := 1).  => SAT
+hole h
+def target = x0 := 1
+assert h == target

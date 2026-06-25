@@ -1017,7 +1017,7 @@ mod end_to_end {
         )
         .unwrap();
         let mut pi = desugar(&prog).unwrap();
-        let sol = pi.solve().expect("should be solvable");
+        let sol = pi.solve(None).expect("should be solvable");
         let expected = pi.store.assign(0, true);
         assert_eq!(sol[&Hole(0)], expected);
     }
@@ -1032,7 +1032,7 @@ mod end_to_end {
         )
         .unwrap();
         let mut pi = desugar(&prog).unwrap();
-        let sol = pi.solve().expect("should be solvable");
+        let sol = pi.solve(None).expect("should be solvable");
         assert_eq!(sol.len(), 2);
         assert!(sol.contains_key(&Hole(0)) && sol.contains_key(&Hole(1)));
     }
@@ -1043,7 +1043,7 @@ mod end_to_end {
     fn solves_upper_bound() {
         let prog = parse_program("hole h\nassert h <= (x0 == 1)\n").unwrap();
         let mut pi = desugar(&prog).unwrap();
-        assert!(pi.solve().is_ok());
+        assert!(pi.solve(None).is_ok());
     }
 
     /// `h == (x0 := 1) ; dup`: the hole must emit a `dup`, which a dup-free
@@ -1060,11 +1060,13 @@ mod end_to_end {
 
         // The dup-free solver cannot represent a `dup`.
         let mut pi_spp = desugar(&prog).unwrap();
-        assert_eq!(pi_spp.solve(), Err(CegisError::Infeasible));
+        assert_eq!(pi_spp.solve(None), Err(CegisError::Infeasible));
 
         // The full solver can, returning one DFA per hole.
         let mut pi_full = desugar(&prog).unwrap();
-        let sol = pi_full.solve_full().expect("full solver should succeed");
+        let sol = pi_full
+            .solve_full(None)
+            .expect("full solver should succeed");
         assert_eq!(sol.len(), 1);
         assert!(sol.contains_key(&Hole(0)));
     }

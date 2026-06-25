@@ -128,8 +128,12 @@ impl ProblemInstance {
     /// hole (or a [`CegisError`] if no solution exists / the search is
     /// inconclusive).
     ///
+    /// `max_iters` caps the number of CEGIS refinement rounds: pass `Some(n)` to
+    /// give up with [`CegisError::IterationLimit`] after `n` rounds, or `None`
+    /// to loop until the problem is solved or proven infeasible.
+    ///
     /// This is the dup-free counterpart to [`ProblemInstance::solve_full`].
-    pub fn solve(&mut self) -> Result<HashMap<Hole, SPP>, CegisError> {
+    pub fn solve(&mut self, max_iters: Option<usize>) -> Result<HashMap<Hole, SPP>, CegisError> {
         // SPP candidates ignore the reference DFA, but the loop still needs one.
         let reference_dfa =
             <SPP as Candidate>::make_reference_dfa(&mut self.store, &self.constraints);
@@ -138,7 +142,7 @@ impl ProblemInstance {
             &self.holes,
             &reference_dfa,
             &mut self.store,
-            None,
+            max_iters,
         )
     }
 
@@ -146,10 +150,16 @@ impl ProblemInstance {
     /// dup-ful [`Cand`]), returning each hole's synthesized sub-program as an
     /// [`ExplicitDFA`].
     ///
+    /// `max_iters` caps the number of CEGIS refinement rounds (see
+    /// [`ProblemInstance::solve`]).
+    ///
     /// This searches a strictly larger space than [`ProblemInstance::solve`], so
     /// it can solve problems the dup-free solver reports as
     /// [`CegisError::Infeasible`].
-    pub fn solve_full(&mut self) -> Result<HashMap<Hole, ExplicitDFA>, CegisError> {
+    pub fn solve_full(
+        &mut self,
+        max_iters: Option<usize>,
+    ) -> Result<HashMap<Hole, ExplicitDFA>, CegisError> {
         let reference_dfa = <ops::Union<SPP, Cand<'_>> as Candidate>::make_reference_dfa(
             &mut self.store,
             &self.constraints,
@@ -159,7 +169,7 @@ impl ProblemInstance {
             &self.holes,
             &reference_dfa,
             &mut self.store,
-            None,
+            max_iters,
         )?;
         // Materialize each candidate (an NFA) into a concrete DFA via subset
         // construction while `reference_dfa` is still alive.

@@ -1,0 +1,7 @@
+// Definitions may reference earlier definitions.
+//   a = (x0 := 1),  b = a ; a,  and we ask h == b.
+// Since (x0 := 1) ; (x0 := 1) = (x0 := 1), this is solvable.  => SAT
+hole h
+def a = x0 := 1
+def b = a ; a
+assert h == b

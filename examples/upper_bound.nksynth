@@ -1,0 +1,5 @@
+// An upper-bound (containment) constraint with one hole.
+//   h <= (x0 == 1)
+// The empty program 0 is a valid filling, so this is satisfiable.  => SAT
+hole h
+assert h <= (x0 == 1)

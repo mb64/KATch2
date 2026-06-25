@@ -1,0 +1,7 @@
+// A hole that must emit a `dup` to match the target.
+//   h == (x0 := 1) ; dup
+// A dup-free SPP cannot represent a `dup`, so the default solver reports
+// UNSAT; run with `--full` to synthesize it.  => UNSAT (default) / SAT (--full)
+hole h
+def target = (x0 := 1) ; dup
+assert h == target
