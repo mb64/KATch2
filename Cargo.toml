@@ -5,36 +5,16 @@ edition = "2024"
 license = "MIT"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
 
-# getrandom is an indirect feature-enabler (see note in [dependencies]), so it is
-# intentionally not referenced in source; tell cargo-machete to ignore it.
-[package.metadata.cargo-machete]
-ignored = ["getrandom"]
+[[bin]]
+name = "nksynth"
 
 [dependencies]
 rand = "0.10.0"
 clap = { version = "4.5.4", features = ["derive"] }
-walkdir = "2.5.0"
 regex = "1.11.1"
-# tokio = { version = "1.36.0", default-features = false, features = ["macros", "rt"] } # Temporarily removed
 serde = { version = "1.0", features = ["derive"] }
-
-# WASM dependencies
-wasm-bindgen = "0.2.92"
-console_error_panic_hook = "0.1.7"
-serde-wasm-bindgen = "0.6.5"
-# Not used directly; enables the `wasm_js` backend of getrandom (pulled in via rand)
-# so the wasm32-unknown-unknown build can obtain randomness.
-getrandom = { version = "0.4.0", features = ["wasm_js"] }
 z3 = "0.20.0"
-
-# Dependencies for non-WASM targets (e.g., your native binary that uses tokio)
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1.36.0", default-features = false, features = ["macros", "rt"] }
-
-# The following are optional but can be useful for WASM development:
-# getrandom = { version = "0.2", features = ["js"] } # if rand needs it for wasm32-unknown-unknown
 
 [dev-dependencies]
 katch2 = { path = ".", version = "0.1.0" }
