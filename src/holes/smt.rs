@@ -327,9 +327,9 @@ impl<'a> SmtLearner<'a> {
                         args.push(self.bit_arg(b));
                     }
                     for &s in states {
-                        // A state value may be the `CompletedDfa` sink (`ns`),
-                        // one past the real states `0..ns`.
-                        assert!(s <= ns, "state value out of range");
+                        // The DFA is complete (any sink is a real state), so every
+                        // state value lies in `0..ns`.
+                        assert!(s < ns, "state value out of range");
                         args.push(Dynamic::from_ast(&Int::from_u64(s as u64)));
                     }
                     for b in pkt_end {

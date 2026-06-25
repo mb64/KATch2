@@ -115,13 +115,15 @@
 //! # use katch2::expr::Expr;
 //! # use katch2::holes::aut::expr_to_dfa;
 //! # use katch2::holes::nk_with_holes::{Expr as HExpr, Hole};
-//! # use katch2::holes::solve_holes_full;
+//! # use katch2::holes::{full_reference_dfa, solve_holes_full};
 //! # use katch2::spp::SPPstore;
 //! let mut store = SPPstore::new(2);
 //! let target = expr_to_dfa(&Expr::dup(), &mut store);
 //! let hole_expr = HExpr::hole(Hole(0));
+//! // The reference DFA grounds the Cand candidates; the caller owns it.
+//! let rdfa = full_reference_dfa(&mut store, &hole_expr, &target, &target);
 //! let result = solve_holes_full(
-//!     &hole_expr, &[Hole(0)], &target, &target, &mut store, None,
+//!     &hole_expr, &[Hole(0)], &target, &target, &rdfa, &mut store, None,
 //! );
 //! assert!(result.is_ok());
 //! ```
@@ -161,19 +163,61 @@ pub fn solve_holes_general<'a, C: Candidate<'a>>(
     expr: &Expr,
     holes: &[Hole],
     lower_bound: &ExplicitDFA,
-    upper_bound: &'a ExplicitDFA,
+    upper_bound: &ExplicitDFA,
+    reference_dfa: &'a ExplicitDFA,
     store: &mut spp::SPPstore,
     max_iters: Option<usize>,
 ) -> Result<HashMap<Hole, C>, CegisError> {
     // `expr` must satisfy two constraints at once: contained in the upper
-    // bound and containing the lower bound.  Both are grounded on the upper
-    // bound (the `reference_dfa`), preserving the historical behaviour where
-    // candidates pull their states from the upper bound.
-    let constraints = vec![
+    // bound and containing the lower bound.  Candidates are grounded on the
+    // caller-owned `reference_dfa` (see [`bounds_reference_dfa`]), which they
+    // may borrow, so it must outlive the returned candidates.
+    let constraints = bounds_constraints(store, expr, lower_bound, upper_bound);
+    run::<C>(&constraints, holes, reference_dfa, store, max_iters)
+}
+
+/// The upper/lower bound constraint pair for `lower ⊆ expr[holes] ⊆ upper`.
+fn bounds_constraints(
+    store: &mut spp::SPPstore,
+    expr: &Expr,
+    lower_bound: &ExplicitDFA,
+    upper_bound: &ExplicitDFA,
+) -> Vec<Constraint> {
+    vec![
         Constraint::upper_bound(store, expr, upper_bound.clone()),
         Constraint::lower_bound(store, expr, lower_bound.clone()),
-    ];
-    run::<C>(&constraints, holes, upper_bound, store, max_iters)
+    ]
+}
+
+/// Build the reference DFA that grounds candidates of kind `C` for the
+/// `lower ⊆ expr[holes] ⊆ upper` problem (see [`Candidate::make_reference_dfa`]).
+///
+/// The caller must own the result for as long as the synthesized candidates
+/// are alive, since [`cand::Cand`] candidates borrow it.
+pub fn bounds_reference_dfa<'a, C: Candidate<'a>>(
+    store: &mut spp::SPPstore,
+    expr: &Expr,
+    lower_bound: &ExplicitDFA,
+    upper_bound: &ExplicitDFA,
+) -> ExplicitDFA {
+    let constraints = bounds_constraints(store, expr, lower_bound, upper_bound);
+    C::make_reference_dfa(store, &constraints)
+}
+
+/// Reference DFA for [`solve_holes_full`]: the [`bounds_reference_dfa`]
+/// specialized to the full (`SPP ∪ Cand`) candidate kind.
+pub fn full_reference_dfa(
+    store: &mut spp::SPPstore,
+    expr: &Expr,
+    lower_bound: &ExplicitDFA,
+    upper_bound: &ExplicitDFA,
+) -> ExplicitDFA {
+    bounds_reference_dfa::<ops::Union<spp::SPP, cand::Cand<'_>>>(
+        store,
+        expr,
+        lower_bound,
+        upper_bound,
+    )
 }
 
 /// Solve `lower_bound ⊆ expr[holes] ⊆ upper_bound`, filling each hole with a
@@ -188,25 +232,48 @@ pub fn solve_holes(
     store: &mut spp::SPPstore,
     max_iters: Option<usize>,
 ) -> Result<HashMap<Hole, spp::SPP>, CegisError> {
-    solve_holes_general(expr, holes, lower_bound, upper_bound, store, max_iters)
+    // SPP candidates don't borrow the reference DFA, so we can own it locally.
+    let reference_dfa = bounds_reference_dfa::<spp::SPP>(store, expr, lower_bound, upper_bound);
+    solve_holes_general(
+        expr,
+        holes,
+        lower_bound,
+        upper_bound,
+        &reference_dfa,
+        store,
+        max_iters,
+    )
 }
 
 /// Solve `lower_bound ⊆ expr[holes] ⊆ upper_bound`, filling each hole with an
 /// arbitrary, possibly dup-ful candidate: a union of a dup-free [`spp::SPP`]
-/// and a richer [`cand::Cand`] that pulls its states from `upper_bound`.
+/// and a richer [`cand::Cand`] that pulls its states from `reference_dfa`.
 ///
 /// This searches a strictly larger space than [`solve_holes`], so it can solve
 /// problems that solver reports as [`CegisError::Infeasible`] (e.g. a hole that
 /// must equal `dup`).
+///
+/// `reference_dfa` is the caller-owned DFA the [`cand::Cand`] candidates draw
+/// their states from; build it with [`full_reference_dfa`].  It must outlive
+/// the returned candidates (they borrow it).
 pub fn solve_holes_full<'a>(
     expr: &Expr,
     holes: &[Hole],
     lower_bound: &ExplicitDFA,
-    upper_bound: &'a ExplicitDFA,
+    upper_bound: &ExplicitDFA,
+    reference_dfa: &'a ExplicitDFA,
     store: &mut spp::SPPstore,
     max_iters: Option<usize>,
 ) -> Result<HashMap<Hole, ops::Union<spp::SPP, cand::Cand<'a>>>, CegisError> {
-    solve_holes_general(expr, holes, lower_bound, upper_bound, store, max_iters)
+    solve_holes_general(
+        expr,
+        holes,
+        lower_bound,
+        upper_bound,
+        reference_dfa,
+        store,
+        max_iters,
+    )
 }
 
 #[cfg(test)]
@@ -291,7 +358,7 @@ mod test {
     }
 
     use katch2::holes::cegis::CegisError;
-    use katch2::holes::solve_holes_full;
+    use katch2::holes::{full_reference_dfa, solve_holes_full};
 
     /// `solve_holes_full` should solve a problem that `solve_holes` already
     /// handles with a plain dup-free SPP: `dup ; Hole(0) == dup ; (x0 := 1)`.
@@ -302,11 +369,13 @@ mod test {
         let target = Expr::sequence(Expr::dup(), Expr::assign(0, true));
         let target_dfa = expr_to_dfa(&target, &mut store);
         let hole_expr = HExpr::sequence(HExpr::dup(), HExpr::hole(Hole(0)));
+        let rdfa = full_reference_dfa(&mut store, &hole_expr, &target_dfa, &target_dfa);
         let result = solve_holes_full(
             &hole_expr,
             &[Hole(0)],
             &target_dfa,
             &target_dfa,
+            &rdfa,
             &mut store,
             Some(FUZZ_MAX_ITERS),
         );
@@ -336,11 +405,13 @@ mod test {
         assert!(matches!(spp_result, Err(CegisError::Infeasible)));
 
         // The full solver can realize `dup` with a dup-ful candidate.
+        let rdfa = full_reference_dfa(&mut store, &hole_expr, &target, &target);
         let full_result = solve_holes_full(
             &hole_expr,
             &[Hole(0)],
             &target,
             &target,
+            &rdfa,
             &mut store,
             Some(FUZZ_MAX_ITERS),
         );
@@ -356,11 +427,13 @@ mod test {
         let lower = expr_to_dfa(&Expr::one(), &mut store);
         let upper = expr_to_dfa(&Expr::zero(), &mut store);
         let hole_expr = HExpr::hole(Hole(0));
+        let rdfa = full_reference_dfa(&mut store, &hole_expr, &lower, &upper);
         let result = solve_holes_full(
             &hole_expr,
             &[Hole(0)],
             &lower,
             &upper,
+            &rdfa,
             &mut store,
             Some(FUZZ_MAX_ITERS),
         );
@@ -591,20 +664,23 @@ mod test {
     /// The iteration cap means a slow/diverging instance surfaces as a tolerated
     /// `IterationLimit` rather than a hang.  Asserts `solve_holes_full` never
     /// wrongly reports `Infeasible` on a satisfiable-by-construction instance.
-    /// The known wrong-`Infeasible` bugs are now fixed (the `Cand` ENFA stall
-    /// via `ops::CompletedDfa`, and the lower-bound hole-site trace misalignment
-    /// in `cegis::collect_hole_sites`), so this runs by default again.
+    /// The known wrong-`Infeasible` bugs are now fixed (the `Cand` ENFA stall,
+    /// resolved by grounding candidates on a *complete* reference DFA, and the
+    /// lower-bound hole-site trace misalignment in `cegis::collect_hole_sites`),
+    /// so this runs by default again.
     #[test]
     fn fuzz_solve_holes_full_roundtrip() {
         for trial in 0..30 {
             let mut store = SPPstore::new(FUZZ_FIELDS);
             let (hole_expr, target_expr, holes, insts) = random_instance(3, 2, random_maybe_dupful);
             let target_dfa = expr_to_dfa(&target_expr, &mut store);
+            let rdfa = full_reference_dfa(&mut store, &hole_expr, &target_dfa, &target_dfa);
             let result = solve_holes_full(
                 &hole_expr,
                 &holes,
                 &target_dfa,
                 &target_dfa,
+                &rdfa,
                 &mut store,
                 Some(FUZZ_MAX_ITERS),
             )
@@ -632,11 +708,13 @@ mod test {
             let mut store = SPPstore::new(FUZZ_FIELDS);
             let (hole_expr, target_expr, holes, insts) = random_instance(4, 3, random_maybe_dupful);
             let target_dfa = expr_to_dfa(&target_expr, &mut store);
+            let rdfa = full_reference_dfa(&mut store, &hole_expr, &target_dfa, &target_dfa);
             let result = solve_holes_full(
                 &hole_expr,
                 &holes,
                 &target_dfa,
                 &target_dfa,
+                &rdfa,
                 &mut store,
                 Some(FUZZ_MAX_ITERS),
             )
@@ -705,7 +783,6 @@ mod test {
     /// `Ok`.
     #[test]
     fn roundtrip_three_hole_chain_blowup() {
-        use CegisError::IterationLimit;
         // `Ha ; Hb ; Hc`
         let chain = |a: Hole, b: Hole, c: Hole| {
             HExpr::sequence(
@@ -721,8 +798,17 @@ mod test {
             let mut store = SPPstore::new(2);
             let dfa = expr_to_dfa(target, &mut store);
             if full {
-                solve_holes_full(he, holes, &dfa, &dfa, &mut store, Some(FUZZ_MAX_ITERS))
-                    .map(|_| ())
+                let rdfa = full_reference_dfa(&mut store, he, &dfa, &dfa);
+                solve_holes_full(
+                    he,
+                    holes,
+                    &dfa,
+                    &dfa,
+                    &rdfa,
+                    &mut store,
+                    Some(FUZZ_MAX_ITERS),
+                )
+                .map(|_| ())
             } else {
                 solve_holes(he, holes, &dfa, &dfa, &mut store, Some(FUZZ_MAX_ITERS)).map(|_| ())
             }
@@ -732,7 +818,7 @@ mod test {
         // cap-hit `IterationLimit` are both acceptable.
         let assert_sat = |r: Result<(), CegisError>| {
             assert!(
-                matches!(r, Ok(()) | Err(IterationLimit)),
+                matches!(r, Ok(()) | Err(CegisError::IterationLimit)),
                 "satisfiable instance wrongly reported {r:?}"
             );
         };
@@ -746,6 +832,31 @@ mod test {
         assert_sat(run(true, &chain(h0, h0, h0), &[h0], &dup3));
     }
 
+    /// This is unsatisfiable:
+    ///
+    /// ```text
+    /// Hole(0); Hole(0) == dup             (one field)
+    /// ```
+    #[test]
+    fn sqrt_of_dup() {
+        let mut store = SPPstore::new(1);
+        // hole_expr = Hole(0) ; Hole(0)
+        let hole_expr = HExpr::sequence(HExpr::hole(Hole(0)), HExpr::hole(Hole(0)));
+        let target = expr_to_dfa(&Expr::dup(), &mut store);
+
+        let rdfa = full_reference_dfa(&mut store, &hole_expr, &target, &target);
+        let result = solve_holes_full(
+            &hole_expr,
+            &[Hole(0)],
+            &target,
+            &target,
+            &rdfa,
+            &mut store,
+            Some(FUZZ_MAX_ITERS),
+        );
+        assert!(matches!(result, Err(CegisError::Infeasible)));
+    }
+
     /// Regression test: `solve_holes_full` synthesizes a hole that must emit
     /// **two chained `dup`s**:
     ///
@@ -756,18 +867,22 @@ mod test {
     /// This once wrongly returned `Infeasible` (the `Cand` ENFA stalled and
     /// couldn't realize a length-≥3 hole; see
     /// [`crate::holes::cand`]'s `top_cand_over_two_dups_reaches_length_three`).
-    /// Fixed by stepping `Cand` over [`crate::holes::aut::ops::CompletedDfa`];
-    /// it now solves (witness `dup; dup`).
+    /// Fixed by grounding `Cand` on a *complete* reference DFA (the upper bound
+    /// completed via [`crate::holes::aut::ops::WithSinkState`]); it now solves
+    /// (witness `dup; dup`).
     #[test]
     fn full_solves_chained_dup() {
         let mut store = SPPstore::new(1);
         let target = Expr::sequence(Expr::dup(), Expr::dup());
         let target_dfa = expr_to_dfa(&target, &mut store);
+        let hole_expr = HExpr::hole(Hole(0));
+        let rdfa = full_reference_dfa(&mut store, &hole_expr, &target_dfa, &target_dfa);
         let result = solve_holes_full(
-            &HExpr::hole(Hole(0)),
+            &hole_expr,
             &[Hole(0)],
             &target_dfa,
             &target_dfa,
+            &rdfa,
             &mut store,
             Some(FUZZ_MAX_ITERS),
         );
@@ -822,11 +937,13 @@ mod test {
         let hole_expr = HExpr::star(HExpr::hole(Hole(0)));
         let target = Expr::star(Expr::sequence(Expr::assign(0, true), Expr::dup()));
         let target_dfa = expr_to_dfa(&target, &mut store);
+        let rdfa = full_reference_dfa(&mut store, &hole_expr, &target_dfa, &target_dfa);
         let result = solve_holes_full(
             &hole_expr,
             &[Hole(0)],
             &target_dfa,
             &target_dfa,
+            &rdfa,
             &mut store,
             Some(FUZZ_MAX_ITERS),
         );
@@ -864,11 +981,13 @@ mod test {
 
         let mut store = SPPstore::new(2);
         let target_dfa = expr_to_dfa(&target, &mut store);
+        let rdfa = full_reference_dfa(&mut store, &hole_expr, &target_dfa, &target_dfa);
         let result = solve_holes_full(
             &hole_expr,
             &[Hole(0), Hole(1)],
             &target_dfa,
             &target_dfa,
+            &rdfa,
             &mut store,
             Some(FUZZ_MAX_ITERS),
         )

@@ -1032,85 +1032,141 @@ pub mod ops {
         }
     }
 
-    // ---- CompletedDfa ----------------------------------------------------
+    // ---- NAryProduct -----------------------------------------------------
 
-    /// A *totalized* view of an [`ExplicitDFA`].  Every real state gains an
-    /// extra transition, for exactly the `(in, out)` packet pairs its real
-    /// edges don't already cover, routing them to a synthesized absorbing
-    /// **sink** state at index `inner.num_states()`.  The sink loops to itself
-    /// on `top` and is non-accepting (`output` is `zero`).
+    /// Intersection-style product of an arbitrary number of DFAs.
     ///
-    /// Because the transition function is now *total*, [`Exponential`] over a
-    /// `CompletedDfa` never stalls: a component whose real run would have died
-    /// (a state with no matching edge) instead flows into the sink and stays
-    /// there, while the live components keep stepping.  Completion adds no
-    /// accepting behaviour, so it preserves the DFA's language.
+    /// Like [`Intersection`], but n-ary and over a borrowed slice of (possibly
+    /// distinct) DFAs rather than a fixed pair: a state is the vector of the
+    /// inner states (`q[i]` belongs to `inner[i]`), transitions are the
+    /// SPP-intersections of one transition drawn from each component, and the
+    /// output is the SPP-intersection of all the component outputs.  The empty
+    /// product accepts everything (its single state is `vec![]`, with `top`
+    /// output and a single `top` self-loop).
     ///
-    /// States are plain `usize`s (`0..inner.num_states()` are the real states,
-    /// `inner.num_states()` is the sink), so an [`Exponential`] state vector
-    /// stays a `Vec<usize>`.
-    #[derive(Clone, Copy)]
-    pub struct CompletedDfa<'a> {
-        inner: &'a ExplicitDFA,
+    /// Always an `NFA`, and a `DFA` because each component is a `DFA` and the
+    /// product preserves "single start" and "disjoint transitions".
+    #[derive(Clone)]
+    pub struct NAryProduct<'a, T: DFA> {
+        pub inner: &'a [T],
     }
 
-    impl<'a> CompletedDfa<'a> {
-        pub fn new(inner: &'a ExplicitDFA) -> Self {
-            CompletedDfa { inner }
+    impl<'a, T: DFA> ENFA for NAryProduct<'a, T> {
+        type State = Vec<T::State>;
+
+        fn start(&self, store: &mut spp::SPPstore) -> Self::State {
+            self.inner.iter().map(|dfa| dfa.start(store)).collect()
         }
 
-        /// Number of states including the sink (`inner.num_states() + 1`).
-        pub fn num_states(&self) -> usize {
-            self.inner.num_states() + 1
-        }
-
-        /// Index of the synthesized sink state.
-        fn sink(&self) -> usize {
-            self.inner.num_states()
-        }
-    }
-
-    impl<'a> ENFA for CompletedDfa<'a> {
-        type State = usize;
-
-        fn start(&self, _store: &mut spp::SPPstore) -> usize {
-            self.inner.start
-        }
-
-        fn is_visible(&self, _store: &mut spp::SPPstore, _q: &usize) -> bool {
+        fn is_visible(&self, _store: &mut spp::SPPstore, _q: &Self::State) -> bool {
             true
         }
 
-        fn transitions(&self, store: &mut spp::SPPstore, q: &usize) -> Vec<(spp::SPP, usize)> {
-            let sink = self.sink();
-            if *q == sink {
-                return vec![(store.top, sink)];
+        fn transitions(
+            &self,
+            store: &mut spp::SPPstore,
+            q: &Self::State,
+        ) -> Vec<(spp::SPP, Self::State)> {
+            // Fold the cartesian product across components, intersecting SPPs and
+            // pruning branches that become `zero` as early as possible.
+            let mut acc: Vec<(spp::SPP, Self::State)> = vec![(store.top, Vec::new())];
+            for (dfa, q_i) in self.inner.iter().zip(q) {
+                let trans_i = dfa.transitions(store, q_i);
+                let mut next = Vec::with_capacity(acc.len() * trans_i.len());
+                for (spp_acc, target_acc) in &acc {
+                    for (spp_i, q_i_next) in &trans_i {
+                        let combined = store.intersect(*spp_acc, *spp_i);
+                        if combined != store.zero {
+                            let mut target = target_acc.clone();
+                            target.push(q_i_next.clone());
+                            next.push((combined, target));
+                        }
+                    }
+                }
+                acc = next;
             }
-            let inner_trans = self.inner.transitions(store, q);
-            let mut covered = store.zero;
-            let mut result: Vec<(spp::SPP, usize)> = Vec::with_capacity(inner_trans.len() + 1);
-            for (spp, q_next) in inner_trans {
-                covered = store.union(covered, spp);
-                result.push((spp, q_next));
-            }
-            let missing = store.difference(store.top, covered);
-            if missing != store.zero {
-                result.push((missing, sink));
-            }
-            result
+            acc
         }
 
-        fn output(&self, store: &mut spp::SPPstore, q: &usize) -> spp::SPP {
-            if *q == self.sink() {
-                store.zero
-            } else {
-                self.inner.outputs[*q]
+        fn output(&self, store: &mut spp::SPPstore, q: &Self::State) -> spp::SPP {
+            let mut out = store.top;
+            for (dfa, q_i) in self.inner.iter().zip(q) {
+                let out_i = dfa.output(store, q_i);
+                out = store.intersect(out, out_i);
+            }
+            out
+        }
+    }
+
+    impl<'a, T: DFA> NFA for NAryProduct<'a, T> {}
+    impl<'a, T: DFA> DFA for NAryProduct<'a, T> {}
+
+    // ---- WithSinkState ---------------------------------------------------
+
+    /// State of [`WithSinkState`]: an inner state, or the synthesized sink.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum SinkOr<S> {
+        Inner(S),
+        Sink,
+    }
+
+    /// Totalizes an arbitrary [`DFA`] by adding one global, absorbing **sink**
+    /// state, so the transition function becomes total without changing the
+    /// language.
+    ///
+    /// At each real state the inner edges already cover some set of `(in, out)`
+    /// packet pairs; the leftover pairs (`top` minus their union) are routed to
+    /// the sink, which loops to itself on `top` and is non-accepting (`zero`
+    /// output).
+    #[derive(Clone)]
+    pub struct WithSinkState<T>(pub T);
+
+    impl<T: DFA> ENFA for WithSinkState<T> {
+        type State = SinkOr<T::State>;
+
+        fn start(&self, store: &mut spp::SPPstore) -> Self::State {
+            SinkOr::Inner(self.0.start(store))
+        }
+
+        fn is_visible(&self, _store: &mut spp::SPPstore, _q: &Self::State) -> bool {
+            true
+        }
+
+        fn transitions(
+            &self,
+            store: &mut spp::SPPstore,
+            q: &Self::State,
+        ) -> Vec<(spp::SPP, Self::State)> {
+            match q {
+                SinkOr::Inner(s) => {
+                    let inner_trans = self.0.transitions(store, s);
+                    let mut covered = store.zero;
+                    let mut result: Vec<(spp::SPP, Self::State)> =
+                        Vec::with_capacity(inner_trans.len() + 1);
+                    for (spp, q_next) in inner_trans {
+                        covered = store.union(covered, spp);
+                        result.push((spp, SinkOr::Inner(q_next)));
+                    }
+                    let missing = store.difference(store.top, covered);
+                    if missing != store.zero {
+                        result.push((missing, SinkOr::Sink));
+                    }
+                    result
+                }
+                SinkOr::Sink => vec![(store.top, SinkOr::Sink)],
+            }
+        }
+
+        fn output(&self, store: &mut spp::SPPstore, q: &Self::State) -> spp::SPP {
+            match q {
+                SinkOr::Inner(s) => self.0.output(store, s),
+                SinkOr::Sink => store.zero,
             }
         }
     }
 
-    impl<'a> NFA for CompletedDfa<'a> {}
-    impl<'a> DFA for CompletedDfa<'a> {}
+    impl<T: DFA> NFA for WithSinkState<T> {}
+    impl<T: DFA> DFA for WithSinkState<T> {}
 }
 
 // ---- ExplicitDFA -----------------------------------------------------------
@@ -1129,6 +1185,49 @@ pub struct ExplicitDFA {
 impl ExplicitDFA {
     pub fn num_states(&self) -> usize {
         self.transitions.len()
+    }
+
+    /// Materialize any [`DFA`] as a dense `ExplicitDFA` reachable from its start.
+    ///
+    /// The DFA is wrapped in a [`Memo`] (which assigns dense `usize` IDs to its
+    /// states and caches their transitions/outputs), then explored by the same
+    /// BFS-over-dense-IDs used in [`aut_to_dfa`]: the start state is ID `0`, and
+    /// each `transitions` call hands out fresh contiguous IDs for any newly seen
+    /// states, so processing IDs in increasing order visits the whole reachable
+    /// DFA exactly once.
+    pub fn from_dfa<T: DFA>(store: &mut spp::SPPstore, dfa: T) -> ExplicitDFA {
+        let memo = Memo::new(dfa);
+
+        let start = memo.start(store);
+        debug_assert_eq!(start, 0);
+
+        let mut transitions: Vec<Vec<(spp::SPP, usize)>> = Vec::new();
+        let mut outputs: Vec<spp::SPP> = Vec::new();
+        let mut num_states = 1;
+
+        let mut i = 0;
+        while i < num_states {
+            let trans = memo.transitions(store, &i);
+            for &(_, next) in &trans {
+                num_states = num_states.max(next + 1);
+            }
+            let out = memo.output(store, &i);
+            transitions.push(trans);
+            outputs.push(out);
+            i += 1;
+        }
+
+        ExplicitDFA {
+            start,
+            transitions,
+            outputs,
+        }
+    }
+
+    /// Build the n-ary intersection [`product`](ops::NAryProduct) of `dfas` and
+    /// materialize it as a dense `ExplicitDFA` via [`from_dfa`](Self::from_dfa).
+    pub fn product<T: DFA>(store: &mut spp::SPPstore, dfas: &[T]) -> ExplicitDFA {
+        ExplicitDFA::from_dfa(store, ops::NAryProduct { inner: dfas })
     }
 }
 

@@ -523,21 +523,46 @@ mod tests {
         }
     }
 
+    /// The upper/lower bound constraints for `lb ⊆ expr[holes] ⊆ ub`.
+    fn bounds_constraints(
+        store: &mut spp::SPPstore,
+        expr: &Expr,
+        lb: &ExplicitDFA,
+        ub: &ExplicitDFA,
+    ) -> Vec<Constraint> {
+        vec![
+            Constraint::upper_bound(store, expr, ub.clone()),
+            Constraint::lower_bound(store, expr, lb.clone()),
+        ]
+    }
+
+    /// The caller-owned reference DFA grounding candidates of kind `C` for
+    /// `lb ⊆ expr[holes] ⊆ ub`.  Must outlive the candidates `run_bounds`
+    /// returns (a [`Cand`] borrows it).
+    fn bounds_reference_dfa<'a, C: Candidate<'a>>(
+        store: &mut spp::SPPstore,
+        expr: &Expr,
+        lb: &ExplicitDFA,
+        ub: &ExplicitDFA,
+    ) -> ExplicitDFA {
+        let constraints = bounds_constraints(store, expr, lb, ub);
+        C::make_reference_dfa(store, &constraints)
+    }
+
     /// Solve `lb ⊆ expr[holes] ⊆ ub` via a pair of [`Constraint`]s (an upper
-    /// and a lower bound over `expr`), grounding the candidates on `ub`.
+    /// and a lower bound over `expr`), grounding the candidates on the
+    /// caller-owned `reference_dfa` (see [`bounds_reference_dfa`]).
     fn run_bounds<'a, C: Candidate<'a>>(
         store: &mut spp::SPPstore,
         expr: &Expr,
         holes: &[Hole],
         lb: &ExplicitDFA,
-        ub: &'a ExplicitDFA,
+        ub: &ExplicitDFA,
+        reference_dfa: &'a ExplicitDFA,
         max_iters: Option<usize>,
     ) -> Result<HashMap<Hole, C>, CegisError> {
-        let constraints = vec![
-            Constraint::upper_bound(store, expr, ub.clone()),
-            Constraint::lower_bound(store, expr, lb.clone()),
-        ];
-        run::<C>(&constraints, holes, ub, store, max_iters)
+        let constraints = bounds_constraints(store, expr, lb, ub);
+        run::<C>(&constraints, holes, reference_dfa, store, max_iters)
     }
 
     /// 0 ⊆ Hole ⊆ top: trivially solvable.  The learner returns the empty
@@ -548,12 +573,15 @@ mod tests {
         let mut store = mk_store();
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store);
+        let expr = Expr::hole(Hole(0));
+        let rdfa = bounds_reference_dfa::<spp::SPP>(&mut store, &expr, &lb, &ub);
         let result = run_bounds::<spp::SPP>(
             &mut store,
-            &Expr::hole(Hole(0)),
+            &expr,
             &[Hole(0)],
             &lb,
             &ub,
+            &rdfa,
             Some(MAX_ITERS),
         )
         .unwrap();
@@ -570,9 +598,10 @@ mod tests {
         let top = store.top;
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
-        let err =
-            run_bounds::<spp::SPP>(&mut store, &Expr::spp(top), &[], &lb, &ub, Some(MAX_ITERS))
-                .unwrap_err();
+        let expr = Expr::spp(top);
+        let rdfa = bounds_reference_dfa::<spp::SPP>(&mut store, &expr, &lb, &ub);
+        let err = run_bounds::<spp::SPP>(&mut store, &expr, &[], &lb, &ub, &rdfa, Some(MAX_ITERS))
+            .unwrap_err();
         assert_eq!(err, CegisError::Infeasible);
     }
 
@@ -584,12 +613,15 @@ mod tests {
         let mut store = mk_store();
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
+        let expr = Expr::hole(Hole(0));
+        let rdfa = bounds_reference_dfa::<spp::SPP>(&mut store, &expr, &lb, &ub);
         let result = run_bounds::<spp::SPP>(
             &mut store,
-            &Expr::hole(Hole(0)),
+            &expr,
             &[Hole(0)],
             &lb,
             &ub,
+            &rdfa,
             Some(MAX_ITERS),
         )
         .unwrap();
@@ -605,12 +637,14 @@ mod tests {
         let expr = Expr::union(Expr::hole(Hole(0)), Expr::hole(Hole(1)));
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store);
+        let rdfa = bounds_reference_dfa::<spp::SPP>(&mut store, &expr, &lb, &ub);
         let result = run_bounds::<spp::SPP>(
             &mut store,
             &expr,
             &[Hole(0), Hole(1)],
             &lb,
             &ub,
+            &rdfa,
             Some(MAX_ITERS),
         )
         .unwrap();
@@ -627,12 +661,14 @@ mod tests {
         let expr = Expr::union(Expr::hole(Hole(0)), Expr::hole(Hole(1)));
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
+        let rdfa = bounds_reference_dfa::<spp::SPP>(&mut store, &expr, &lb, &ub);
         let result = run_bounds::<spp::SPP>(
             &mut store,
             &expr,
             &[Hole(0), Hole(1)],
             &lb,
             &ub,
+            &rdfa,
             Some(MAX_ITERS),
         )
         .unwrap();
@@ -681,12 +717,15 @@ mod tests {
             outputs: vec![store.top],
         };
 
+        let expr = Expr::hole(Hole(0));
+        let rdfa = bounds_reference_dfa::<spp::SPP>(&mut store, &expr, &lb, &ub);
         let result = run_bounds::<spp::SPP>(
             &mut store,
-            &Expr::hole(Hole(0)),
+            &expr,
             &[Hole(0)],
             &lb,
             &ub,
+            &rdfa,
             Some(MAX_ITERS),
         )
         .unwrap();
@@ -706,12 +745,15 @@ mod tests {
         let mut store = mk_store();
         let lb = zero_dfa(&store);
         let ub = top_dfa(&store); // one state ⇒ Cand has num_states == 1
+        let expr = Expr::hole(Hole(0));
+        let rdfa = bounds_reference_dfa::<Cand>(&mut store, &expr, &lb, &ub);
         let result = run_bounds::<Cand>(
             &mut store,
-            &Expr::hole(Hole(0)),
+            &expr,
             &[Hole(0)],
             &lb,
             &ub,
+            &rdfa,
             Some(MAX_ITERS),
         )
         .unwrap();
@@ -737,12 +779,15 @@ mod tests {
         let mut store = spp::SPPstore::new(1);
         let lb = zero_dfa(&store);
         let ub = zero_dfa(&store);
+        let expr = Expr::hole(Hole(0));
+        let rdfa = bounds_reference_dfa::<Cand>(&mut store, &expr, &lb, &ub);
         let result = run_bounds::<Cand>(
             &mut store,
-            &Expr::hole(Hole(0)),
+            &expr,
             &[Hole(0)],
             &lb,
             &ub,
+            &rdfa,
             Some(MAX_ITERS),
         )
         .unwrap();
@@ -752,7 +797,9 @@ mod tests {
             &Input {
                 pkt_in: vec![false],
                 pkt_start: vec![false],
-                states: vec![0],
+                // The reference DFA is the completed (sink-augmented) upper
+                // bound, so `zero` (one dead state) grounds a 2-state Cand.
+                states: vec![0, 0],
                 pkt_end: vec![false],
                 pkt_out: vec![false],
             },

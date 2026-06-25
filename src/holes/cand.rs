@@ -19,6 +19,14 @@ use std::collections::HashMap;
 pub struct Cand<'a> {
     nodes: Vec<CandNode>,
     head: CandIdx,
+    /// The DFA this candidate is built over.
+    ///
+    /// **Invariant:** `dfa` must be *complete* — its transition function must be
+    /// total (every state has, for every `(in, out)` packet pair, an outgoing
+    /// edge, e.g. via a dedicated sink state).  Stepping the [`ops::Exponential`]
+    /// product assumes a component never runs out of transitions; an incomplete
+    /// DFA would let a component on a dead state stall the whole product.  Wrap
+    /// incomplete DFAs in [`ops::WithSinkState`] (then materialize) before use.
     dfa: &'a ExplicitDFA,
 }
 
@@ -96,12 +104,12 @@ impl<'a> ENFA for Cand<'a> {
             }
             State::Middle(node, ref states) => {
                 debug_assert_eq!(states.len(), self.dfa.num_states());
-                // Step over the *completed* DFA so a component sitting on a
-                // dead state flows into the sink instead of stalling the whole
-                // product (see `ops::CompletedDfa`).
-                let exp = ops::Exponential {
-                    inner: ops::CompletedDfa::new(self.dfa),
-                };
+                // Step the product over `self.dfa` directly.  This relies on
+                // `self.dfa` being *complete* (total transition function, e.g.
+                // via a sink state): otherwise a component sitting on a dead
+                // state would have no outgoing edge and stall the whole product
+                // rather than flowing into a sink.  See [`Cand`]'s contract.
+                let exp = ops::Exponential { inner: self.dfa };
                 exp.transitions(store, states)
                     .into_iter()
                     .map(|(spp, target)| (spp, State::Middle(node, target)))
@@ -222,9 +230,9 @@ impl<'a> Cand<'a> {
                     path.push(2 * input.pkt_in[i] as usize + input.pkt_start[i] as usize);
                 }
                 for &s in &input.states {
-                    // `ns` is the sink value (see `ops::CompletedDfa`); real
-                    // states are `0..ns`, so a state value may be up to `ns`.
-                    assert!(s <= ns, "state value out of range");
+                    // The DFA is complete (any sink is a real state), so every
+                    // state value lies in `0..ns`.
+                    assert!(s < ns, "state value out of range");
                     path.push(s);
                 }
                 for i in 0..nv {
@@ -249,10 +257,9 @@ impl<'a> Cand<'a> {
         // Empty input: we just accept everything
         if examples.is_empty() {
             let mut node = builder.mk(CandNode::Root(store.top));
-            // `ns` state levels, each a `NextState` with `ns + 1` children (one
-            // per real state plus the `CompletedDfa` sink).
+            // `ns` state levels, each a `NextState` with one child per state.
             for _ in 0..ns {
-                node = builder.mk(CandNode::NextState(vec![node; ns + 1]));
+                node = builder.mk(CandNode::NextState(vec![node; ns]));
             }
             for _ in 0..nv {
                 node = builder.mk(CandNode::NextField {
@@ -288,10 +295,10 @@ impl<'a> Cand<'a> {
             cand_map.insert(e, node);
         }
 
-        // State levels: `ns` levels, each a `NextState` of width `ns + 1`
-        // (real states `0..ns` plus the `CompletedDfa` sink at index `ns`).
+        // State levels: `ns` levels, each a `NextState` of width `ns` (one child
+        // per state of the complete DFA).
         for depth in (nv..nv + ns).rev() {
-            cand_map = build_layer(ns + 1, depth, &decisions, &cand_map, |row| {
+            cand_map = build_layer(ns, depth, &decisions, &cand_map, |row| {
                 builder.mk(CandNode::NextState(row.to_vec()))
             });
         }
@@ -460,11 +467,13 @@ mod tests {
         }
     }
 
-    /// A DFA with `num_states` states
+    /// A *complete* DFA with `num_states` states: every state has a `top`
+    /// self-loop, so its transition function is total (the invariant [`Cand`]
+    /// requires) without changing the state count.
     fn example_dfa(store: &mut spp::SPPstore, num_states: usize) -> ExplicitDFA {
         ExplicitDFA {
             start: 0,
-            transitions: vec![vec![]; num_states],
+            transitions: (0..num_states).map(|i| vec![(store.top, i)]).collect(),
             outputs: vec![store.zero; num_states],
         }
     }
@@ -701,6 +710,12 @@ mod tests {
         expr_to_dfa(&Expr::sequence(Expr::dup(), Expr::dup()), store)
     }
 
+    /// Totalize `dfa` (add a sink state) and materialize it, satisfying the
+    /// completeness invariant `Cand` requires of its DFA.
+    fn complete(store: &mut spp::SPPstore, dfa: &ExplicitDFA) -> ExplicitDFA {
+        ExplicitDFA::from_dfa(store, ops::WithSinkState(dfa))
+    }
+
     /// Sanity: `dup; dup` accepts exactly the length-3 trace `[p, p, p] -> p`
     /// (two dup-crossings), and nothing of length 2 or 4.
     #[test]
@@ -717,53 +732,49 @@ mod tests {
         ));
     }
 
-    /// Contrast / control: over the *single*-`dup` DFA (`0 -one-> 1`, state 1
-    /// dead-accepting), the most-permissive `Cand` reaches `Middle(_, [0, 1])`
-    /// after one step.  That `Middle` already has no outgoing transitions (the
-    /// dead state 1 can't step), but `dup` only needs the length-2 trace
-    /// `[p, p] -> p`, which the ENFA *does* reach via the `Start -> Middle ->
-    /// output` path.  So a single dup is representable — the stall only bites
-    /// when a second step is needed.
+    /// Contrast / control: over the (completed) *single*-`dup` DFA, the
+    /// most-permissive `Cand` accepts `dup`'s length-2 trace `[p, p] -> p` via
+    /// the `Start -> Middle -> output` path (which needs no `Middle` step).
     #[test]
     fn top_cand_over_one_dup_accepts_its_length_two_trace() {
         let mut store = spp::SPPstore::new(1);
-        let dfa = expr_to_dfa(&Expr::dup(), &mut store);
+        let raw = expr_to_dfa(&Expr::dup(), &mut store);
+        let dfa = complete(&mut store, &raw);
         let top = Cand::from_examples(&mut store, &dfa, &[]).unwrap();
         let p = vec![false];
         assert!(top.dfa_accepts(&mut store, &[p.clone(), p.clone()], &p));
     }
 
-    /// Regression test for the `Cand` ENFA stall over a transition-bearing DFA,
-    /// fixed by stepping over [`ops::CompletedDfa`].
+    /// Regression test for the `Cand` ENFA stall over a transition-bearing DFA.
     ///
     /// `Cand::from_examples(.., &[])` is the most-permissive candidate
-    /// (`Cand::top`, "accepts everything"), so over the `dup; dup` DFA it must
-    /// accept the length-3 trace `[p, p, p] -> p` that `dup; dup` produces.
-    /// Before the fix, the `Middle` reached from `Start` carried the identity
-    /// vector `[0, 1, 2]` and had *no* outgoing transitions — `Exponential`
-    /// stalled because the dead accepting state 2 couldn't step — capping the
-    /// ENFA at length-2 traces and making `solve_holes_full` wrongly report
-    /// `Hole == dup; dup` infeasible.  Now the dead component flows into the
-    /// sink and the product keeps stepping.
+    /// (`Cand::top`, "accepts everything"), so over the (completed) `dup; dup`
+    /// DFA it must accept the length-3 trace `[p, p, p] -> p` that `dup; dup`
+    /// produces.  Stepping over an *incomplete* DFA would stall when a component
+    /// hits a dead state; because the DFA is completed (every dead component
+    /// flows into the sink), the product keeps stepping and reaches length 3.
     #[test]
     fn top_cand_over_two_dups_reaches_length_three() {
         let mut store = spp::SPPstore::new(1);
-        let dfa = two_dup_dfa(&mut store);
+        let raw = two_dup_dfa(&mut store);
+        let dfa = complete(&mut store, &raw);
         let top = Cand::from_examples(&mut store, &dfa, &[]).unwrap();
         let p = vec![false];
 
-        // The first `Middle` (identity vector) now steps instead of stalling.
+        // The first `Middle` (identity vector over every state of the completed
+        // DFA) steps instead of stalling.
         let start = top.start(&mut store);
         let edges = top.transitions(&mut store, &start);
         assert_eq!(edges.len(), 1, "Start has a single routing edge");
         let middle = edges[0].1.clone();
+        let identity: Vec<usize> = (0..dfa.num_states()).collect();
         assert!(
-            matches!(middle, State::Middle(_, ref v) if *v == vec![0, 1, 2]),
+            matches!(middle, State::Middle(_, ref v) if *v == identity),
             "Start lands in Middle with the identity state vector"
         );
         assert!(
             !top.transitions(&mut store, &middle).is_empty(),
-            "Middle now has outgoing transitions (dead component routes to sink)"
+            "Middle has outgoing transitions (no component stalls on a dead state)"
         );
 
         // The most-permissive Cand accepts every trace `dup; dup` does — in
@@ -773,25 +784,27 @@ mod tests {
         assert!(top.dfa_accepts(&mut store, &[p.clone(), p.clone(), p.clone()], &p));
     }
 
-    /// [`ops::CompletedDfa`] totalizes the transition function: the dead state 2
-    /// of `dup; dup` gains an edge to the sink (index 3), the sink absorbs
-    /// everything, and a live state both keeps its real edge and routes the
-    /// uncovered packet pairs to the sink.
+    /// [`ops::WithSinkState`] totalizes the transition function: the dead state
+    /// 2 of `dup; dup` steps to the sink, the sink absorbs everything, and a
+    /// live state both keeps its real edge and routes the uncovered packet pairs
+    /// to the sink.
     #[test]
-    fn completed_dfa_totalizes_dead_state() {
+    fn with_sink_state_totalizes_dead_state() {
+        use ops::SinkOr::{Inner, Sink};
         let mut store = spp::SPPstore::new(1);
         let dfa = two_dup_dfa(&mut store); // states 0,1,2 with 2 dead
-        let comp = ops::CompletedDfa::new(&dfa);
-        assert_eq!(comp.num_states(), 4); // 3 real states + sink
-        let sink = 3usize;
+        let comp = ops::WithSinkState(&dfa);
 
         // Dead state 2 now steps to the sink on every packet pair.
-        assert_eq!(comp.transitions(&mut store, &2), vec![(store.top, sink)]);
+        assert_eq!(
+            comp.transitions(&mut store, &Inner(2)),
+            vec![(store.top, Sink)]
+        );
         // The sink absorbs everything.
-        assert_eq!(comp.transitions(&mut store, &sink), vec![(store.top, sink)]);
+        assert_eq!(comp.transitions(&mut store, &Sink), vec![(store.top, Sink)]);
         // A live state keeps its real successor and routes the rest to the sink.
-        let t0 = comp.transitions(&mut store, &0);
-        assert!(t0.iter().any(|&(_, tgt)| tgt == 1));
-        assert!(t0.iter().any(|&(_, tgt)| tgt == sink));
+        let t0 = comp.transitions(&mut store, &Inner(0));
+        assert!(t0.iter().any(|(_, tgt)| *tgt == Inner(1)));
+        assert!(t0.iter().any(|(_, tgt)| *tgt == Sink));
     }
 }

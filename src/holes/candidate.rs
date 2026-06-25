@@ -20,6 +20,7 @@ use std::hash::Hash;
 
 use crate::holes::aut::{ENFA, ExplicitDFA, NFA, ops};
 use crate::holes::cand::{Cand, State as CandState};
+use crate::holes::cegis::Constraint;
 use crate::holes::smt::{AbstractBit, CandVar, Existential, Literal, SmtLearner, Solution, SppVar};
 use crate::sp::SP;
 use crate::spp::{SPP, SPPstore};
@@ -40,6 +41,16 @@ pub trait Candidate<'a>: ENFA<State: Ord> + NFA + Clone {
     /// The most-permissive candidate (accepts everything), used for the
     /// "plausibly connected" backward pass in lower-bound processing.
     fn top(store: &mut SPPstore, upper_bound: &'a ExplicitDFA) -> Self;
+
+    /// Build the freestanding *reference DFA* that grounds candidates of this
+    /// kind for `constraints`: the DFA whose states [`Cand`] candidates draw on
+    /// and that the all-top fallback uses.  Caller-owned, independent of any
+    /// single constraint's DFA.
+    ///
+    /// **Invariant:** the returned DFA is *complete* — its transition function
+    /// is total (every state has an outgoing edge for every `(in, out)` packet
+    /// pair, e.g. via a sink state) — which is what stepping [`Cand`] requires.
+    fn make_reference_dfa(store: &mut SPPstore, constraints: &[Constraint]) -> ExplicitDFA;
 
     /// Build the upper-bound literal: "`var` must **not** accept this witness."
     ///
@@ -91,6 +102,16 @@ impl<'a> Candidate<'a> for SPP {
 
     fn top(store: &mut SPPstore, _upper_bound: &'a ExplicitDFA) -> SPP {
         store.top
+    }
+
+    fn make_reference_dfa(store: &mut SPPstore, _constraints: &[Constraint]) -> ExplicitDFA {
+        // SPP candidates ignore the reference DFA; a single complete (total,
+        // self-looping) state is enough to satisfy the invariant.
+        ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(store.top, 0)]],
+            outputs: vec![store.zero],
+        }
     }
 
     fn reject_literal(
@@ -151,6 +172,22 @@ impl<'a> Candidate<'a> for Cand<'a> {
         Cand::from_examples(store, upper_bound, &[]).expect("empty examples never conflict")
     }
 
+    fn make_reference_dfa(store: &mut SPPstore, constraints: &[Constraint]) -> ExplicitDFA {
+        // Ground on the product of every upper-bound DFA, each completed with a
+        // sink so the product's transition function is total (the invariant the
+        // `Cand` ENFA relies on when stepping its [`ops::Exponential`]).
+        let completed: Vec<ops::WithSinkState<&ExplicitDFA>> = constraints
+            .iter()
+            .filter_map(|c| match c {
+                Constraint::UpperBound { dfa, .. } | Constraint::Equality { dfa, .. } => {
+                    Some(ops::WithSinkState(dfa))
+                }
+                Constraint::LowerBound { .. } => None,
+            })
+            .collect();
+        ExplicitDFA::product(store, &completed)
+    }
+
     fn reject_literal(
         var: CandVar,
         pkt_in: &[bool],
@@ -192,14 +229,13 @@ impl<'a> Candidate<'a> for Cand<'a> {
 
         // The state vector starts at the identity (one token per DFA state) and
         // evolves by the upper-bound DFA's exponential over the consumed
-        // subtrace.  We step the *completed* DFA (see `ops::CompletedDfa`) — the
-        // same view `Cand`'s ENFA uses — so a component on a dead state flows
-        // into the sink rather than stalling the product (which would otherwise
-        // wrongly make the subtrace untraversable).
+        // subtrace.  This steps `upper_bound` directly, so it relies on the DFA
+        // being *complete* (total transition function, e.g. via a sink state) —
+        // the same requirement `Cand`'s ENFA has: a component on a dead state
+        // must flow into a sink rather than stall the product (which would
+        // otherwise wrongly make the subtrace untraversable).
         let mut states: Vec<usize> = (0..upper_bound.num_states()).collect();
-        let exp = ops::Exponential {
-            inner: ops::CompletedDfa::new(upper_bound),
-        };
+        let exp = ops::Exponential { inner: upper_bound };
         for pair in trace.windows(2) {
             let next = exp
                 .transitions(store, &states)
@@ -250,6 +286,12 @@ impl<'a> Candidate<'a> for ops::Union<SPP, Cand<'a>> {
 
     fn top(store: &mut SPPstore, upper_bound: &'a ExplicitDFA) -> Self {
         ops::union(SPP::top(store, upper_bound), Cand::top(store, upper_bound))
+    }
+
+    fn make_reference_dfa(store: &mut SPPstore, constraints: &[Constraint]) -> ExplicitDFA {
+        // The SPP side ignores the reference DFA, so the union's reference DFA
+        // is just the `Cand` side's.
+        Cand::make_reference_dfa(store, constraints)
     }
 
     fn reject_literal(
