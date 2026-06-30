@@ -5,28 +5,30 @@
 //! returns an [`SPP`] consistent with all of them, or [`ConflictError`] if two
 //! examples give the same pair opposite labels.
 //!
-//! # Method (RPNI-style eager merging)
+//! # Method (trie + RPNI-style eager merging)
 //!
 //! An [`SPP`] over `n` fields is an order-`n` decision diagram: level `i` is a
 //! 4-way branch on the `(input[i], output[i])` bit pair, terminating in
-//! accept/reject.  We build that diagram **bottom-up**, one field level at a
-//! time:
+//! accept/reject.  We build it in two steps:
 //!
-//! * Each example becomes a length-`n` *decision path* — `2*input[i] + output[i]`
-//!   at level `i` — ending on its accept (`1`) or reject (`0`) terminal.
-//! * At each level, examples are grouped by their shared prefix (everything that
-//!   reaches the same node), and each group's four branches are populated from
-//!   the examples that exercise them.  Branches no example exercises
-//!   (don't-cares) take a sibling branch — the eager generalization.
-//! * [`SPPstore::mk`] hash-conses, so nodes with identical suffix behaviour
-//!   collapse into one — the state merge.
+//! 1. **Trie.** Insert every example's length-`n` *decision path* —
+//!    `2*input[i] + output[i]` at field `i` — into a 4-ary trie, leaves carrying
+//!    the accept/reject label.  This computes *all* the prefix partitions in one
+//!    pass: a node at depth `d` is exactly the set of examples sharing that
+//!    length-`d` prefix, and a shared prefix is walked only once.  A leaf reached
+//!    with two different labels is a [`ConflictError`].
+//! 2. **Bottom-up fold.** Post-order over the trie: a leaf becomes its accept
+//!    (`1`) / reject (`0`) terminal; a branch becomes [`SPPstore::mk`] of its
+//!    four children, with don't-care branches (those no example exercises) taking
+//!    a sibling — the eager generalization.  Hash-consing in `mk` collapses nodes
+//!    with identical suffix behaviour — the state merge.
 //!
-//! An example's own path is never redirected by a fill, so the result accepts
-//! every positive example and rejects every negative one; the generalization
-//! only touches inputs no example pins down.
+//! Building the trie first means each partition is computed once instead of being
+//! re-derived at every level.  An example's own path is never redirected by a
+//! fill, so the result accepts every positive example and rejects every negative
+//! one; the generalization only touches inputs no example pins down.
 
 use super::{SPP, SPPstore};
-use std::collections::HashMap;
 
 /// A single concrete training example for [`learn_spp`].
 ///
@@ -62,91 +64,106 @@ pub fn learn_spp(
     let nv = spp_store.num_vars() as usize;
     let examples: Vec<Example> = examples.into_iter().collect();
 
-    // Each example → a length-`nv` decision path (`2*input + output` per field).
-    let decisions: Vec<Vec<usize>> = examples
-        .iter()
-        .map(|ex| {
-            assert_eq!(ex.input.len(), nv, "example input has wrong width");
-            assert_eq!(ex.output.len(), nv, "example output has wrong width");
-            (0..nv)
-                .map(|i| 2 * ex.input[i] as usize + ex.output[i] as usize)
-                .collect()
-        })
-        .collect();
-
-    // The full path identifies the concrete pair, so a repeated path with
-    // opposite labels is a genuine conflict.
-    let mut seen: HashMap<&[usize], bool> = HashMap::new();
-    for (path, ex) in decisions.iter().zip(&examples) {
-        match seen.insert(path.as_slice(), ex.in_spp) {
-            Some(prev) if prev != ex.in_spp => return Err(ConflictError),
-            _ => {}
-        }
-    }
-
     // No evidence anywhere → reject everything.
     if examples.is_empty() {
         return Ok(spp_store.zero);
     }
 
-    // Bottom: each example sits on its accept/reject terminal.
-    let mut layer: HashMap<usize, SPP> = (0..examples.len())
-        .map(|e| (e, SPP::new(examples[e].in_spp as u32)))
-        .collect();
-
-    // Build the field levels bottom-up; hash-consing merges equivalent nodes.
-    for depth in (0..nv).rev() {
-        layer = build_field_layer(depth, &decisions, &layer, spp_store);
+    // Zero-field packets: every example is the single empty pair, so they must
+    // all agree (there is no trie level to disambiguate them).
+    if nv == 0 {
+        let label = examples[0].in_spp;
+        if examples.iter().any(|ex| ex.in_spp != label) {
+            return Err(ConflictError);
+        }
+        return Ok(SPP::new(label as u32));
     }
 
-    // At depth 0 every example shares the empty prefix, so they all land on the
-    // single root node.
-    Ok(layer[&0])
+    // Step 1: build the decision-path trie (node 0 is the root).  Each example's
+    // path is `2*input[i] + output[i]` at field `i`; this computes every prefix
+    // partition in one pass.  A leaf reached with two labels is a conflict.
+    let mut trie: Vec<TrieNode> = vec![TrieNode::Branch([None; 4])];
+    for ex in &examples {
+        assert_eq!(ex.input.len(), nv, "example input has wrong width");
+        assert_eq!(ex.output.len(), nv, "example output has wrong width");
+        let mut cur = 0usize;
+        for (d, (&inp, &outp)) in ex.input.iter().zip(&ex.output).enumerate() {
+            let b = 2 * inp as usize + outp as usize;
+            let is_last = d + 1 == nv;
+            let next = match trie[cur] {
+                TrieNode::Branch(children) => children[b],
+                TrieNode::Leaf(_) => unreachable!("path longer than trie depth"),
+            };
+            match next {
+                Some(nx) => {
+                    if is_last
+                        && let TrieNode::Leaf(prev) = trie[nx as usize]
+                        && prev != ex.in_spp
+                    {
+                        return Err(ConflictError);
+                    }
+                    cur = nx as usize;
+                }
+                None => {
+                    let id = trie.len() as u32;
+                    trie.push(if is_last {
+                        TrieNode::Leaf(ex.in_spp)
+                    } else {
+                        TrieNode::Branch([None; 4])
+                    });
+                    // Re-borrow after the push (which may have reallocated).
+                    if let TrieNode::Branch(children) = &mut trie[cur] {
+                        children[b] = Some(id);
+                    }
+                    cur = id as usize;
+                }
+            }
+        }
+    }
+
+    // Step 2: fold the trie bottom-up into an SPP.
+    Ok(build_spp(&trie, 0, spp_store))
 }
 
-/// Build one field level of the diagram, bottom-up.
-///
-/// `below` maps each example to the node it reaches just below this level.
-/// Examples are grouped by their length-`depth` prefix; each group's four
-/// `(input, output)` branches are filled from the examples that exercise them,
-/// with don't-cares taking a sibling branch.  [`SPPstore::mk`] hash-conses, so
-/// identical nodes merge.  Returns the map from each example to its node here.
-fn build_field_layer(
-    depth: usize,
-    decisions: &[Vec<usize>],
-    below: &HashMap<usize, SPP>,
-    store: &mut SPPstore,
-) -> HashMap<usize, SPP> {
-    // Group examples by the prefix that brought them to this level.
-    let mut groups: HashMap<&[usize], Vec<usize>> = HashMap::new();
-    for &e in below.keys() {
-        groups.entry(&decisions[e][..depth]).or_default().push(e);
-    }
+/// A node of the decision-path trie: an internal 4-way branch (indexed by
+/// `2*input + output`) or an accept/reject leaf.
+#[derive(Clone, Copy)]
+enum TrieNode {
+    Branch([Option<u32>; 4]),
+    Leaf(bool),
+}
 
-    let mut result = HashMap::new();
-    for (_prefix, members) in groups {
-        let mut row: [Option<SPP>; 4] = [None; 4];
-        for &e in &members {
-            row[decisions[e][depth]] = Some(below[&e]);
-        }
-        // Every group has ≥1 member, hence ≥1 defined branch to fill with.
-        let fill = row
-            .iter()
-            .flatten()
-            .next()
-            .copied()
-            .expect("non-empty group");
-        let node = store.mk(
-            row[0].unwrap_or(fill),
-            row[1].unwrap_or(fill),
-            row[2].unwrap_or(fill),
-            row[3].unwrap_or(fill),
-        );
-        for e in members {
-            result.insert(e, node);
+/// Fold the trie rooted at `node` into an [`SPP`], bottom-up.
+///
+/// A leaf becomes its accept/reject terminal.  A branch becomes [`SPPstore::mk`]
+/// of its four children, with don't-care branches (those no example exercises)
+/// taking a sibling — the eager generalization.  Each trie node has a single
+/// parent, so this visits every node once; `mk` hash-conses, merging nodes with
+/// identical suffix behaviour.
+fn build_spp(trie: &[TrieNode], node: usize, store: &mut SPPstore) -> SPP {
+    let children = match trie[node] {
+        TrieNode::Leaf(label) => return SPP::new(label as u32),
+        TrieNode::Branch(children) => children,
+    };
+    let mut spps: [Option<SPP>; 4] = [None; 4];
+    for (b, &child) in children.iter().enumerate() {
+        if let Some(id) = child {
+            spps[b] = Some(build_spp(trie, id as usize, store));
         }
     }
-    result
+    // Every branch has ≥1 child to fill the don't-cares with.
+    let fill = spps
+        .iter()
+        .flatten()
+        .next()
+        .copied()
+        .expect("trie branch has at least one child");
+    store.mk(
+        spps[0].unwrap_or(fill),
+        spps[1].unwrap_or(fill),
+        spps[2].unwrap_or(fill),
+        spps[3].unwrap_or(fill),
+    )
 }
 
 #[cfg(test)]
