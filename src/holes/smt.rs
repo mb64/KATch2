@@ -18,6 +18,16 @@
 //!
 //! DFA state values in a [`Literal::Cand`] are always concrete (`usize`).
 //!
+//! Positive SPP membership disjuncts are stated over packet *sets*
+//! ([`Literal::SppMember`], a triple `(spp, in_sp, out_sp)` meaning
+//! "∃ i ∈ in_sp, o ∈ out_sp. (i,o) ∈ spp").  [`SmtLearner::add_clause`] first
+//! collates these triples with [`merge_by`] — unioning output sets that share
+//! an `(spp, in_sp)`, then input sets that share an `(spp, out_sp)` — and only
+//! then allocates the existentials and SP-membership constraints that encode
+//! each surviving disjunct.  Deferring existentialization this way is what lets
+//! the set-merge fire; the merge is equivalence-preserving because the shared
+//! `∃` factors out of the union.
+//!
 //! There are **no universally quantified bits**.  Universal quantifiers cause
 //! Z3 to choose interpretations where the uninterpreted function collapses to a
 //! constant via the `else` value of its function interpretation; that hands the
@@ -99,6 +109,10 @@ pub enum Literal {
         ap2: AbstractPacket,
         polarity: bool,
     },
+    /// A positive membership disjunct stated over *sets*: "∃ i ∈ in_sp, o ∈ out_sp. (i,o) ∈ spp".
+    /// Existentials are allocated lazily by `add_clause`, after [`merge_by`] collates these
+    /// triples by shared input/output set.
+    SppMember { spp: SppVar, in_sp: SP, out_sp: SP },
     /// A membership literal over a [`CandVar`]: does the candidate accept this
     /// (abstract) [`Input`]?  `states` is concrete.
     Cand {
@@ -276,33 +290,94 @@ impl<'a> SmtLearner<'a> {
         result
     }
 
+    /// Build the Z3 Bool for an SPP-membership literal: apply slot `spp`'s
+    /// uninterpreted function to `(ap1, ap2)`, negating when `!polarity`.
+    fn apply_spp(
+        &self,
+        spp: SppVar,
+        ap1: &[AbstractBit],
+        ap2: &[AbstractBit],
+        polarity: bool,
+    ) -> Bool {
+        let n = self.num_vars as usize;
+        assert_eq!(ap1.len(), n, "ap1 length mismatch");
+        assert_eq!(ap2.len(), n, "ap2 length mismatch");
+        let mut args: Vec<Dynamic> = Vec::with_capacity(2 * n);
+        for side in [ap1, ap2] {
+            for b in side {
+                args.push(self.bit_arg(b));
+            }
+        }
+        let arg_refs: Vec<&dyn Ast> = args.iter().map(|a| a as &dyn Ast).collect();
+        let f = &self.spps[spp.0 as usize];
+        let a = f.apply(&arg_refs).as_bool().expect("f has Bool range");
+        if polarity { a } else { a.not() }
+    }
+
     /// Add an abstract clause.  The corresponding Z3 assertion is added
     /// immediately.
-    pub fn add_clause(&mut self, clause: AbstractClause) {
+    ///
+    /// [`Literal::SppMember`] disjuncts are first collated by [`merge_by`] —
+    /// merging output sets that share an `(spp, in_sp)`, then input sets that
+    /// share an `(spp, out_sp)` — before each surviving triple is turned into
+    /// existentials plus SP-membership constraints.  The merge is
+    /// equivalence-preserving (the shared `∃` factors out of the union), so it
+    /// shrinks the disjunction without changing its meaning.
+    pub fn add_clause(&mut self, clause: AbstractClause, sp_store: &mut SPstore) {
         let n = self.num_vars as usize;
 
-        let mut lit_asts: Vec<Bool> = Vec::with_capacity(clause.literals.len());
-        for lit in &clause.literals {
+        // Split set-stated membership disjuncts from the rest so they can be
+        // collated before existentialization.
+        let mut members: Vec<(SppVar, SP, SP)> = Vec::new();
+        let mut others: Vec<Literal> = Vec::new();
+        for lit in clause.literals {
+            match lit {
+                Literal::SppMember { spp, in_sp, out_sp } => members.push((spp, in_sp, out_sp)),
+                other => others.push(other),
+            }
+        }
+
+        // Collate the membership disjuncts (the `clause_merge` optimization):
+        // rule 1 unions output sets sharing a (hole, input set); rule 2 unions
+        // input sets sharing a (hole, output set).  Disabled → each triple is
+        // existentialized on its own.
+        #[cfg(feature = "clause_merge")]
+        let members = {
+            let members = merge_by(
+                members,
+                |&(h, s, _)| (h.0, s.0),
+                |a, b| (a.0, a.1, sp_store.union(a.2, b.2)),
+            );
+            merge_by(
+                members,
+                |&(h, _, t)| (h.0, t.0),
+                |a, b| (a.0, sp_store.union(a.1, b.1), a.2),
+            )
+        };
+
+        let mut lit_asts: Vec<Bool> = Vec::with_capacity(members.len() + others.len());
+
+        // Each merged membership triple becomes a fresh existential pair pinned
+        // to its (in_sp, out_sp) by SP-membership, applied positively.
+        for (spp, in_sp, out_sp) in members {
+            let in_vars: Vec<Existential> = (0..n).map(|_| self.fresh_existential()).collect();
+            let out_vars: Vec<Existential> = (0..n).map(|_| self.fresh_existential()).collect();
+            self.add_sp_membership(in_sp, &in_vars, sp_store);
+            self.add_sp_membership(out_sp, &out_vars, sp_store);
+            let ap1: AbstractPacket = in_vars.into_iter().map(AbstractBit::Exist).collect();
+            let ap2: AbstractPacket = out_vars.into_iter().map(AbstractBit::Exist).collect();
+            lit_asts.push(self.apply_spp(spp, &ap1, &ap2, true));
+        }
+
+        for lit in &others {
             let applied = match lit {
                 Literal::Spp {
                     spp,
                     ap1,
                     ap2,
                     polarity,
-                } => {
-                    assert_eq!(ap1.len(), n, "ap1 length mismatch");
-                    assert_eq!(ap2.len(), n, "ap2 length mismatch");
-                    let mut args: Vec<Dynamic> = Vec::with_capacity(2 * n);
-                    for side in [ap1, ap2] {
-                        for b in side {
-                            args.push(self.bit_arg(b));
-                        }
-                    }
-                    let arg_refs: Vec<&dyn Ast> = args.iter().map(|a| a as &dyn Ast).collect();
-                    let f = &self.spps[spp.0 as usize];
-                    let a = f.apply(&arg_refs).as_bool().expect("f has Bool range");
-                    if *polarity { a } else { a.not() }
-                }
+                } => self.apply_spp(*spp, ap1, ap2, *polarity),
+                Literal::SppMember { .. } => unreachable!("SppMember split out above"),
                 Literal::Cand {
                     cand,
                     pkt_in,
@@ -432,6 +507,33 @@ impl<'a> SmtLearner<'a> {
     }
 }
 
+/// Collate `items` by `key`, folding every run of equal keys into one element
+/// with `merge`.  Because equal keys become adjacent after the stable-ish sort,
+/// a single linear pass (peeking the last kept element) suffices.
+///
+/// `merge(a, b)` is called left-to-right within each key group; it must keep
+/// the key invariant (its result must share the key of both inputs).
+#[cfg(feature = "clause_merge")]
+fn merge_by<T, K: Ord>(
+    mut items: Vec<T>,
+    mut key: impl FnMut(&T) -> K,
+    mut merge: impl FnMut(T, T) -> T,
+) -> Vec<T> {
+    items.sort_by_key(&mut key);
+    let mut out: Vec<T> = Vec::with_capacity(items.len());
+    for item in items {
+        match out.pop() {
+            Some(prev) if key(&prev) == key(&item) => out.push(merge(prev, item)),
+            Some(prev) => {
+                out.push(prev);
+                out.push(item);
+            }
+            None => out.push(item),
+        }
+    }
+    out
+}
+
 /// Read a concrete `bool` out of a func-interp argument/value.
 fn read_bit(d: &Dynamic) -> bool {
     d.as_bool()
@@ -523,14 +625,17 @@ mod tests {
         let mut store = SPPstore::new(N);
         let mut learner = SmtLearner::new(N);
         let s = learner.fresh_spp();
-        learner.add_clause(AbstractClause {
-            literals: vec![spp_lit(
-                s,
-                ap_concrete(&[false, false, false]),
-                ap_concrete(&[true, true, true]),
-                true,
-            )],
-        });
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![spp_lit(
+                    s,
+                    ap_concrete(&[false, false, false]),
+                    ap_concrete(&[true, true, true]),
+                    true,
+                )],
+            },
+            &mut store.sp,
+        );
         let spp = learner.extract(&mut store).unwrap().spps[&s];
         assert!(spp_accepts(
             &store,
@@ -545,14 +650,17 @@ mod tests {
         let mut store = SPPstore::new(N);
         let mut learner = SmtLearner::new(N);
         let s = learner.fresh_spp();
-        learner.add_clause(AbstractClause {
-            literals: vec![spp_lit(
-                s,
-                ap_concrete(&[true, true, true]),
-                ap_concrete(&[false, false, false]),
-                false,
-            )],
-        });
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![spp_lit(
+                    s,
+                    ap_concrete(&[true, true, true]),
+                    ap_concrete(&[false, false, false]),
+                    false,
+                )],
+            },
+            &mut store.sp,
+        );
         let spp = learner.extract(&mut store).unwrap().spps[&s];
         assert!(!spp_accepts(
             &store,
@@ -569,12 +677,18 @@ mod tests {
         let s = learner.fresh_spp();
         let ap1 = ap_concrete(&[false, false, false]);
         let ap2 = ap_concrete(&[true, false, false]);
-        learner.add_clause(AbstractClause {
-            literals: vec![spp_lit(s, ap1.clone(), ap2.clone(), true)],
-        });
-        learner.add_clause(AbstractClause {
-            literals: vec![spp_lit(s, ap1, ap2, false)],
-        });
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![spp_lit(s, ap1.clone(), ap2.clone(), true)],
+            },
+            &mut store.sp,
+        );
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![spp_lit(s, ap1, ap2, false)],
+            },
+            &mut store.sp,
+        );
         assert!(learner.extract(&mut store).is_err());
     }
 
@@ -584,22 +698,25 @@ mod tests {
         let mut learner = SmtLearner::new(N);
         let s = learner.fresh_spp();
         // (0,0,0)->(0,0,0) is in SPP  OR  (1,1,1)->(1,1,1) is not in SPP
-        learner.add_clause(AbstractClause {
-            literals: vec![
-                spp_lit(
-                    s,
-                    ap_concrete(&[false, false, false]),
-                    ap_concrete(&[false, false, false]),
-                    true,
-                ),
-                spp_lit(
-                    s,
-                    ap_concrete(&[true, true, true]),
-                    ap_concrete(&[true, true, true]),
-                    false,
-                ),
-            ],
-        });
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![
+                    spp_lit(
+                        s,
+                        ap_concrete(&[false, false, false]),
+                        ap_concrete(&[false, false, false]),
+                        true,
+                    ),
+                    spp_lit(
+                        s,
+                        ap_concrete(&[true, true, true]),
+                        ap_concrete(&[true, true, true]),
+                        false,
+                    ),
+                ],
+            },
+            &mut store.sp,
+        );
         let spp = learner.extract(&mut store).unwrap().spps[&s];
         let a = spp_accepts(&store, spp, &[false, false, false], &[false, false, false]);
         let b = spp_accepts(&store, spp, &[true, true, true], &[true, true, true]);
@@ -613,14 +730,17 @@ mod tests {
         let mut learner = SmtLearner::new(N);
         let s = learner.fresh_spp();
         let e0 = learner.fresh_existential();
-        learner.add_clause(AbstractClause {
-            literals: vec![spp_lit(
-                s,
-                vec![c(false), c(false), AbstractBit::Exist(e0)],
-                vec![c(true), c(true), AbstractBit::Exist(e0)],
-                true,
-            )],
-        });
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![spp_lit(
+                    s,
+                    vec![c(false), c(false), AbstractBit::Exist(e0)],
+                    vec![c(true), c(true), AbstractBit::Exist(e0)],
+                    true,
+                )],
+            },
+            &mut store.sp,
+        );
         let spp = learner.extract(&mut store).unwrap().spps[&s];
         let accepts_false = spp_accepts(&store, spp, &[false, false, false], &[true, true, false]);
         let accepts_true = spp_accepts(&store, spp, &[false, false, true], &[true, true, true]);
@@ -639,14 +759,17 @@ mod tests {
         let s = learner.fresh_spp();
         let e0 = learner.fresh_existential();
         let e1 = learner.fresh_existential();
-        learner.add_clause(AbstractClause {
-            literals: vec![spp_lit(
-                s,
-                vec![AbstractBit::Exist(e0), AbstractBit::Exist(e1), c(false)],
-                ap_concrete(&[false, false, false]),
-                true,
-            )],
-        });
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![spp_lit(
+                    s,
+                    vec![AbstractBit::Exist(e0), AbstractBit::Exist(e1), c(false)],
+                    ap_concrete(&[false, false, false]),
+                    true,
+                )],
+            },
+            &mut store.sp,
+        );
         learner.add_existential_clause(&[(e0, true), (e1, true)]);
         learner.add_existential_clause(&[(e0, false)]);
         let spp = learner.extract(&mut store).unwrap().spps[&s];
@@ -678,22 +801,28 @@ mod tests {
         let mut learner = SmtLearner::new(N);
         let s = learner.fresh_spp();
         let e0 = learner.fresh_existential();
-        learner.add_clause(AbstractClause {
-            literals: vec![spp_lit(
-                s,
-                vec![AbstractBit::Exist(e0), c(false), c(false)],
-                ap_concrete(&[false, false, false]),
-                true,
-            )],
-        });
-        learner.add_clause(AbstractClause {
-            literals: vec![spp_lit(
-                s,
-                ap_concrete(&[true, false, false]),
-                ap_concrete(&[false, false, false]),
-                false,
-            )],
-        });
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![spp_lit(
+                    s,
+                    vec![AbstractBit::Exist(e0), c(false), c(false)],
+                    ap_concrete(&[false, false, false]),
+                    true,
+                )],
+            },
+            &mut store.sp,
+        );
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![spp_lit(
+                    s,
+                    ap_concrete(&[true, false, false]),
+                    ap_concrete(&[false, false, false]),
+                    false,
+                )],
+            },
+            &mut store.sp,
+        );
         let spp = learner.extract(&mut store).unwrap().spps[&s];
         assert!(spp_accepts(
             &store,
@@ -718,22 +847,28 @@ mod tests {
         let mut learner = SmtLearner::new(N);
         let s1 = learner.fresh_spp();
         let s2 = learner.fresh_spp();
-        learner.add_clause(AbstractClause {
-            literals: vec![spp_lit(
-                s1,
-                ap_concrete(&[false, false, false]),
-                ap_concrete(&[true, true, true]),
-                true,
-            )],
-        });
-        learner.add_clause(AbstractClause {
-            literals: vec![spp_lit(
-                s2,
-                ap_concrete(&[false, false, false]),
-                ap_concrete(&[false, false, false]),
-                false,
-            )],
-        });
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![spp_lit(
+                    s1,
+                    ap_concrete(&[false, false, false]),
+                    ap_concrete(&[true, true, true]),
+                    true,
+                )],
+            },
+            &mut store.sp,
+        );
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![spp_lit(
+                    s2,
+                    ap_concrete(&[false, false, false]),
+                    ap_concrete(&[false, false, false]),
+                    false,
+                )],
+            },
+            &mut store.sp,
+        );
         let result = learner.extract(&mut store).unwrap();
         assert!(spp_accepts(
             &store,
@@ -801,14 +936,17 @@ mod tests {
         // Literal: s accepts (existentials, [false, true, false]).  With
         // existentials pinned to `target`, this forces (target, [false,true,false]) ∈ s.
         let out = vec![false, true, false];
-        learner.add_clause(AbstractClause {
-            literals: vec![spp_lit(
-                s,
-                e.iter().map(|&ev| AbstractBit::Exist(ev)).collect(),
-                out.iter().map(|&b| AbstractBit::Concrete(b)).collect(),
-                true,
-            )],
-        });
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![spp_lit(
+                    s,
+                    e.iter().map(|&ev| AbstractBit::Exist(ev)).collect(),
+                    out.iter().map(|&b| AbstractBit::Concrete(b)).collect(),
+                    true,
+                )],
+            },
+            &mut store.sp,
+        );
 
         let result = learner.extract(&mut store).unwrap();
         assert!(spp_accepts(&store, result.spps[&s], &target, &out));
@@ -822,22 +960,25 @@ mod tests {
         let mut learner = SmtLearner::new(N);
         let s1 = learner.fresh_spp();
         let s2 = learner.fresh_spp();
-        learner.add_clause(AbstractClause {
-            literals: vec![
-                spp_lit(
-                    s1,
-                    ap_concrete(&[false, false, false]),
-                    ap_concrete(&[false, false, false]),
-                    true,
-                ),
-                spp_lit(
-                    s2,
-                    ap_concrete(&[true, true, true]),
-                    ap_concrete(&[true, true, true]),
-                    false,
-                ),
-            ],
-        });
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![
+                    spp_lit(
+                        s1,
+                        ap_concrete(&[false, false, false]),
+                        ap_concrete(&[false, false, false]),
+                        true,
+                    ),
+                    spp_lit(
+                        s2,
+                        ap_concrete(&[true, true, true]),
+                        ap_concrete(&[true, true, true]),
+                        false,
+                    ),
+                ],
+            },
+            &mut store.sp,
+        );
         let result = learner.extract(&mut store).unwrap();
         let a = spp_accepts(
             &store,
@@ -865,17 +1006,20 @@ mod tests {
         };
         let mut learner = SmtLearner::new(N);
         let cv = learner.fresh_cand(&dfa);
-        learner.add_clause(AbstractClause {
-            literals: vec![Literal::Cand {
-                cand: cv,
-                pkt_in: ap_concrete(&[false, false, false]),
-                pkt_start: ap_concrete(&[true, false, true]),
-                states: vec![0],
-                pkt_end: ap_concrete(&[true, true, true]),
-                pkt_out: ap_concrete(&[false, false, false]),
-                polarity: true,
-            }],
-        });
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![Literal::Cand {
+                    cand: cv,
+                    pkt_in: ap_concrete(&[false, false, false]),
+                    pkt_start: ap_concrete(&[true, false, true]),
+                    states: vec![0],
+                    pkt_end: ap_concrete(&[true, true, true]),
+                    pkt_out: ap_concrete(&[false, false, false]),
+                    polarity: true,
+                }],
+            },
+            &mut store.sp,
+        );
         let solution = learner.extract(&mut store).unwrap();
         let cand = &solution.cands[&cv];
         assert!(cand.accepts_input(
@@ -888,5 +1032,70 @@ mod tests {
                 pkt_out: vec![false, false, false],
             },
         ));
+    }
+
+    #[cfg(feature = "clause_merge")]
+    #[test]
+    fn test_merge_by_collates_adjacent_keys() {
+        // Key on `.0`, sum the `.1` of each group: (0,1),(0,2),(1,3) → (0,3),(1,3).
+        let merged = merge_by(
+            vec![(0, 1), (0, 2), (1, 3)],
+            |&(k, _)| k,
+            |a, b| (a.0, a.1 + b.1),
+        );
+        assert_eq!(merged, vec![(0, 3), (1, 3)]);
+    }
+
+    #[cfg(feature = "clause_merge")]
+    #[test]
+    fn test_merge_by_unsorted_input() {
+        // Groups need not be pre-sorted; `merge_by` sorts first.
+        let merged = merge_by(
+            vec![(1, 10), (0, 1), (1, 20), (0, 2)],
+            |&(k, _)| k,
+            |a, b| (a.0, a.1 + b.1),
+        );
+        assert_eq!(merged, vec![(0, 3), (1, 30)]);
+    }
+
+    #[test]
+    fn test_spp_member_shared_input_merges() {
+        // Two positive membership disjuncts sharing an input set but with
+        // different singleton output sets.  After merge they collapse into one
+        // disjunct over the unioned output set, so the learned SPP must accept
+        // at least one of the two in→out pairs.
+        let mut store = SPPstore::new(N);
+        let mut learner = SmtLearner::new(N);
+        let s = learner.fresh_spp();
+
+        let in_pkt = vec![true, false, true];
+        let out_a = vec![false, false, false];
+        let out_b = vec![true, true, true];
+        let in_sp = singleton_sp_for_test(&mut store, &in_pkt);
+        let out_sp_a = singleton_sp_for_test(&mut store, &out_a);
+        let out_sp_b = singleton_sp_for_test(&mut store, &out_b);
+
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![
+                    Literal::SppMember {
+                        spp: s,
+                        in_sp,
+                        out_sp: out_sp_a,
+                    },
+                    Literal::SppMember {
+                        spp: s,
+                        in_sp,
+                        out_sp: out_sp_b,
+                    },
+                ],
+            },
+            &mut store.sp,
+        );
+
+        let spp = learner.extract(&mut store).unwrap().spps[&s];
+        let a = spp_accepts(&store, spp, &in_pkt, &out_a);
+        let b = spp_accepts(&store, spp, &in_pkt, &out_b);
+        assert!(a || b, "merged membership disjunct not realized");
     }
 }

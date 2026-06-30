@@ -1613,16 +1613,26 @@ fn filter_input_spp(store: &mut spp::SPPstore, packet: &[bool]) -> spp::SPP {
 /// target entry.
 ///
 /// `trace` must be non-empty.
+///
+/// `extra_roots` lets callers seed the enumeration with states that are not
+/// forward-reachable from `aut.start()`.  This matters because the backward
+/// region naturally lives *outside* the forward-reachable set (e.g. an
+/// output-emitting state sitting behind an as-yet-empty hole): a plain
+/// forward BFS from the start would never enumerate it, leaving its (genuinely
+/// non-empty) backward entry uncomputed.  Pass `&[]` for the classic behaviour.
 pub fn backward_reachable<A: ENFA>(
     aut: &A,
     store: &mut spp::SPPstore,
     trace: &[Vec<bool>],
     output: &[bool],
+    extra_roots: &[A::State],
 ) -> HashMap<(A::State, usize), sp::SP> {
     assert!(!trace.is_empty(), "trace must be non-empty");
     let n = trace.len();
 
     // 1. Forward BFS: enumerate reachable states and cache their structure.
+    //    Seeded with the start *and* any `extra_roots`, so states off the
+    //    forward-reachable path still get their backward entries computed.
     let start = aut.start(store);
     let mut reachable: HashSet<A::State> = HashSet::new();
     let mut order: Vec<A::State> = Vec::new();
@@ -1633,6 +1643,12 @@ pub fn backward_reachable<A: ENFA>(
     reachable.insert(start.clone());
     order.push(start.clone());
     let mut stack = vec![start];
+    for root in extra_roots {
+        if reachable.insert(root.clone()) {
+            order.push(root.clone());
+            stack.push(root.clone());
+        }
+    }
     while let Some(q) = stack.pop() {
         let trans = aut.transitions(store, &q);
         outputs.insert(q.clone(), aut.output(store, &q));
@@ -2534,7 +2550,7 @@ mod tests {
         };
         let trace = vec![vec![true, false, true]];
         let output = vec![false, true, false];
-        let back = backward_reachable(&dfa, &mut store, &trace, &output);
+        let back = backward_reachable(&dfa, &mut store, &trace, &output, &[]);
 
         assert_eq!(back.len(), 1);
         let expected = singleton_sp(&mut store, &trace[0]);
@@ -2553,7 +2569,7 @@ mod tests {
         };
         let trace = vec![vec![true, false, true]];
         let output = vec![false, true, false];
-        let back = backward_reachable(&dfa, &mut store, &trace, &output);
+        let back = backward_reachable(&dfa, &mut store, &trace, &output, &[]);
         assert!(back.is_empty(), "got: {:?}", back);
     }
 
@@ -2571,7 +2587,7 @@ mod tests {
         };
         let trace = vec![vec![false, false], vec![true, true]];
         let output = vec![true, false];
-        let back = backward_reachable(&dfa, &mut store, &trace, &output);
+        let back = backward_reachable(&dfa, &mut store, &trace, &output, &[]);
 
         let s0 = singleton_sp(&mut store, &trace[0]);
         let s1 = singleton_sp(&mut store, &trace[1]);
@@ -2602,7 +2618,7 @@ mod tests {
         };
         let trace = vec![vec![false, false], vec![true, true]];
         let output = vec![false, true];
-        let back = backward_reachable(&wrap, &mut store, &trace, &output);
+        let back = backward_reachable(&wrap, &mut store, &trace, &output, &[]);
 
         let s0 = singleton_sp(&mut store, &trace[0]);
         let s1 = singleton_sp(&mut store, &trace[1]);
@@ -2715,7 +2731,7 @@ mod tests {
         };
         let trace = vec![vec![true, true]];
         let output = vec![false, false];
-        let back = backward_reachable(&dfa, &mut store, &trace, &output);
+        let back = backward_reachable(&dfa, &mut store, &trace, &output, &[]);
         assert!(back.is_empty(), "got: {:?}", back);
     }
 }

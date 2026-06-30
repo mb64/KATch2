@@ -1,0 +1,16 @@
+hole h1
+hole h2
+hole h3
+
+// fields are only bits, and are named x0, x1, etc.
+def example = (x0 := 0)
+
+// however, you can test and set groups of them at a time
+def example2 = x[0..4] ~ 10  // tests four bits
+
+// this problem instance uses 64-bit packets bc the biggest index mentioned is x64
+def foo = x64 := 0
+
+// any number of assertions, but only = and <=
+def LHS = (h1; dup; h2; dup; h3)*
+assert LHS = dup*

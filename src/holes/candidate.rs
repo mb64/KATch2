@@ -131,27 +131,24 @@ impl<'a> Candidate<'a> for SPP {
 
     fn accept_literal(
         var: SppVar,
-        learner: &mut SmtLearner<'a>,
-        store: &mut SPPstore,
+        _learner: &mut SmtLearner<'a>,
+        _store: &mut SPPstore,
         _upper_bound: &'a ExplicitDFA,
         in_sp: SP,
         out_sp: SP,
         trace: &[Vec<bool>],
     ) -> Option<Literal> {
         // An SPP is a single dup-free step: it consumes no trace internally.
+        // Existentialization of `(in_sp, out_sp)` is deferred to the learner
+        // (see [`crate::holes::smt::SmtLearner::add_clause`]) so the SP sets
+        // survive to be merged across disjuncts.
         if !trace.is_empty() {
             return None;
         }
-        let n = store.num_vars() as usize;
-        let in_vars: Vec<Existential> = (0..n).map(|_| learner.fresh_existential()).collect();
-        let out_vars: Vec<Existential> = (0..n).map(|_| learner.fresh_existential()).collect();
-        learner.add_sp_membership(in_sp, &in_vars, &store.sp);
-        learner.add_sp_membership(out_sp, &out_vars, &store.sp);
-        Some(Literal::Spp {
+        Some(Literal::SppMember {
             spp: var,
-            ap1: in_vars.into_iter().map(AbstractBit::Exist).collect(),
-            ap2: out_vars.into_iter().map(AbstractBit::Exist).collect(),
-            polarity: true,
+            in_sp,
+            out_sp,
         })
     }
 }

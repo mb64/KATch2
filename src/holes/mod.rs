@@ -669,7 +669,7 @@ mod test {
     /// wrongly reports `Infeasible` on a satisfiable-by-construction instance.
     /// The known wrong-`Infeasible` bugs are now fixed (the `Cand` ENFA stall,
     /// resolved by grounding candidates on a *complete* reference DFA, and the
-    /// lower-bound hole-site trace misalignment in `cegis::collect_hole_sites`),
+    /// lower-bound hole-site trace misalignment in the `cegis` clause builder),
     /// so this runs by default again.
     #[test]
     fn fuzz_solve_holes_full_roundtrip() {
@@ -932,7 +932,7 @@ mod test {
     /// Hole(0)*  ==  (0:=true; dup)*        (1 field)
     /// ```
     ///
-    /// Caused by a bug in [`cegis::collect_hole_sites`], which has been fixed.
+    /// Caused by a bug in the `cegis` lower-bound clause builder, since fixed.
     #[test]
     fn full_solves_assign_dup_under_star() {
         let mut store = SPPstore::new(1);

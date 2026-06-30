@@ -40,13 +40,28 @@
 //! * Lower-bound (`accept_literal`) is implemented for [`spp::SPP`] only;
 //!   [`crate::holes::cand::Cand`] panics if a lower-bound counterexample arises.
 
+#[cfg(feature = "lb_mincut")]
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
+
+#[cfg(feature = "lb_mincut")]
+use petgraph::Direction;
+#[cfg(feature = "lb_mincut")]
+use petgraph::algo::dinics;
+#[cfg(feature = "lb_mincut")]
+use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
+#[cfg(feature = "lb_mincut")]
+use petgraph::visit::EdgeRef;
 
 use crate::holes::aut::{ENFA, ExplicitDFA, backward_reachable, forward_reachable};
 use crate::holes::candidate::Candidate;
 use crate::holes::inst::{self, Instantiate, LowerBoundCounterexample};
-use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Hole, State};
+#[cfg(not(feature = "lb_mincut"))]
+use crate::holes::nk_with_holes::AutWithHoles;
+use crate::holes::nk_with_holes::{EdgeLabel, Hole, State};
 use crate::holes::problem::Constraint;
+#[cfg(feature = "lb_mincut")]
+use crate::holes::smt::Literal;
 use crate::holes::smt::{AbstractClause, SmtLearner};
 use crate::sp;
 use crate::spp;
@@ -90,7 +105,7 @@ impl Constraint {
             Constraint::UpperBound { .. } | Constraint::Equality { .. }
         ) && let Err(witnesses) = inst.check_less_than(store, dfa)
         {
-            add_upper_bound_clause::<C>(witnesses, hole_to_var, learner);
+            add_upper_bound_clause::<C>(witnesses, hole_to_var, learner, &mut store.sp);
             return false;
         }
 
@@ -100,7 +115,7 @@ impl Constraint {
             Constraint::LowerBound { .. } | Constraint::Equality { .. }
         ) && let Err(cex) = inst.check_greater_than(store, dfa)
         {
-            add_lower_bound_clauses(cex, inst, hole_to_var, learner, store, reference_dfa);
+            add_lower_bound_clause(cex, inst, hole_to_var, learner, store, reference_dfa);
             return false;
         }
 
@@ -212,54 +227,354 @@ fn add_upper_bound_clause<'a, C: Candidate<'a>>(
     )>,
     hole_to_var: &HashMap<Hole, C::Var>,
     learner: &mut SmtLearner<'a>,
+    sp_store: &mut sp::SPstore,
 ) {
     let literals = witnesses
         .into_iter()
         .map(|(h, (start, inner, end))| C::reject_literal(hole_to_var[&h], &start, &inner, &end))
         .collect();
-    learner.add_clause(AbstractClause { literals });
+    learner.add_clause(AbstractClause { literals }, sp_store);
 }
 
-/// A single hole site discovered while walking the product of the
-/// hole-bearing automaton and the trace.
-struct HoleSite<'a> {
-    hole: Hole,
+#[cfg(feature = "lb_mincut")]
+/// One of the three packet regions an outer `(state, position)` node is split
+/// into in the abstract cut graph.
+///
+/// The regions partition packet space at the node, all computed as *actual*
+/// reachability under the current candidate:
+///
+/// * `Fwd` — packets that forward-reach the node from the start.
+/// * `Bwd` — packets from which the node co-reaches the final output.
+/// * `Int` — everything else (`¬(Fwd ∪ Bwd)`).
+///
+/// `Fwd` and `Bwd` are disjoint: a packet in both would witness an accepting
+/// run the instantiation already realizes, contradicting the counterexample.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Region {
+    Fwd,
+    Int,
+    Bwd,
+}
 
-    /// SP of carry-on packets at the in-side that *are* forward-reachable
-    /// under the current candidate (set (1) in the design notes).
-    in_sp: sp::SP,
+#[cfg(feature = "lb_mincut")]
+/// Drop every non-`Outer` `(state, position)` key, projecting an
+/// [`Instantiate`] reachability map onto the underlying [`AutWithHoles`] states.
+fn outer_only<S>(map: HashMap<(inst::State<S>, usize), sp::SP>) -> HashMap<(State, usize), sp::SP> {
+    map.into_iter()
+        .filter_map(|((q, n), sp)| match q {
+            inst::State::Outer(q) => Some(((q, n), sp)),
+            _ => None,
+        })
+        .collect()
+}
 
-    /// Trace accumulated by the hole
-    trace: &'a [Vec<bool>],
+/// The SP of packets in `region` at outer node `(q, i)`.
+#[cfg(feature = "lb_mincut")]
+fn region_sp(
+    store: &mut spp::SPPstore,
+    forward: &HashMap<(State, usize), sp::SP>,
+    backward: &HashMap<(State, usize), sp::SP>,
+    q: State,
+    i: usize,
+    region: Region,
+) -> sp::SP {
+    let zero = store.sp.zero;
+    let fwd = forward.get(&(q, i)).copied().unwrap_or(zero);
+    let bwd = backward.get(&(q, i)).copied().unwrap_or(zero);
+    match region {
+        Region::Fwd => fwd,
+        Region::Bwd => bwd,
+        Region::Int => {
+            let live = store.sp.union(fwd, bwd);
+            store.sp.complement(live)
+        }
+    }
+}
 
-    /// SP of carry-on packets at the out-side that (a) plausibly let the rest
-    /// of the trace continue under the all-top instantiation (set (3)) and
-    /// (b) are *not* already forward-reachable under the current candidate
-    /// (complement of set (2)).  Adding an entry whose out-packet falls in
-    /// `out_sp` genuinely expands the candidate's behaviour towards
-    /// satisfying the trace.
-    out_sp: sp::SP,
+#[cfg(feature = "lb_mincut")]
+/// Resolve a `(region, q, i)` to its graph node, allocating an `Int` node on
+/// demand.  Every `Fwd` region collapses into the single `source`, every `Bwd`
+/// into the single `sink` (the infinite-capacity connectors of the original
+/// formulation).
+fn node_for(
+    region: Region,
+    q: State,
+    i: usize,
+    source: NodeIndex,
+    sink: NodeIndex,
+    graph: &mut DiGraph<(), u32>,
+    int_nodes: &mut HashMap<(State, usize), NodeIndex>,
+) -> NodeIndex {
+    match region {
+        Region::Fwd => source,
+        Region::Bwd => sink,
+        Region::Int => *int_nodes
+            .entry((q, i))
+            .or_insert_with(|| graph.add_node(())),
+    }
+}
+
+/// Edges crossing the minimum `source`→`sink` cut.
+///
+/// Runs Dinic's algorithm for the max flow, then recovers the cut by finding
+/// the residual-reachable set `R` from `source` (forward edges with spare
+/// capacity, backward edges carrying flow) and returning every original edge
+/// from `R` into its complement.  Those edges are exactly saturated, and — by
+/// max-flow/min-cut — their total capacity is the max flow.
+#[cfg(feature = "lb_mincut")]
+fn min_cut_edges(graph: &DiGraph<(), u32>, source: NodeIndex, sink: NodeIndex) -> Vec<EdgeIndex> {
+    let (_max_flow, flows) = dinics(graph, source, sink);
+
+    let mut reachable = vec![false; graph.node_count()];
+    reachable[source.index()] = true;
+    let mut queue = VecDeque::from([source]);
+    while let Some(u) = queue.pop_front() {
+        // Forward edges with residual capacity.
+        for e in graph.edges_directed(u, Direction::Outgoing) {
+            if *e.weight() - flows[e.id().index()] > 0 && !reachable[e.target().index()] {
+                reachable[e.target().index()] = true;
+                queue.push_back(e.target());
+            }
+        }
+        // Backward edges that carry flow we could cancel.
+        for e in graph.edges_directed(u, Direction::Incoming) {
+            if flows[e.id().index()] > 0 && !reachable[e.source().index()] {
+                reachable[e.source().index()] = true;
+                queue.push_back(e.source());
+            }
+        }
+    }
+
+    graph
+        .edge_indices()
+        .filter(|&e| {
+            let (u, v) = graph.edge_endpoints(e).unwrap();
+            reachable[u.index()] && !reachable[v.index()]
+        })
+        .collect()
+}
+
+#[cfg(feature = "lb_mincut")]
+/// Convert a lower-bound counterexample into an existential disjunctive clause
+/// for the learner, using a **min-cut** over an abstract reachability graph to
+/// keep the clause small.
+///
+/// The really-big graph has vertices `(i, q, pkt)`; an edge exists when a
+/// (potential, all-top) transition relates the packets.  We collapse the packet
+/// dimension into three regions per outer node `(q, i)` — [`Region::Fwd`],
+/// [`Region::Bwd`], [`Region::Int`] — computed from *symmetric actual*
+/// reachability under the current candidate:
+///
+/// * `forward` = [`forward_reachable`] and `backward` = [`backward_reachable`],
+///   both run on the **current** instantiation (no all-top plausibility).
+///
+/// Edges come from the automaton's transitions taken under the all-top
+/// instantiation:
+///
+/// * **concrete** edges never cross regions (forward/backward closure), so only
+///   their `Int → Int` part is added, with infinite capacity (uncuttable
+///   backbone);
+/// * **hole** edges are the cuttable, capacity-1 edges.  For each span we emit
+///   one edge per relevant `(source region, target region)` pair, each carrying
+///   the positive [`Literal`] that [`Candidate::accept_literal`] would add (a
+///   `None` literal means this candidate kind cannot realize the span, so no
+///   edge is created).
+///
+/// `Fwd` collapses into a single source, `Bwd` into a single sink.  The min cut
+/// is a set of hole edges separating "reachable now" from "co-reaches the
+/// output"; the disjunction of their literals is the clause.  An empty cut →
+/// empty clause → instant UNSAT (no extension can fix the counterexample).
+fn add_lower_bound_clause<'a, C: Candidate<'a>>(
+    cex: LowerBoundCounterexample,
+    inst: &mut Instantiate<C>,
+    hole_to_var: &HashMap<Hole, C::Var>,
+    learner: &mut SmtLearner<'a>,
+    store: &mut spp::SPPstore,
+    reference_dfa: &'a ExplicitDFA,
+) where
+    <C as ENFA>::State: Ord,
+{
+    let n = cex.trace.len();
+
+    // Enumerate every structurally-reachable outer state and its transitions in
+    // a single walk of the raw `AutWithHoles` (visibility is read off each
+    // target's `visible` flag, so we never need the automaton again).
+    let mut edges: Vec<(State, EdgeLabel, State)> = Vec::new();
+    let outer_states: Vec<State> = {
+        let start = inst.start_state();
+        let mut aut = inst.aut();
+        let mut seen: HashSet<State> = HashSet::new();
+        let mut stack = vec![start];
+        while let Some(q) = stack.pop() {
+            if !seen.insert(q) {
+                continue;
+            }
+            for (label, qp) in aut.transitions(store, q) {
+                if !seen.contains(&qp) {
+                    stack.push(qp);
+                }
+                edges.push((q, label, qp));
+            }
+        }
+        seen.into_iter().collect()
+    };
+
+    // Symmetric *actual* reachability under the current candidate.  `backward`
+    // is seeded with every outer state: the backward region lives off the
+    // forward-reachable path (behind the holes we still have to fill), so a
+    // start-only enumeration would miss it.
+    let roots: Vec<inst::State<<C as ENFA>::State>> =
+        outer_states.into_iter().map(inst::State::Outer).collect();
+    let forward = outer_only(forward_reachable(&*inst, store, &cex.trace));
+    let backward = outer_only(backward_reachable(
+        &*inst,
+        store,
+        &cex.trace,
+        &cex.output,
+        &roots,
+    ));
+
+    // Backbone (concrete / connector) edges are uncuttable: larger than any
+    // possible cut, which is bounded by the number of capacity-1 hole edges.
+    const INF: u32 = 1 << 30;
+
+    let mut graph: DiGraph<(), u32> = DiGraph::new();
+    let source = graph.add_node(());
+    let sink = graph.add_node(());
+    let mut int_nodes: HashMap<(State, usize), NodeIndex> = HashMap::new();
+    let mut edge_literals: HashMap<EdgeIndex, Literal> = HashMap::new();
+
+    for (q, label, qp) in &edges {
+        let (q, qp) = (*q, *qp);
+        let qp_visible = qp.visible;
+        match label {
+            EdgeLabel::Concrete(spp) => {
+                // Single step; only the `Int → Int` part can matter.
+                for i in 0..n {
+                    let it = if qp_visible {
+                        if i + 1 >= n {
+                            continue;
+                        }
+                        i + 1
+                    } else {
+                        i
+                    };
+                    let src = region_sp(store, &forward, &backward, q, i, Region::Int);
+                    let tgt = region_sp(store, &forward, &backward, qp, it, Region::Int);
+                    if store.sp.is_zero(src) || store.sp.is_zero(tgt) {
+                        continue;
+                    }
+                    let pushed = store.push(src, *spp);
+                    let img = store.sp.intersect(pushed, tgt);
+                    if store.sp.is_zero(img) {
+                        continue;
+                    }
+                    let u = node_for(Region::Int, q, i, source, sink, &mut graph, &mut int_nodes);
+                    let v = node_for(
+                        Region::Int,
+                        qp,
+                        it,
+                        source,
+                        sink,
+                        &mut graph,
+                        &mut int_nodes,
+                    );
+                    if u != v {
+                        graph.add_edge(u, v, INF);
+                    }
+                }
+            }
+            EdgeLabel::Abstract(hole) => {
+                let var = hole_to_var[hole];
+                // A hole may span a sub-trace (`i ..= jt`); under all-top it
+                // relates every packet, so each region's full SP carries over.
+                for i in 0..n {
+                    for j in i..n {
+                        let jt = if qp_visible {
+                            if j + 1 >= n {
+                                continue;
+                            }
+                            j + 1
+                        } else {
+                            j
+                        };
+                        let trace_slice = &cex.trace[i + 1..jt + 1];
+                        // Edges out of `Bwd`/into `Fwd` only re-enter source
+                        // or leave sink, so they are useless for the cut.
+                        for (src_region, tgt_region) in [
+                            (Region::Fwd, Region::Int),
+                            (Region::Fwd, Region::Bwd),
+                            (Region::Int, Region::Int),
+                            (Region::Int, Region::Bwd),
+                        ] {
+                            let in_sp = region_sp(store, &forward, &backward, q, i, src_region);
+                            let out_sp = region_sp(store, &forward, &backward, qp, jt, tgt_region);
+                            if store.sp.is_zero(in_sp) || store.sp.is_zero(out_sp) {
+                                continue;
+                            }
+                            // Only realizable spans become edges, so the cut
+                            // always maps back to a genuine literal.
+                            let Some(lit) = C::accept_literal(
+                                var,
+                                learner,
+                                store,
+                                reference_dfa,
+                                in_sp,
+                                out_sp,
+                                trace_slice,
+                            ) else {
+                                continue;
+                            };
+                            let u = node_for(
+                                src_region,
+                                q,
+                                i,
+                                source,
+                                sink,
+                                &mut graph,
+                                &mut int_nodes,
+                            );
+                            let v = node_for(
+                                tgt_region,
+                                qp,
+                                jt,
+                                source,
+                                sink,
+                                &mut graph,
+                                &mut int_nodes,
+                            );
+                            if u == v {
+                                continue;
+                            }
+                            let e = graph.add_edge(u, v, 1);
+                            edge_literals.insert(e, lit);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let literals = min_cut_edges(&graph, source, sink)
+        .into_iter()
+        .filter_map(|e| edge_literals.remove(&e))
+        .collect();
+    learner.add_clause(AbstractClause { literals }, &mut store.sp);
 }
 
 /// Convert a lower-bound counterexample into an existential disjunctive
-/// clause for the learner.
+/// clause for the learner — the **frontier** clause used when the `lb_mincut`
+/// optimization is disabled.
 ///
 /// For each hole-bearing edge or output summand in the automaton, we compute
-/// three SPs (see the design notes / module docstring): (1) packets that
-/// actually reach the in-side under the *current* candidate, (2) packets
-/// that actually reach the out-side under the same, and (3) packets that
-/// plausibly let the rest of the trace continue under the *all-top*
-/// instantiation.  The site is viable iff `(1)` and `(3) ∩ ¬(2)` are both
-/// non-empty.  We then allocate `2 * num_vars` fresh existentials per
-/// viable site, constrain `ap1 ∈ (1)` and `ap2 ∈ (3) ∩ ¬(2)`, and emit a
-/// positive [`Literal`] over the hole's [`SppVar`].
-///
-/// All literals are joined into one [`AbstractClause`]: "at least one of
-/// these hole sites must accept a fresh (ap1, ap2) of the appropriate shape".
-/// Empty sites list → empty clause → instant UNSAT → `CegisError::Infeasible`
-/// on the next learner extraction (correct: no extension at any site can fix
-/// this counterexample).
-fn add_lower_bound_clauses<'a, C: Candidate<'a>>(
+/// three SPs: (1) packets that actually reach the in-side under the *current*
+/// candidate, (2) packets that actually reach the out-side under the same, and
+/// (3) packets that plausibly let the rest of the trace continue under the
+/// *all-top* instantiation.  The site is viable iff `(1)` and `(3) ∩ ¬(2)` are
+/// both non-empty; every viable site becomes a positive literal, all joined
+/// into one clause.  Empty sites → empty clause → instant UNSAT.
+#[cfg(not(feature = "lb_mincut"))]
+fn add_lower_bound_clause<'a, C: Candidate<'a>>(
     cex: LowerBoundCounterexample,
     inst: &mut Instantiate<C>,
     hole_to_var: &HashMap<Hole, C::Var>,
@@ -278,12 +593,12 @@ fn add_lower_bound_clauses<'a, C: Candidate<'a>>(
     for &h in hole_to_var.keys() {
         inst.set_hole(h, top.clone());
     }
-    let backward_top = backward_reachable(&*inst, store, &cex.trace, &cex.output);
+    let backward_top = backward_reachable(&*inst, store, &cex.trace, &cex.output, &[]);
     for (h, candidate) in saved {
         inst.set_hole(h, candidate);
     }
 
-    // Ignore non-outer states
+    // Ignore non-outer states.
     let forward_candidate: HashMap<(State, usize), sp::SP> = forward_candidate
         .into_iter()
         .flat_map(|((q, n), sp)| match q {
@@ -329,12 +644,27 @@ fn add_lower_bound_clauses<'a, C: Candidate<'a>>(
             )
         })
         .collect();
-    learner.add_clause(AbstractClause { literals });
+    learner.add_clause(AbstractClause { literals }, &mut store.sp);
 }
 
-/// Walk every state forward-reachable from `start` in `aut` and collect a
-/// [`HoleSite`] for each hole-bearing edge or output summand that has
-/// non-empty `(in_sp, out_sp)` under the supplied reachability maps.
+/// A single hole site discovered while walking the hole-bearing automaton along
+/// the counterexample trace (frontier clause; see [`add_lower_bound_clause`]).
+#[cfg(not(feature = "lb_mincut"))]
+struct HoleSite<'a> {
+    hole: Hole,
+    /// SP of carry-in packets that *are* forward-reachable under the current
+    /// candidate.
+    in_sp: sp::SP,
+    /// Sub-trace the hole consumes internally.
+    trace: &'a [Vec<bool>],
+    /// SP of carry-out packets that plausibly continue the trace under all-top
+    /// but are not already forward-reachable.
+    out_sp: sp::SP,
+}
+
+/// Walk every state reachable from `start` and collect a [`HoleSite`] for each
+/// hole edge whose `(in_sp, out_sp)` are both non-empty.
+#[cfg(not(feature = "lb_mincut"))]
 fn collect_hole_sites<'a>(
     aut: &mut AutWithHoles,
     start: State,
@@ -385,9 +715,9 @@ fn collect_hole_sites<'a>(
                         sites.push(HoleSite {
                             hole: *hole,
                             in_sp,
-                            // The hole's internal sub-trace is its *dup'd*
-                            // packets, at positions `i+1 ..= j_target`.
-                            // The carry-in packet is at position `i.
+                            // The hole's internal sub-trace is its dup'd packets,
+                            // at positions `i+1 ..= j_target`; the carry-in packet
+                            // is at position `i`.
                             trace: &trace[i + 1..j_target + 1],
                             out_sp,
                         });
@@ -606,7 +936,7 @@ mod tests {
     /// upper bound = top; lower bound is the one-state DFA that accepts
     /// exactly the trace `([false,false])` with output `[true,true]`.  The
     /// initial candidate (zero) doesn't accept that, so the lower-bound
-    /// check fails — `add_lower_bound_clauses` is exercised end-to-end.
+    /// check fails — `add_lower_bound_clause` is exercised end-to-end.
     /// After refinement, the returned SPP must accept the pair.
     #[test]
     fn lower_bound_drives_refinement() {
@@ -713,5 +1043,78 @@ mod tests {
                 pkt_out: vec![false],
             },
         ));
+    }
+
+    // ---- min-cut helper ------------------------------------------------
+
+    #[cfg(feature = "lb_mincut")]
+    use petgraph::graph::DiGraph;
+
+    /// Two capacity-1 (hole) edges in series, joined by an infinite (concrete)
+    /// backbone edge: the min cut is the single bottleneck, not both holes.
+    #[cfg(feature = "lb_mincut")]
+    #[test]
+    fn min_cut_series_picks_one() {
+        const INF: u32 = 1 << 30;
+        let mut g: DiGraph<(), u32> = DiGraph::new();
+        let s = g.add_node(());
+        let a = g.add_node(());
+        let b = g.add_node(());
+        let t = g.add_node(());
+        let e1 = g.add_edge(s, a, 1); // hole
+        g.add_edge(a, b, INF); // concrete backbone
+        let _e2 = g.add_edge(b, t, 1); // hole
+        let cut = min_cut_edges(&g, s, t);
+        // Exactly one hole edge, and it is the one nearest the source.
+        assert_eq!(cut, vec![e1]);
+    }
+
+    /// Two capacity-1 edges in parallel: both must be cut (no smaller
+    /// separator exists), so shrinking would be unsound.
+    #[cfg(feature = "lb_mincut")]
+    #[test]
+    fn min_cut_parallel_keeps_both() {
+        let mut g: DiGraph<(), u32> = DiGraph::new();
+        let s = g.add_node(());
+        let t = g.add_node(());
+        let e1 = g.add_edge(s, t, 1);
+        let e2 = g.add_edge(s, t, 1);
+        let mut cut = min_cut_edges(&g, s, t);
+        cut.sort();
+        let mut expected = vec![e1, e2];
+        expected.sort();
+        assert_eq!(cut, expected);
+    }
+
+    /// A diamond: one hole into a fork, then two holes out.  The single
+    /// upstream hole is the bottleneck, so the cut is just that one edge.
+    #[cfg(feature = "lb_mincut")]
+    #[test]
+    fn min_cut_diamond_bottleneck() {
+        const INF: u32 = 1 << 30;
+        let mut g: DiGraph<(), u32> = DiGraph::new();
+        let s = g.add_node(());
+        let mid = g.add_node(());
+        let x = g.add_node(());
+        let y = g.add_node(());
+        let t = g.add_node(());
+        let bottleneck = g.add_edge(s, mid, 1); // hole
+        g.add_edge(mid, x, INF);
+        g.add_edge(mid, y, INF);
+        g.add_edge(x, t, 1); // hole
+        g.add_edge(y, t, 1); // hole
+        assert_eq!(min_cut_edges(&g, s, t), vec![bottleneck]);
+    }
+
+    /// No source→sink path → empty cut (an unfixable, purely-concrete gap).
+    #[cfg(feature = "lb_mincut")]
+    #[test]
+    fn min_cut_disconnected_is_empty() {
+        let mut g: DiGraph<(), u32> = DiGraph::new();
+        let s = g.add_node(());
+        let t = g.add_node(());
+        let isolated = g.add_node(());
+        g.add_edge(s, isolated, 1);
+        assert!(min_cut_edges(&g, s, t).is_empty());
     }
 }
