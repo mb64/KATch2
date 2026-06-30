@@ -589,6 +589,16 @@ impl SPPstore {
         None
     }
 
+    /// An arbitrary (but deterministic) output packet, given an input packet.
+    ///
+    /// Panics if there are none.
+    pub fn any_output_packet_from_input(&mut self, spp: SPP, input: &[bool]) -> Vec<bool> {
+        let inputs = self.sp.singleton(input);
+        let outputs = self.push(inputs, spp);
+
+        self.sp.any_packet(outputs)
+    }
+
     pub fn random_output_packet_from_input(
         &mut self,
         spp: SPP,

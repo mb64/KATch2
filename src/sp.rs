@@ -130,6 +130,41 @@ impl SPstore {
         sp
     }
 
+    /// Whether or not this packet is in the SP
+    pub fn accepts(&self, sp: SP, pkt: &[bool]) -> bool {
+        assert_eq!(pkt.len(), self.num_vars as usize);
+        let mut sp = sp;
+        for &b in pkt {
+            let node = self.get(sp);
+            sp = if b { node.x1 } else { node.x0 };
+        }
+        if sp == SP::new(0) {
+            false
+        } else if sp == SP::new(1) {
+            true
+        } else {
+            unreachable!()
+        }
+    }
+
+    /// An SP that accepts only this one packet
+    pub fn singleton(&mut self, pkt: &[bool]) -> SP {
+        // Build the BDD bottom-up.  At each step `sp_val` is the singleton at the
+        // current depth and `zero` is the all-rejecting SP at the same depth;
+        // both must have matching depth or downstream operations break.
+        let mut sp_val = SP::new(1);
+        let mut zero = SP::new(0);
+        for &bit in pkt.iter().rev() {
+            sp_val = if bit {
+                self.mk(zero, sp_val)
+            } else {
+                self.mk(sp_val, zero)
+            };
+            zero = self.mk(zero, zero);
+        }
+        sp_val
+    }
+
     /// Generates a random SP with `num_vars` variables
     pub fn rand(&mut self) -> SP {
         self.rand_helper(self.num_vars)
@@ -276,6 +311,36 @@ impl SPstore {
         None
     }
 
+    /// Get an arbitrary packet accepted by this SP (deterministic). Panics if there is not one
+    pub fn any_packet(&mut self, sp: SP) -> Vec<bool> {
+        let mut pkt = vec![];
+        assert!(self.any_packet_helper(sp, &mut pkt), "given SP is empty!");
+        assert!(pkt.len() == self.num_vars as usize);
+        pkt.reverse();
+        pkt
+    }
+
+    fn any_packet_helper(&mut self, sp: SP, acc: &mut Vec<bool>) -> bool {
+        if sp == SP::new(0) {
+            assert!(acc.is_empty());
+            return false;
+        } else if sp == SP::new(1) {
+            assert!(acc.is_empty());
+            return true;
+        }
+
+        let node = self.get(sp);
+        if self.any_packet_helper(node.x0, acc) {
+            acc.push(false);
+            true
+        } else if node.x0 != node.x1 && self.any_packet_helper(node.x1, acc) {
+            acc.push(true);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Enumerates all possible SPs with `num_vars` fields
     pub fn all(&mut self) -> Vec<SP> {
         self.all_helper(self.num_vars)
@@ -397,6 +462,23 @@ mod tests {
             let is_zero_result = s.is_zero(sp);
             // An SP is zero if it equals the zero SP
             assert_eq!(is_zero_result, sp == s.zero);
+        }
+    }
+
+    #[test]
+    fn test_any_packet_and_random_packet() {
+        let mut s = SPstore::new(N);
+        for sp in s.some() {
+            if s.is_zero(sp) {
+                assert!(s.random_packet(sp).is_none());
+                continue;
+            }
+
+            let pkt = s.any_packet(sp);
+            assert!(s.accepts(sp, &pkt));
+
+            let pkt = s.random_packet(sp).unwrap();
+            assert!(s.accepts(sp, &pkt));
         }
     }
 }

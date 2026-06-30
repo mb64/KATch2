@@ -1479,13 +1479,8 @@ fn reconstruct_trace<A: ENFA>(
     let acc_diff = steps[accepting_idx].diff;
     let bwd_output = store.bwd(output_spp);
     let valid_inputs = store.sp.intersect(acc_diff, bwd_output);
-    let acc_pkt = store
-        .sp
-        .random_packet(valid_inputs)
-        .expect("non-zero output_sp implies a valid input exists");
-    let out_pkt = store
-        .random_output_packet_from_input(output_spp, acc_pkt.clone())
-        .expect("acc_pkt has an output by construction");
+    let acc_pkt = store.sp.any_packet(valid_inputs);
+    let out_pkt = store.any_output_packet_from_input(output_spp, &acc_pkt);
 
     let mut packets_back: Vec<Vec<bool>> = vec![acc_pkt.clone()];
     let mut states_back: Vec<A::State> = vec![steps[accepting_idx].state.clone()];
@@ -1510,10 +1505,7 @@ fn reconstruct_trace<A: ENFA>(
                 let valid_inputs = store.pull(spp, current_pkt_sp);
                 let candidates = store.sp.intersect(d_j, valid_inputs);
                 if candidates != store.sp.zero {
-                    let p_j = store
-                        .sp
-                        .random_packet(candidates)
-                        .expect("non-zero SP must contain a packet");
+                    let p_j = store.sp.any_packet(candidates);
                     found = Some((j, p_j));
                     break 'outer;
                 }
@@ -1537,21 +1529,7 @@ fn reconstruct_trace<A: ENFA>(
 }
 
 pub(crate) fn singleton_sp(store: &mut spp::SPPstore, packet: &[bool]) -> sp::SP {
-    // Build the BDD bottom-up.  At each step `sp_val` is the singleton at the
-    // current depth and `zero` is the all-rejecting SP at the same depth;
-    // both must have matching depth or downstream operations break.
-    let mut sp_val = sp::SP::new(1);
-    let mut zero = sp::SP::new(0);
-    for &bit in packet.iter().rev() {
-        let new_sp = if bit {
-            store.sp.mk(zero, sp_val)
-        } else {
-            store.sp.mk(sp_val, zero)
-        };
-        zero = store.sp.mk(zero, zero);
-        sp_val = new_sp;
-    }
-    sp_val
+    store.sp.singleton(packet)
 }
 
 /// SPP for "any input → output = `packet`": accepts `(p_in, p_out)` iff

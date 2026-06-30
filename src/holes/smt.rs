@@ -5,7 +5,7 @@
 //! in two flavours:
 //!
 //! * **SPP slots** ([`SmtLearner::fresh_spp`]) — learned via
-//!   [`crate::spp::learner::Learner`].
+//!   [`crate::spp::learner::learn_spp`].
 //! * **Cand slots** ([`SmtLearner::fresh_cand`]) — learned via
 //!   [`Cand::from_examples`]; each is tied to the [`ExplicitDFA`] it predicates
 //!   over.
@@ -60,7 +60,7 @@ use z3::{
 use crate::holes::aut::ExplicitDFA;
 use crate::holes::cand::{Cand, Input};
 use crate::sp::{SP, SPstore};
-use crate::spp::learner::{AbstractPacket as ConcretePacket, Learner};
+use crate::spp::learner::{Example, learn_spp};
 use crate::spp::{SPP, SPPstore, Var};
 
 use std::collections::HashMap;
@@ -432,8 +432,8 @@ impl<'a> SmtLearner<'a> {
     /// Solve once and extract a concrete diagram for each allocated slot.
     ///
     /// Each SPP comes from feeding its function's [`z3::FuncInterp`] entries
-    /// into an independent [`crate::spp::learner::Learner`]; each [`Cand`] from
-    /// feeding its entries into [`Cand::from_examples`].  Both inherit the
+    /// into [`crate::spp::learner::learn_spp`]; each [`Cand`] from feeding its
+    /// entries into [`Cand::from_examples`].  Both inherit the
     /// BDD-style inductive bias of those learners.
     pub fn extract(&mut self, spp_store: &mut SPPstore) -> Result<Solution<'a>, InconsistentError> {
         match self.solver.check() {
@@ -447,25 +447,25 @@ impl<'a> SmtLearner<'a> {
         // SPP slots.
         let mut spps = HashMap::with_capacity(self.spps.len());
         for (idx, f) in self.spps.iter().enumerate() {
-            let mut learner = Learner::new(self.num_vars);
-
-            // If this UF was never constrained, there is no func interp;
-            // we feed no examples and the learner extracts the zero SPP.
+            // Each func-interp entry is one concrete training example; an
+            // unconstrained UF has no interp, so no examples → the empty SPP.
+            let mut examples: Vec<Example> = Vec::new();
             if let Some(interp) = model.get_func_interp(f) {
                 for entry in interp.get_entries() {
                     let args = entry.get_args();
-                    let polarity = read_polarity(&entry.get_value());
+                    let in_spp = read_polarity(&entry.get_value());
                     let bits: Vec<bool> = args.iter().map(read_bit).collect();
                     assert_eq!(bits.len(), 2 * n);
-                    let ap1: ConcretePacket = bits[..n].iter().map(|&b| Some(b)).collect();
-                    let ap2: ConcretePacket = bits[n..].iter().map(|&b| Some(b)).collect();
-                    learner
-                        .add_example(ap1, ap2, polarity)
-                        .expect("Z3 model is internally consistent");
+                    examples.push(Example {
+                        input: bits[..n].to_vec(),
+                        output: bits[n..].to_vec(),
+                        in_spp,
+                    });
                 }
             }
 
-            spps.insert(SppVar(idx as u32), learner.extract(spp_store));
+            let spp = learn_spp(examples, spp_store).expect("Z3 model is internally consistent");
+            spps.insert(SppVar(idx as u32), spp);
         }
 
         // Cand slots.

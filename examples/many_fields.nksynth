@@ -1,0 +1,5 @@
+hole h1
+
+def tmp = (x100 := 0)
+
+assert (h1; dup) = (x0 := 0; dup)

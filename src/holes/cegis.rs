@@ -105,6 +105,7 @@ impl Constraint {
             Constraint::UpperBound { .. } | Constraint::Equality { .. }
         ) && let Err(witnesses) = inst.check_less_than(store, dfa)
         {
+            // println!("Upper bound cex: {witnesses:?}");
             add_upper_bound_clause::<C>(witnesses, hole_to_var, learner, &mut store.sp);
             return false;
         }
@@ -115,6 +116,7 @@ impl Constraint {
             Constraint::LowerBound { .. } | Constraint::Equality { .. }
         ) && let Err(cex) = inst.check_greater_than(store, dfa)
         {
+            // println!("Lower bound cex: {cex:?}");
             add_lower_bound_clause(cex, inst, hole_to_var, learner, store, reference_dfa);
             return false;
         }
@@ -187,6 +189,7 @@ pub fn run<'a, C: Candidate<'a>>(
             }
         }
         if satisfied {
+            // println!("CEGIS: finished in {iters} iterations");
             return Ok(candidates);
         }
 
