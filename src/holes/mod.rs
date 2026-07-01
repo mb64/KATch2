@@ -146,6 +146,7 @@ use candidate::Candidate;
 use cegis::{CegisError, run};
 use nk_with_holes::{Expr, Hole};
 use problem::Constraint;
+use smt::Z3;
 
 /// Solve `lower_bound ⊆ expr[holes] ⊆ upper_bound` for the holes appearing
 /// in `expr`, filling each hole with a candidate of kind `C`.
@@ -176,7 +177,7 @@ pub fn solve_holes_general<'a, C: Candidate<'a>>(
     // caller-owned `reference_dfa` (see [`bounds_reference_dfa`]), which they
     // may borrow, so it must outlive the returned candidates.
     let constraints = bounds_constraints(store, expr, lower_bound, upper_bound);
-    run::<C>(&constraints, holes, reference_dfa, store, max_iters)
+    run::<C, Z3>(&constraints, holes, reference_dfa, store, max_iters)
 }
 
 /// The upper/lower bound constraint pair for `lower ⊆ expr[holes] ⊆ upper`.

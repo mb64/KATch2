@@ -33,7 +33,7 @@ pub trait Candidate<'a>: ENFA<State: Ord> + NFA + Clone {
     type Var: Copy + Eq + Hash;
 
     /// Allocate a fresh learnable slot in `learner`.
-    fn fresh_var(learner: &mut SmtLearner<'a>, upper_bound: &'a ExplicitDFA) -> Self::Var;
+    fn fresh_var<L: SmtLearner<'a>>(learner: &mut L, upper_bound: &'a ExplicitDFA) -> Self::Var;
 
     /// Read the candidate learned for `var` out of a solved [`Solution`].
     fn from_solution(solution: &Solution<'a>, var: Self::Var) -> Self;
@@ -73,9 +73,9 @@ pub trait Candidate<'a>: ENFA<State: Ord> + NFA + Clone {
     /// (empty if it consumes nothing).  Returns `None` if this candidate kind
     /// cannot realize a traversal that consumes exactly `trace` (e.g. an
     /// [`SPP`] consumes nothing, so any non-empty `trace` is `None`).
-    fn accept_literal(
+    fn accept_literal<L: SmtLearner<'a>>(
         var: Self::Var,
-        learner: &mut SmtLearner<'a>,
+        learner: &mut L,
         store: &mut SPPstore,
         upper_bound: &'a ExplicitDFA,
         in_sp: SP,
@@ -92,7 +92,7 @@ fn concrete(pkt: &[bool]) -> Vec<AbstractBit> {
 impl<'a> Candidate<'a> for SPP {
     type Var = SppVar;
 
-    fn fresh_var(learner: &mut SmtLearner<'a>, _upper_bound: &'a ExplicitDFA) -> SppVar {
+    fn fresh_var<L: SmtLearner<'a>>(learner: &mut L, _upper_bound: &'a ExplicitDFA) -> SppVar {
         learner.fresh_spp()
     }
 
@@ -129,9 +129,9 @@ impl<'a> Candidate<'a> for SPP {
         }
     }
 
-    fn accept_literal(
+    fn accept_literal<L: SmtLearner<'a>>(
         var: SppVar,
-        _learner: &mut SmtLearner<'a>,
+        _learner: &mut L,
         _store: &mut SPPstore,
         _upper_bound: &'a ExplicitDFA,
         in_sp: SP,
@@ -156,7 +156,7 @@ impl<'a> Candidate<'a> for SPP {
 impl<'a> Candidate<'a> for Cand<'a> {
     type Var = CandVar;
 
-    fn fresh_var(learner: &mut SmtLearner<'a>, upper_bound: &'a ExplicitDFA) -> CandVar {
+    fn fresh_var<L: SmtLearner<'a>>(learner: &mut L, upper_bound: &'a ExplicitDFA) -> CandVar {
         learner.fresh_cand(upper_bound)
     }
 
@@ -211,9 +211,9 @@ impl<'a> Candidate<'a> for Cand<'a> {
         }
     }
 
-    fn accept_literal(
+    fn accept_literal<L: SmtLearner<'a>>(
         var: CandVar,
-        learner: &mut SmtLearner<'a>,
+        learner: &mut L,
         store: &mut SPPstore,
         upper_bound: &'a ExplicitDFA,
         in_sp: SP,
@@ -267,7 +267,7 @@ impl<'a> Candidate<'a> for ops::Union<SPP, Cand<'a>> {
         <Cand<'a> as Candidate<'a>>::Var,
     );
 
-    fn fresh_var(learner: &mut SmtLearner<'a>, upper_bound: &'a ExplicitDFA) -> Self::Var {
+    fn fresh_var<L: SmtLearner<'a>>(learner: &mut L, upper_bound: &'a ExplicitDFA) -> Self::Var {
         (
             SPP::fresh_var(learner, upper_bound),
             Cand::fresh_var(learner, upper_bound),
@@ -317,9 +317,9 @@ impl<'a> Candidate<'a> for ops::Union<SPP, Cand<'a>> {
         }
     }
 
-    fn accept_literal(
+    fn accept_literal<L: SmtLearner<'a>>(
         var: Self::Var,
-        learner: &mut SmtLearner<'a>,
+        learner: &mut L,
         store: &mut SPPstore,
         upper_bound: &'a ExplicitDFA,
         in_sp: SP,
