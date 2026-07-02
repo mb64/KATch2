@@ -151,6 +151,11 @@ fn build_spp(trie: &[TrieNode], node: usize, store: &mut SPPstore) -> SPP {
             spps[b] = Some(build_spp(trie, id as usize, store));
         }
     }
+
+    heuristic_fill(spps, store)
+}
+
+fn heuristic_fill(spps: [Option<SPP>; 4], store: &mut SPPstore) -> SPP {
     // Every branch has ≥1 child to fill the don't-cares with.
     let fill = spps
         .iter()
@@ -158,11 +163,27 @@ fn build_spp(trie: &[TrieNode], node: usize, store: &mut SPPstore) -> SPP {
         .next()
         .copied()
         .expect("trie branch has at least one child");
+
+    // Heuristic: don't change a field if we don't observe it changing
+    let [x00, mut x01, mut x10, x11] = spps;
+    if x01.is_none() && x10.is_none() {
+        // build a zero SPP of the right height
+        let mut zero = SPP::new(0);
+        let mut tmp = fill;
+        while tmp != SPP::new(0) && tmp != SPP::new(1) {
+            tmp = store.get(tmp).x00;
+            zero = store.mk(zero, zero, zero, zero);
+        }
+
+        x01 = Some(zero);
+        x10 = Some(zero);
+    }
+
     store.mk(
-        spps[0].unwrap_or(fill),
-        spps[1].unwrap_or(fill),
-        spps[2].unwrap_or(fill),
-        spps[3].unwrap_or(fill),
+        x00.unwrap_or(fill),
+        x01.unwrap_or(fill),
+        x10.unwrap_or(fill),
+        x11.unwrap_or(fill),
     )
 }
 
@@ -204,16 +225,7 @@ mod tests {
         assert!(!store.accepts(spp, &[true, true], &[true, true]));
     }
 
-    /// One positive example and nothing else: eager merging fills every
-    /// don't-care with the accepting branch, generalizing to "accept all".
-    #[test]
-    fn single_positive_generalizes_to_top() {
-        let mut store = SPPstore::new(N);
-        let spp = learn_spp([ex(&[false, false], &[false, false], true)], &mut store).unwrap();
-        assert_eq!(spp, store.top);
-    }
-
-    /// Symmetrically, a single negative example generalizes to "reject all".
+    /// A single negative example generalizes to "reject all"
     #[test]
     fn single_negative_generalizes_to_zero() {
         let mut store = SPPstore::new(N);
