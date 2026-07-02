@@ -522,11 +522,13 @@ def write_netkat(g, filename):
                     s_label = str(label_table[s_label])
                     d_label = str(label_table[d_label])
 
-                #f.write(
-                #    f"check {str_field_test('loc',s_label)}; "
-                #    f"net; "
-                #    f"{str_field_test('loc',d_label)} !== drop\n"
-                #)
+                f.write(
+                    f"check {str_field_test('loc',s_label)}; "
+                    f"net; "
+                    f"{str_field_test('loc',d_label)} !== drop\n"
+                )
+
+        f.write("\n")
 
         ############################################################
         # Paths
@@ -535,13 +537,13 @@ def write_netkat(g, filename):
         for p in paths:
             name = " -> ".join(labels[v] for v in p)
             if True or name=="POR -> AVL -> WLG -> NLS":
-                print("\n\nPath:", name)
-                print("Ports: ", port_of)
+                #print("\n\nPath:", name)
+                #print("Ports: ", port_of)
                 items = []
                 first = ""
                 prev = None
                 for x in p:
-                    print("Item: ", labels[x])
+                    #print("Item: ", labels[x])
 
                     x_label = labels[x]
 
@@ -555,7 +557,7 @@ def write_netkat(g, filename):
                             f"{str_field_test('out',0)}; "
                         )
                     else:
-                        print("  port: ", str(port_of[(x,prev)]))
+                        #print("  port: ", str(port_of[(x,prev)]))
                         items.append(
                             f"{str_field_assign('loc',x_label)}; "
                             f"{str_field_assign('port',port_of[(x,prev)])} "
@@ -563,9 +565,9 @@ def write_netkat(g, filename):
                     prev = x
                 first += f"{str_field_test('dst',x_label)}; "
                 hops = ["hop"] * len(items)
-                print("First: ", first)
-                print("Items: ", "; dup; ".join(items))
-                print("Hops: ", "; dup; ".join(hops))
+                #print("First: ", first)
+                #print("Items: ", "; dup; ".join(items))
+                #print("Hops: ", "; dup; ".join(hops))
 
                 f.write(
                     f"check ({first}{'; dup; '.join(items)})"
