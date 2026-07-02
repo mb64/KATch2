@@ -18,7 +18,7 @@
 //! into [`crate::expr::Expr::Hole`] and inlining definitions — is a separate
 //! pass and not the parser's job.
 
-use crate::desugar::{DesugarEnv, DesugarError, desugar_with_env};
+use crate::desugar::{desugar_with_env, DesugarEnv, DesugarError};
 use crate::expr::{Exp, Expr, Hole};
 use crate::holes::aut::expr_to_dfa;
 use crate::holes::nk_with_holes::Expr as HExpr;
@@ -200,16 +200,13 @@ pub fn has_holes(expr: &Expr) -> bool {
 /// represent: intersection, xor, difference, complement, the LTL operators, or
 /// any sugar that should have been desugared away.
 pub fn to_hole_expr(expr: &Expr, store: &mut spp::SPPstore) -> HExpr {
+    if let Some(spp) = to_test(expr, store) {
+        return HExpr::spp(spp);
+    }
     match expr {
-        Expr::Zero => HExpr::spp(store.zero),
-        Expr::One => HExpr::spp(store.one),
-        Expr::Top => HExpr::spp(store.top),
+        // Expr::Top => HExpr::spp(store.top), // BUG
         Expr::Assign(f, v) => {
             let s = store.assign(*f, *v);
-            HExpr::spp(s)
-        }
-        Expr::Test(f, v) => {
-            let s = store.test(*f, *v);
             HExpr::spp(s)
         }
         Expr::Dup => HExpr::dup(),
@@ -218,6 +215,29 @@ pub fn to_hole_expr(expr: &Expr, store: &mut spp::SPPstore) -> HExpr {
         Expr::Sequence(a, b) => HExpr::sequence(to_hole_expr(a, store), to_hole_expr(b, store)),
         Expr::Star(e) => HExpr::star(to_hole_expr(e, store)),
         other => panic!("to_hole_expr: construct not supported by nk_with_holes::Expr: {other:?}"),
+    }
+}
+
+fn to_test(expr: &Expr, store: &mut spp::SPPstore) -> Option<spp::SPP> {
+    match *expr {
+        Expr::Zero => Some(store.zero),
+        Expr::One => Some(store.one),
+        Expr::Test(f, v) => Some(store.test(f, v)),
+        Expr::Union(ref a, ref b) => {
+            let a = to_test(a, store)?;
+            let b = to_test(b, store)?;
+            Some(store.union(a, b))
+        }
+        Expr::Intersect(ref a, ref b) => {
+            let a = to_test(a, store)?;
+            let b = to_test(b, store)?;
+            Some(store.intersect(a, b))
+        }
+        Expr::TestNegation(ref a) => {
+            let a = to_test(a, store)?;
+            Some(store.complement(a))
+        }
+        _ => None,
     }
 }
 
@@ -446,13 +466,5 @@ mod tests {
     fn desugar_errors_when_both_sides_have_holes() {
         let prog = parse_program("hole h\nhole g\nassert h <= g\n").unwrap();
         assert!(desugar(&prog).is_err());
-    }
-
-    #[test]
-    #[should_panic(expected = "not supported by nk_with_holes")]
-    fn to_hole_expr_panics_on_intersection() {
-        let mut store = spp::SPPstore::new(1);
-        let expr = Expr::Intersect(Expr::test(0, true), Expr::test(0, false));
-        to_hole_expr(&expr, &mut store);
     }
 }
