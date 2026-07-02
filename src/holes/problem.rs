@@ -14,6 +14,7 @@ use crate::holes::cand::Cand;
 use crate::holes::candidate::Candidate;
 use crate::holes::cegis::{CegisError, run};
 use crate::holes::nk_with_holes::{AutWithHoles, Expr, State};
+use crate::holes::smt::Z3;
 use crate::spp::{self, SPP};
 
 /// The formal hole standing for an unknown sub-program. Re-exported from
@@ -137,7 +138,7 @@ impl ProblemInstance {
         // SPP candidates ignore the reference DFA, but the loop still needs one.
         let reference_dfa =
             <SPP as Candidate>::make_reference_dfa(&mut self.store, &self.constraints);
-        run::<SPP>(
+        run::<SPP, Z3>(
             &self.constraints,
             &self.holes,
             &reference_dfa,
@@ -164,7 +165,7 @@ impl ProblemInstance {
             &mut self.store,
             &self.constraints,
         );
-        let candidates: HashMap<Hole, ops::Union<SPP, Cand<'_>>> = run(
+        let candidates: HashMap<Hole, ops::Union<SPP, Cand<'_>>> = run::<_, Z3>(
             &self.constraints,
             &self.holes,
             &reference_dfa,

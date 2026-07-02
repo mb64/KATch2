@@ -89,11 +89,11 @@ impl Constraint {
     /// for a lower-bound one — and returns `false`.  At most one clause is
     /// added per call: an [`Constraint::Equality`] that fails its upper-bound
     /// check stops before checking the lower bound.
-    fn check<'a, C: Candidate<'a>>(
+    fn check<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
         &self,
         inst: &mut Instantiate<C>,
         hole_to_var: &HashMap<Hole, C::Var>,
-        learner: &mut SmtLearner<'a>,
+        learner: &mut L,
         store: &mut spp::SPPstore,
         reference_dfa: &'a ExplicitDFA,
     ) -> bool {
@@ -106,7 +106,7 @@ impl Constraint {
         ) && let Err(witnesses) = inst.check_less_than(store, dfa)
         {
             // println!("Upper bound cex: {witnesses:?}");
-            add_upper_bound_clause::<C>(witnesses, hole_to_var, learner, &mut store.sp);
+            add_upper_bound_clause::<C, L>(witnesses, hole_to_var, learner, &mut store.sp);
             return false;
         }
 
@@ -142,14 +142,14 @@ impl Constraint {
 /// `max_iters` caps the number of refinement rounds: pass `Some(n)` to return
 /// [`CegisError::IterationLimit`] after `n` rounds without convergence, or
 /// `None` to loop unboundedly (the historical behaviour).
-pub fn run<'a, C: Candidate<'a>>(
+pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     constraints: &[Constraint],
     holes: &[Hole],
     reference_dfa: &'a ExplicitDFA,
     store: &mut spp::SPPstore,
     max_iters: Option<usize>,
 ) -> Result<HashMap<Hole, C>, CegisError> {
-    let mut learner = SmtLearner::new(store.num_vars());
+    let mut learner = L::new(store.num_vars());
 
     let mut hole_to_var: HashMap<Hole, C::Var> = HashMap::new();
     for &h in holes {
@@ -223,13 +223,13 @@ pub fn run<'a, C: Candidate<'a>>(
 /// involvement).  Adding an empty clause makes the learner immediately
 /// UNSAT, which is correct: no choice of hole can resolve a concrete
 /// violation.
-fn add_upper_bound_clause<'a, C: Candidate<'a>>(
+fn add_upper_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     witnesses: Vec<(
         Hole,
         (Vec<bool>, Vec<(<C as ENFA>::State, Vec<bool>)>, Vec<bool>),
     )>,
     hole_to_var: &HashMap<Hole, C::Var>,
-    learner: &mut SmtLearner<'a>,
+    learner: &mut L,
     sp_store: &mut sp::SPstore,
 ) {
     let literals = witnesses
@@ -387,11 +387,11 @@ fn min_cut_edges(graph: &DiGraph<(), u32>, source: NodeIndex, sink: NodeIndex) -
 /// is a set of hole edges separating "reachable now" from "co-reaches the
 /// output"; the disjunction of their literals is the clause.  An empty cut →
 /// empty clause → instant UNSAT (no extension can fix the counterexample).
-fn add_lower_bound_clause<'a, C: Candidate<'a>>(
+fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     cex: LowerBoundCounterexample,
     inst: &mut Instantiate<C>,
     hole_to_var: &HashMap<Hole, C::Var>,
-    learner: &mut SmtLearner<'a>,
+    learner: &mut L,
     store: &mut spp::SPPstore,
     reference_dfa: &'a ExplicitDFA,
 ) where
@@ -577,11 +577,11 @@ fn add_lower_bound_clause<'a, C: Candidate<'a>>(
 /// both non-empty; every viable site becomes a positive literal, all joined
 /// into one clause.  Empty sites → empty clause → instant UNSAT.
 #[cfg(not(feature = "lb_mincut"))]
-fn add_lower_bound_clause<'a, C: Candidate<'a>>(
+fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     cex: LowerBoundCounterexample,
     inst: &mut Instantiate<C>,
     hole_to_var: &HashMap<Hole, C::Var>,
-    learner: &mut SmtLearner<'a>,
+    learner: &mut L,
     store: &mut spp::SPPstore,
     reference_dfa: &'a ExplicitDFA,
 ) where
@@ -739,6 +739,7 @@ mod tests {
     use crate::holes::aut::ExplicitDFA;
     use crate::holes::cand::{Cand, Input};
     use crate::holes::nk_with_holes::Expr;
+    use crate::holes::smt::Z3;
 
     /// Iteration cap for these unit tests.  Every case here converges (or
     /// proves infeasible) in a couple of rounds, so this is purely a guard
@@ -804,7 +805,7 @@ mod tests {
         max_iters: Option<usize>,
     ) -> Result<HashMap<Hole, C>, CegisError> {
         let constraints = bounds_constraints(store, expr, lb, ub);
-        run::<C>(&constraints, holes, reference_dfa, store, max_iters)
+        run::<C, Z3>(&constraints, holes, reference_dfa, store, max_iters)
     }
 
     /// 0 ⊆ Hole ⊆ top: trivially solvable.  The learner returns the empty
