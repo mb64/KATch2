@@ -1,0 +1,1358 @@
+WLG = 1
+DUD = 2
+AVL = 3
+PNR = 4
+LCN = 5
+CHC = 6
+IVM = 7
+INV = 8
+TPO = 9
+NLS = 10
+Syd = 11
+MTA = 12
+NPL = 13
+WAG = 14
+MUP = 15
+NSH = 16
+WRK = 17
+LAX = 18
+TAU = 19
+GIS = 20
+POR = 21
+NAP = 22
+ROT = 23
+HLT = 24
+AKL = 25
+
+topo =
+    (loc=WLG; port=1; out=1; loc:=DUD; port:=1; out:=0)
+ +
+    (loc=DUD; port=1; out=1; loc:=WLG; port:=1; out:=0)
+ +
+    (loc=WLG; port=2; out=1; loc:=AVL; port:=1; out:=0)
+ +
+    (loc=AVL; port=1; out=1; loc:=WLG; port:=2; out:=0)
+ +
+    (loc=WLG; port=3; out=1; loc:=PNR; port:=1; out:=0)
+ +
+    (loc=PNR; port=1; out=1; loc:=WLG; port:=3; out:=0)
+ +
+    (loc=WLG; port=4; out=1; loc:=CHC; port:=1; out:=0)
+ +
+    (loc=CHC; port=1; out=1; loc:=WLG; port:=4; out:=0)
+ +
+    (loc=WLG; port=5; out=1; loc:=NLS; port:=1; out:=0)
+ +
+    (loc=NLS; port=1; out=1; loc:=WLG; port:=5; out:=0)
+ +
+    (loc=DUD; port=2; out=1; loc:=LCN; port:=1; out:=0)
+ +
+    (loc=LCN; port=1; out=1; loc:=DUD; port:=2; out:=0)
+ +
+    (loc=DUD; port=3; out=1; loc:=IVM; port:=1; out:=0)
+ +
+    (loc=IVM; port=1; out=1; loc:=DUD; port:=3; out:=0)
+ +
+    (loc=DUD; port=3; out=1; loc:=IVM; port:=1; out:=0)
+ +
+    (loc=IVM; port=1; out=1; loc:=DUD; port:=3; out:=0)
+ +
+    (loc=DUD; port=4; out=1; loc:=INV; port:=1; out:=0)
+ +
+    (loc=INV; port=1; out=1; loc:=DUD; port:=4; out:=0)
+ +
+    (loc=AVL; port=2; out=1; loc:=POR; port:=1; out:=0)
+ +
+    (loc=POR; port=1; out=1; loc:=AVL; port:=2; out:=0)
+ +
+    (loc=AVL; port=3; out=1; loc:=MUP; port:=1; out:=0)
+ +
+    (loc=MUP; port=1; out=1; loc:=AVL; port:=3; out:=0)
+ +
+    (loc=PNR; port=2; out=1; loc:=AKL; port:=1; out:=0)
+ +
+    (loc=AKL; port=1; out=1; loc:=PNR; port:=2; out:=0)
+ +
+    (loc=PNR; port=3; out=1; loc:=NPL; port:=1; out:=0)
+ +
+    (loc=NPL; port=1; out=1; loc:=PNR; port:=3; out:=0)
+ +
+    (loc=PNR; port=4; out=1; loc:=WAG; port:=1; out:=0)
+ +
+    (loc=WAG; port=1; out=1; loc:=PNR; port:=4; out:=0)
+ +
+    (loc=PNR; port=5; out=1; loc:=MUP; port:=2; out:=0)
+ +
+    (loc=MUP; port=2; out=1; loc:=PNR; port:=5; out:=0)
+ +
+    (loc=LCN; port=2; out=1; loc:=CHC; port:=2; out:=0)
+ +
+    (loc=CHC; port=2; out=1; loc:=LCN; port:=2; out:=0)
+ +
+    (loc=CHC; port=3; out=1; loc:=TPO; port:=1; out:=0)
+ +
+    (loc=TPO; port=1; out=1; loc:=CHC; port:=3; out:=0)
+ +
+    (loc=CHC; port=4; out=1; loc:=NLS; port:=2; out:=0)
+ +
+    (loc=NLS; port=2; out=1; loc:=CHC; port:=4; out:=0)
+ +
+    (loc=Syd; port=1; out=1; loc:=AKL; port:=2; out:=0)
+ +
+    (loc=AKL; port=2; out=1; loc:=Syd; port:=1; out:=0)
+ +
+    (loc=MTA; port=1; out=1; loc:=AKL; port:=3; out:=0)
+ +
+    (loc=AKL; port=3; out=1; loc:=MTA; port:=1; out:=0)
+ +
+    (loc=MUP; port=3; out=1; loc:=NAP; port:=1; out:=0)
+ +
+    (loc=NAP; port=1; out=1; loc:=MUP; port:=3; out:=0)
+ +
+    (loc=NSH; port=1; out=1; loc:=WRK; port:=1; out:=0)
+ +
+    (loc=WRK; port=1; out=1; loc:=NSH; port:=1; out:=0)
+ +
+    (loc=NSH; port=2; out=1; loc:=AKL; port:=4; out:=0)
+ +
+    (loc=AKL; port=4; out=1; loc:=NSH; port:=2; out:=0)
+ +
+    (loc=NSH; port=2; out=1; loc:=AKL; port:=4; out:=0)
+ +
+    (loc=AKL; port=4; out=1; loc:=NSH; port:=2; out:=0)
+ +
+    (loc=LAX; port=1; out=1; loc:=AKL; port:=5; out:=0)
+ +
+    (loc=AKL; port=5; out=1; loc:=LAX; port:=1; out:=0)
+ +
+    (loc=TAU; port=1; out=1; loc:=ROT; port:=1; out:=0)
+ +
+    (loc=ROT; port=1; out=1; loc:=TAU; port:=1; out:=0)
+ +
+    (loc=GIS; port=1; out=1; loc:=NAP; port:=2; out:=0)
+ +
+    (loc=NAP; port=2; out=1; loc:=GIS; port:=1; out:=0)
+ +
+    (loc=NAP; port=3; out=1; loc:=ROT; port:=2; out:=0)
+ +
+    (loc=ROT; port=2; out=1; loc:=NAP; port:=3; out:=0)
+ +
+    (loc=ROT; port=3; out=1; loc:=HLT; port:=1; out:=0)
+ +
+    (loc=HLT; port=1; out=1; loc:=ROT; port:=3; out:=0)
+ +
+    (loc=HLT; port=2; out=1; loc:=AKL; port:=6; out:=0)
+ +
+    (loc=AKL; port=6; out=1; loc:=HLT; port:=2; out:=0)
+
+pol =
+    (loc=AKL; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=HLT; port:=6; out:=1)
+ +
+    (loc=AKL; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=LAX; port:=5; out:=1)
+ +
+    (loc=AKL; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=MTA; port:=3; out:=1)
+ +
+    (loc=AKL; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=NSH; port:=4; out:=1)
+ +
+    (loc=AKL; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=ROT; port:=6; out:=1)
+ +
+    (loc=AKL; out=0; dst=Syd; port:=2; out:=1)
+ +
+    (loc=AKL; out=0; dst=TAU; port:=6; out:=1)
+ +
+    (loc=AKL; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=AKL; out=0; dst=WRK; port:=4; out:=1)
+ +
+    (loc=AVL; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=GIS; port:=3; out:=1)
+ +
+    (loc=AVL; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=MUP; port:=3; out:=1)
+ +
+    (loc=AVL; out=0; dst=NAP; port:=3; out:=1)
+ +
+    (loc=AVL; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=POR; port:=2; out:=1)
+ +
+    (loc=AVL; out=0; dst=ROT; port:=3; out:=1)
+ +
+    (loc=AVL; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=TAU; port:=3; out:=1)
+ +
+    (loc=AVL; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=AVL; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=LCN; port:=2; out:=1)
+ +
+    (loc=CHC; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=NLS; port:=4; out:=1)
+ +
+    (loc=CHC; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=TPO; port:=3; out:=1)
+ +
+    (loc=CHC; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=CHC; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=INV; port:=4; out:=1)
+ +
+    (loc=DUD; out=0; dst=IVM; port:=3; out:=1)
+ +
+    (loc=DUD; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=LCN; port:=2; out:=1)
+ +
+    (loc=DUD; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=DUD; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=GIS; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=HLT; out=0; dst=AKL; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=HLT; out=0; dst=CHC; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=DUD; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=HLT; out=0; dst=INV; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=IVM; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=LAX; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=LCN; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=MTA; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=HLT; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=HLT; out=0; dst=NLS; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=NPL; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=NSH; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=PNR; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=HLT; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=HLT; out=0; dst=Syd; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=HLT; out=0; dst=TPO; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=WAG; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=WLG; port:=2; out:=1)
+ +
+    (loc=HLT; out=0; dst=WRK; port:=2; out:=1)
+ +
+    (loc=INV; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=INV; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=IVM; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=LAX; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=CHC; port:=2; out:=1)
+ +
+    (loc=LCN; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=NLS; port:=2; out:=1)
+ +
+    (loc=LCN; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=TPO; port:=2; out:=1)
+ +
+    (loc=LCN; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=LCN; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=MTA; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=MUP; out=0; dst=AKL; port:=2; out:=1)
+ +
+    (loc=MUP; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=MUP; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=MUP; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=MUP; out=0; dst=GIS; port:=3; out:=1)
+ +
+    (loc=MUP; out=0; dst=HLT; port:=2; out:=1)
+ +
+    (loc=MUP; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=MUP; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=MUP; out=0; dst=LAX; port:=2; out:=1)
+ +
+    (loc=MUP; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=MUP; out=0; dst=MTA; port:=2; out:=1)
+ +
+    (loc=MUP; out=0; dst=NAP; port:=3; out:=1)
+ +
+    (loc=MUP; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=MUP; out=0; dst=NPL; port:=2; out:=1)
+ +
+    (loc=MUP; out=0; dst=NSH; port:=2; out:=1)
+ +
+    (loc=MUP; out=0; dst=PNR; port:=2; out:=1)
+ +
+    (loc=MUP; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=MUP; out=0; dst=ROT; port:=3; out:=1)
+ +
+    (loc=MUP; out=0; dst=Syd; port:=2; out:=1)
+ +
+    (loc=MUP; out=0; dst=TAU; port:=3; out:=1)
+ +
+    (loc=MUP; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=MUP; out=0; dst=WAG; port:=2; out:=1)
+ +
+    (loc=MUP; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=MUP; out=0; dst=WRK; port:=2; out:=1)
+ +
+    (loc=NAP; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=GIS; port:=2; out:=1)
+ +
+    (loc=NAP; out=0; dst=HLT; port:=3; out:=1)
+ +
+    (loc=NAP; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=ROT; port:=3; out:=1)
+ +
+    (loc=NAP; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=TAU; port:=3; out:=1)
+ +
+    (loc=NAP; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=NAP; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=CHC; port:=2; out:=1)
+ +
+    (loc=NLS; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=LCN; port:=2; out:=1)
+ +
+    (loc=NLS; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=TPO; port:=2; out:=1)
+ +
+    (loc=NLS; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=NLS; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=NPL; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=NSH; out=0; dst=AKL; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=AVL; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=CHC; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=DUD; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=GIS; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=HLT; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=INV; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=IVM; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=LAX; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=LCN; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=MTA; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=MUP; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=NAP; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=NLS; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=NPL; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=PNR; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=POR; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=ROT; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=Syd; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=TAU; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=TPO; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=WAG; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=WLG; port:=2; out:=1)
+ +
+    (loc=NSH; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=PNR; out=0; dst=AKL; port:=2; out:=1)
+ +
+    (loc=PNR; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=PNR; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=PNR; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=PNR; out=0; dst=GIS; port:=5; out:=1)
+ +
+    (loc=PNR; out=0; dst=HLT; port:=2; out:=1)
+ +
+    (loc=PNR; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=PNR; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=PNR; out=0; dst=LAX; port:=2; out:=1)
+ +
+    (loc=PNR; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=PNR; out=0; dst=MTA; port:=2; out:=1)
+ +
+    (loc=PNR; out=0; dst=MUP; port:=5; out:=1)
+ +
+    (loc=PNR; out=0; dst=NAP; port:=5; out:=1)
+ +
+    (loc=PNR; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=PNR; out=0; dst=NPL; port:=3; out:=1)
+ +
+    (loc=PNR; out=0; dst=NSH; port:=2; out:=1)
+ +
+    (loc=PNR; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=PNR; out=0; dst=ROT; port:=5; out:=1)
+ +
+    (loc=PNR; out=0; dst=Syd; port:=2; out:=1)
+ +
+    (loc=PNR; out=0; dst=TAU; port:=5; out:=1)
+ +
+    (loc=PNR; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=PNR; out=0; dst=WAG; port:=4; out:=1)
+ +
+    (loc=PNR; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=PNR; out=0; dst=WRK; port:=2; out:=1)
+ +
+    (loc=POR; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=POR; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=ROT; out=0; dst=AKL; port:=3; out:=1)
+ +
+    (loc=ROT; out=0; dst=AVL; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=CHC; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=DUD; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=GIS; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=HLT; port:=3; out:=1)
+ +
+    (loc=ROT; out=0; dst=INV; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=IVM; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=LAX; port:=3; out:=1)
+ +
+    (loc=ROT; out=0; dst=LCN; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=MTA; port:=3; out:=1)
+ +
+    (loc=ROT; out=0; dst=MUP; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=NAP; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=NLS; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=NPL; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=NSH; port:=3; out:=1)
+ +
+    (loc=ROT; out=0; dst=PNR; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=POR; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=Syd; port:=3; out:=1)
+ +
+    (loc=ROT; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=ROT; out=0; dst=TPO; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=WAG; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=WLG; port:=2; out:=1)
+ +
+    (loc=ROT; out=0; dst=WRK; port:=3; out:=1)
+ +
+    (loc=Syd; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=Syd; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=TAU; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=TPO; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=WLG; port:=1; out:=1)
+ +
+    (loc=WAG; out=0; dst=WRK; port:=1; out:=1)
+ +
+    (loc=WLG; out=0; dst=AKL; port:=3; out:=1)
+ +
+    (loc=WLG; out=0; dst=AVL; port:=2; out:=1)
+ +
+    (loc=WLG; out=0; dst=CHC; port:=4; out:=1)
+ +
+    (loc=WLG; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=WLG; out=0; dst=GIS; port:=2; out:=1)
+ +
+    (loc=WLG; out=0; dst=HLT; port:=3; out:=1)
+ +
+    (loc=WLG; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=WLG; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=WLG; out=0; dst=LAX; port:=3; out:=1)
+ +
+    (loc=WLG; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=WLG; out=0; dst=MTA; port:=3; out:=1)
+ +
+    (loc=WLG; out=0; dst=MUP; port:=2; out:=1)
+ +
+    (loc=WLG; out=0; dst=NAP; port:=2; out:=1)
+ +
+    (loc=WLG; out=0; dst=NLS; port:=5; out:=1)
+ +
+    (loc=WLG; out=0; dst=NPL; port:=3; out:=1)
+ +
+    (loc=WLG; out=0; dst=NSH; port:=3; out:=1)
+ +
+    (loc=WLG; out=0; dst=PNR; port:=3; out:=1)
+ +
+    (loc=WLG; out=0; dst=POR; port:=2; out:=1)
+ +
+    (loc=WLG; out=0; dst=ROT; port:=2; out:=1)
+ +
+    (loc=WLG; out=0; dst=Syd; port:=3; out:=1)
+ +
+    (loc=WLG; out=0; dst=TAU; port:=2; out:=1)
+ +
+    (loc=WLG; out=0; dst=TPO; port:=4; out:=1)
+ +
+    (loc=WLG; out=0; dst=WAG; port:=3; out:=1)
+ +
+    (loc=WLG; out=0; dst=WRK; port:=3; out:=1)
+ +
+    (loc=WRK; out=0; dst=AKL; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=AVL; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=CHC; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=DUD; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=GIS; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=HLT; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=INV; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=IVM; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=LAX; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=LCN; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=MTA; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=MUP; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=NAP; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=NLS; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=NPL; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=NSH; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=PNR; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=POR; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=ROT; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=Syd; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=TAU; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=TPO; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=WAG; port:=1; out:=1)
+ +
+    (loc=WRK; out=0; dst=WLG; port:=1; out:=1)
+
+hole = skip
+hop = hole; pol; topo
+net = (hop; dup)*
+
+check loc=Syd; dst=PNR; net; loc=PNR == drop
+check loc=HLT; dst=CHC; net; loc=CHC == drop
+
+check (loc=CHC; port=0; out=0; dst=MUP; loc:=WLG; port:=4 ; dup; loc:=AVL; port:=1 ; dup; loc:=MUP; port:=1 ) <= hop; dup; hop; dup; hop
+check (loc=NSH; port=0; out=0; dst=POR; loc:=AKL; port:=4 ; dup; loc:=PNR; port:=2 ; dup; loc:=WLG; port:=3 ; dup; loc:=AVL; port:=1 ; dup; loc:=POR; port:=1 ) <= hop; dup; hop; dup; hop; dup; hop; dup; hop
+check (loc=POR; port=0; out=0; dst=IVM; loc:=AVL; port:=2 ; dup; loc:=WLG; port:=2 ; dup; loc:=DUD; port:=1 ; dup; loc:=IVM; port:=1 ) <= hop; dup; hop; dup; hop; dup; hop

@@ -9,7 +9,8 @@ from collections import defaultdict
 import subprocess
 from pathlib import Path
 import re
-
+import random
+import argparse
 
 def load_graph(filename):
     """Load a Topology Zoo GML file."""
@@ -199,7 +200,7 @@ def export_dot(g, filename, engine="neato"):
     print(f"Wrote {pdf_path}")
 
 
-def write_netkat(g, filename):
+def write_netkat(g, filename, fmt_katch):
     """
     Generate a NetKAT model from an igraph topology.
 
@@ -213,9 +214,16 @@ def write_netkat(g, filename):
     """
 
     inline_consts = True
-    fmt_katch = True
-    expand_indices = True # requires inline_consts=True
-    emit_nonempty = False
+    expand_indices = False # requires inline_consts=True
+    suppress_nonempty = True
+    num_bad_paths = 2
+    num_good_paths = 3
+    rand_seed = 3
+
+    random.seed(rand_seed)
+
+    path = Path(filename)
+    netkat_path = path.with_suffix(".nksynth" if fmt_katch else ".nkpl")
 
     def nk_name(label: str) -> str:
         """
@@ -259,7 +267,7 @@ def write_netkat(g, filename):
     #labels = g.vs["label"]
     labels = [nk_name(v["label"]) for v in g.vs]
 
-    with open(filename, "w") as f:
+    with open(netkat_path, "w") as f:
 
         ############################################################
         # Constants
@@ -504,15 +512,15 @@ def write_netkat(g, filename):
 
         ############################################################
 
-        f.write(f"{'def ' if fmt_katch else ''}hol = {'1' if fmt_katch else 'skip'}\n")
-        f.write(f"{'def ' if fmt_katch else ''}hop = hol; pol; topo\n")
+        f.write(f"{'hole h1' if fmt_katch else 'hole = skip'}\n")
+        f.write(f"{'def ' if fmt_katch else ''}hop = {'h1' if fmt_katch else 'hole'}; pol; topo\n")
         f.write(f"{'def ' if fmt_katch else ''}net = (hop; dup)*\n\n")
 
         ############################################################
         # Reachability checks
         ############################################################
 
-        if emit_nonempty:
+        if not suppress_nonempty:
             for s in range(g.vcount()):
                 for d in range(g.vcount()):
                     if s == d:
@@ -533,7 +541,26 @@ def write_netkat(g, filename):
         # Paths
         ############################################################
 
-        for p in paths:
+        bad_paths = random.sample(paths, k=num_bad_paths)
+
+        for p in bad_paths:
+            name = " -> ".join(labels[v] for v in p)
+            paths.remove(p)
+            s_label = str_label(p[0])
+            d_label = str_label(p[-1])
+            #f.write(f"bad path = {name}, first={s_label}, last={d_label}\n")
+
+            f.write(
+                f"{'assert' if fmt_katch else 'check'} {str_field_test('loc',s_label)}; "
+                f"{str_field_test('dst',d_label)}; net; "
+                f"{str_field_test('loc',d_label)} {'=' if fmt_katch else '=='} {'0' if fmt_katch else 'drop'}\n"
+            )
+
+        f.write("\n")
+
+        good_paths = random.sample(paths, min(num_good_paths, len(paths)))
+
+        for p in good_paths:
             name = " -> ".join(labels[v] for v in p)
             if True or name=="POR -> AVL -> WLG -> NLS":
                 #print("\n\nPath:", name)
@@ -567,29 +594,32 @@ def write_netkat(g, filename):
 
                 f.write(
                     f"{'assert' if fmt_katch else 'check'} ({first}{'; dup; '.join(items)})"
-                    f" + ({'; dup; '.join(hops)})"
-                    f" {'=' if fmt_katch else '=='} {'; dup; '.join(hops)}\n"
+                    f" <= {'; dup; '.join(hops)}\n"
                 )
+    print(f"Wrote {netkat_path}")
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage:")
-        print("    python experiment.py <file.gml>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--nkpl", action="store_true")
+    parser.add_argument("filenames", nargs="+")
 
-    filename = sys.argv[1]
+    args = parser.parse_args()
 
-    g = load_graph(filename)
+    print(args.nkpl)
+    print(args.filenames)
 
-    print_summary(g)
-    print_nodes(g)
-    print_edges(g)
+    for filename in args.filenames:
+        g = load_graph(filename)
 
-    export_dot(g, filename, engine="neato")
-    write_netkat(g, filename+".nkpl")
+        print_summary(g)
+        print_nodes(g)
+        print_edges(g)
 
-    #draw_graph(g)
+        export_dot(g, filename, engine="neato")
+        write_netkat(g, filename, not args.nkpl)
+
+        #draw_graph(g)
 
 
 if __name__ == "__main__":
