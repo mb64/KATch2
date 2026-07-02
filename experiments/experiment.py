@@ -417,6 +417,7 @@ def write_netkat(g, filename):
             #
 
             next_hop = {}
+            paths = []
 
             for src in range(g.vcount()):
                 for dst in range(g.vcount()):
@@ -425,7 +426,7 @@ def write_netkat(g, filename):
                         continue
 
                     path = g.get_shortest_paths(src, to=dst, output="vpath")[0]
-                    print("Path:", " -> ".join(labels[v] for v in path))
+                    paths.append(path)
 
                     if len(path) < 2:
                         continue
@@ -521,10 +522,55 @@ def write_netkat(g, filename):
                     s_label = str(label_table[s_label])
                     d_label = str(label_table[d_label])
 
+                #f.write(
+                #    f"check {str_field_test('loc',s_label)}; "
+                #    f"net; "
+                #    f"{str_field_test('loc',d_label)} !== drop\n"
+                #)
+
+        ############################################################
+        # Paths
+        ############################################################
+
+        for p in paths:
+            name = " -> ".join(labels[v] for v in p)
+            if True or name=="POR -> AVL -> WLG -> NLS":
+                print("\n\nPath:", name)
+                print("Ports: ", port_of)
+                items = []
+                first = ""
+                prev = None
+                for x in p:
+                    print("Item: ", labels[x])
+
+                    x_label = labels[x]
+
+                    if inline_consts:
+                        x_label = str(label_table[x_label])
+
+                    if prev is None:
+                        first = (
+                            f"{str_field_test('loc',x_label)}; "
+                            f"{str_field_test('port',0)}; "
+                            f"{str_field_test('out',0)}; "
+                        )
+                    else:
+                        print("  port: ", str(port_of[(x,prev)]))
+                        items.append(
+                            f"{str_field_assign('loc',x_label)}; "
+                            f"{str_field_assign('port',port_of[(x,prev)])} "
+                        )
+                    prev = x
+                first += f"{str_field_test('dst',x_label)}; "
+                hops = ["hop"] * len(items)
+                print("First: ", first)
+                print("Items: ", "; dup; ".join(items))
+                print("Hops: ", "; dup; ".join(hops))
+
                 f.write(
-                    f"check {str_field_test('loc',s_label)}; "
-                    f"net; "
-                    f"{str_field_test('loc',d_label)} !== drop\n"
+                    f"check ({first}{'; dup; '.join(items)})"
+                    f" + ({'; dup; '.join(hops)})"
+                    f" == {'; dup; '.join(hops)}\n"
                 )
 
 
