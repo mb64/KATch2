@@ -212,8 +212,10 @@ def write_netkat(g, filename):
             port  -- output/input port
     """
 
-    inline_consts = False
-    fmt_katch = False
+    inline_consts = True
+    fmt_katch = True
+    expand_indices = True # requires inline_consts=True
+    emit_nonempty = False
 
     def nk_name(label: str) -> str:
         """
@@ -281,31 +283,44 @@ def write_netkat(g, filename):
                 case "loc":
                     return (0,loc_bits)
                 case "dst":
-                    return (loc_bits,loc_bits)
+                    return (loc_bits,loc_bits+loc_bits)
                 case "port":
-                    return (loc_bits+loc_bits,port_bits)
+                    return (loc_bits+loc_bits,loc_bits+loc_bits+port_bits)
                 case "out":
-                    return (loc_bits+loc_bits+port_bits,1)
+                    return (loc_bits+loc_bits+port_bits,loc_bits+loc_bits+port_bits+1)
+
+        def str_field_ops(f, v, op1, op2):
+            if fmt_katch:
+                bits = bits_field(f)
+                if expand_indices:
+                    width = bits[1]-bits[0]
+                    binary = f"{int(v):0{width}b}"
+                    pairs = list(zip(range(bits[0], bits[1]), map(int, binary)))
+                    s = "; ".join(f"x{i}{op2}{bit}" for i, bit in pairs)
+                else:
+                    s = f"x[{bits[0]}..{bits[1]}]{op1}{v}"
+                #print(f"{s} --> {pairs}")
+                return s
+            else:
+                return f"{f}{op2}{v}"
 
         def str_field_test(f, v):
-            if fmt_katch:
-                bits = bits_field(f)
-                return f"x[{bits[0]}..{bits[1]}]~{v}"
-            else:
-                return f"{f}={v}"
+            return str_field_ops(f, v, "~", "=")
 
         def str_field_assign(f, v):
-            if fmt_katch:
-                bits = bits_field(f)
-                return f"x[{bits[0]}..{bits[1]}]:={v}"
-            else:
-                return f"{f}:={v}"
+            return str_field_ops(f, v, ":=", ":=")
+
+        def str_label(u):
+            u_label = labels[u]
+            if inline_consts:
+                u_label = str(label_table[u_label])
+            return u_label
 
         ############################################################
         # topo
         ############################################################
 
-        f.write("topo =\n")
+        f.write(f"{'def ' if fmt_katch else ''}topo =\n")
 
         first = True
 
@@ -323,12 +338,8 @@ def write_netkat(g, filename):
                     f.write("\n +\n")
                 first = False
 
-                src_label = labels[src]
-                dst_label = labels[dst]
-
-                if inline_consts:
-                    src_label = str(label_table[src_label])
-                    dst_label = str(label_table[dst_label])
+                src_label = str_label(src)
+                dst_label = str_label(dst)
 
                 f.write(
                     "    "
@@ -346,10 +357,10 @@ def write_netkat(g, filename):
         # pol
         ############################################################
 
+        f.write(f"{'def ' if fmt_katch else ''}pol =\n")
+
         flood = False
         if flood:
-            f.write("\npol =\n")
-
             first = True
 
             for here in range(g.vcount()):
@@ -370,10 +381,7 @@ def write_netkat(g, filename):
 
                     for out_port in sorted(ports):
 
-                        here_label = labels[here]
-
-                        if inline_consts:
-                            here_label = str(label_table[here_label])
+                        here_label = str_label(here)
 
                         rule = (
                             f"({str_field_test('loc',here_label)}; "
@@ -461,8 +469,6 @@ def write_netkat(g, filename):
             # Emit forwarding policy
             ############################################################
 
-            f.write("pol =\n")
-
             first = True
 
             for (here, dst), nxt in sorted(
@@ -475,12 +481,8 @@ def write_netkat(g, filename):
 
                 out_port = port_of[(here, nxt)]
 
-                here_label = labels[here]
-                dst_label = labels[dst]
-
-                if inline_consts:
-                    here_label = str(label_table[here_label])
-                    dst_label = str(label_table[dst_label])
+                here_label = str_label(here)
+                dst_label = str_label(dst)
 
                 rule = (
                     f"({str_field_test('loc',here_label)}; "
@@ -502,33 +504,30 @@ def write_netkat(g, filename):
 
         ############################################################
 
-        f.write("hole = skip\n")
-        f.write("hop = hole . pol . topo\n")
-        f.write("net = (hop . δ)*\n\n")
+        f.write(f"{'def ' if fmt_katch else ''}hol = {'1' if fmt_katch else 'skip'}\n")
+        f.write(f"{'def ' if fmt_katch else ''}hop = hol; pol; topo\n")
+        f.write(f"{'def ' if fmt_katch else ''}net = (hop; dup)*\n\n")
 
         ############################################################
         # Reachability checks
         ############################################################
 
-        for s in range(g.vcount()):
-            for d in range(g.vcount()):
-                if s == d:
-                    continue
+        if emit_nonempty:
+            for s in range(g.vcount()):
+                for d in range(g.vcount()):
+                    if s == d:
+                        continue
 
-                s_label = labels[s]
-                d_label = labels[d]
+                    s_label = str_label(s)
+                    d_label = str_label(d)
 
-                if inline_consts:
-                    s_label = str(label_table[s_label])
-                    d_label = str(label_table[d_label])
+                    f.write(
+                        f"{'assert' if fmt_katch else 'check'} {str_field_test('loc',s_label)}; "
+                        f"net; "
+                        f"{str_field_test('loc',d_label)} {'!=' if fmt_katch else '!=='} drop\n"
+                    )
 
-                f.write(
-                    f"check {str_field_test('loc',s_label)}; "
-                    f"net; "
-                    f"{str_field_test('loc',d_label)} !== drop\n"
-                )
-
-        f.write("\n")
+            f.write("\n")
 
         ############################################################
         # Paths
@@ -545,10 +544,7 @@ def write_netkat(g, filename):
                 for x in p:
                     #print("Item: ", labels[x])
 
-                    x_label = labels[x]
-
-                    if inline_consts:
-                        x_label = str(label_table[x_label])
+                    x_label = str_label(x)
 
                     if prev is None:
                         first = (
@@ -570,16 +566,16 @@ def write_netkat(g, filename):
                 #print("Hops: ", "; dup; ".join(hops))
 
                 f.write(
-                    f"check ({first}{'; dup; '.join(items)})"
+                    f"{'assert' if fmt_katch else 'check'} ({first}{'; dup; '.join(items)})"
                     f" + ({'; dup; '.join(hops)})"
-                    f" == {'; dup; '.join(hops)}\n"
+                    f" {'=' if fmt_katch else '=='} {'; dup; '.join(hops)}\n"
                 )
 
 
 def main():
     if len(sys.argv) != 2:
         print("Usage:")
-        print("    python topology_zoo.py <file.gml>")
+        print("    python experiment.py <file.gml>")
         sys.exit(1)
 
     filename = sys.argv[1]
