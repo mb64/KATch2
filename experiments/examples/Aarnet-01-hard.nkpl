@@ -1,0 +1,822 @@
+Sydney1 = 1
+Brisbane2 = 2
+Canberra1 = 3
+Sydney2 = 4
+Townsville = 5
+Cairns = 6
+Brisbane1 = 7
+Rockhampton = 8
+Armidale = 9
+Hobart = 10
+Canberra2 = 11
+Perth1 = 12
+Perth2 = 13
+Adelaide1 = 14
+Adelaide2 = 15
+Melbourne1 = 16
+Melbourne2 = 17
+Alice_Springs = 18
+Darwin = 19
+
+topo =
+    (loc=Sydney1; port=1; out=1; loc:=Canberra2; port:=1; out:=0)
+ +
+    (loc=Canberra2; port=1; out=1; loc:=Sydney1; port:=1; out:=0)
+ +
+    (loc=Sydney1; port=2; out=1; loc:=Sydney2; port:=1; out:=0)
+ +
+    (loc=Sydney2; port=1; out=1; loc:=Sydney1; port:=2; out:=0)
+ +
+    (loc=Sydney1; port=3; out=1; loc:=Brisbane1; port:=1; out:=0)
+ +
+    (loc=Brisbane1; port=1; out=1; loc:=Sydney1; port:=3; out:=0)
+ +
+    (loc=Brisbane2; port=1; out=1; loc:=Sydney2; port:=2; out:=0)
+ +
+    (loc=Sydney2; port=2; out=1; loc:=Brisbane2; port:=1; out:=0)
+ +
+    (loc=Brisbane2; port=2; out=1; loc:=Brisbane1; port:=2; out:=0)
+ +
+    (loc=Brisbane1; port=2; out=1; loc:=Brisbane2; port:=2; out:=0)
+ +
+    (loc=Canberra1; port=1; out=1; loc:=Canberra2; port:=2; out:=0)
+ +
+    (loc=Canberra2; port=2; out=1; loc:=Canberra1; port:=1; out:=0)
+ +
+    (loc=Canberra1; port=2; out=1; loc:=Melbourne1; port:=1; out:=0)
+ +
+    (loc=Melbourne1; port=1; out=1; loc:=Canberra1; port:=2; out:=0)
+ +
+    (loc=Sydney2; port=3; out=1; loc:=Armidale; port:=1; out:=0)
+ +
+    (loc=Armidale; port=1; out=1; loc:=Sydney2; port:=3; out:=0)
+ +
+    (loc=Sydney2; port=4; out=1; loc:=Melbourne2; port:=1; out:=0)
+ +
+    (loc=Melbourne2; port=1; out=1; loc:=Sydney2; port:=4; out:=0)
+ +
+    (loc=Townsville; port=1; out=1; loc:=Cairns; port:=1; out:=0)
+ +
+    (loc=Cairns; port=1; out=1; loc:=Townsville; port:=1; out:=0)
+ +
+    (loc=Townsville; port=2; out=1; loc:=Rockhampton; port:=1; out:=0)
+ +
+    (loc=Rockhampton; port=1; out=1; loc:=Townsville; port:=2; out:=0)
+ +
+    (loc=Brisbane1; port=3; out=1; loc:=Rockhampton; port:=2; out:=0)
+ +
+    (loc=Rockhampton; port=2; out=1; loc:=Brisbane1; port:=3; out:=0)
+ +
+    (loc=Hobart; port=1; out=1; loc:=Melbourne2; port:=2; out:=0)
+ +
+    (loc=Melbourne2; port=2; out=1; loc:=Hobart; port:=1; out:=0)
+ +
+    (loc=Hobart; port=2; out=1; loc:=Melbourne1; port:=2; out:=0)
+ +
+    (loc=Melbourne1; port=2; out=1; loc:=Hobart; port:=2; out:=0)
+ +
+    (loc=Perth1; port=1; out=1; loc:=Perth2; port:=1; out:=0)
+ +
+    (loc=Perth2; port=1; out=1; loc:=Perth1; port:=1; out:=0)
+ +
+    (loc=Perth1; port=2; out=1; loc:=Adelaide1; port:=1; out:=0)
+ +
+    (loc=Adelaide1; port=1; out=1; loc:=Perth1; port:=2; out:=0)
+ +
+    (loc=Perth2; port=2; out=1; loc:=Adelaide2; port:=1; out:=0)
+ +
+    (loc=Adelaide2; port=1; out=1; loc:=Perth2; port:=2; out:=0)
+ +
+    (loc=Adelaide1; port=2; out=1; loc:=Darwin; port:=1; out:=0)
+ +
+    (loc=Darwin; port=1; out=1; loc:=Adelaide1; port:=2; out:=0)
+ +
+    (loc=Adelaide1; port=3; out=1; loc:=Adelaide2; port:=2; out:=0)
+ +
+    (loc=Adelaide2; port=2; out=1; loc:=Adelaide1; port:=3; out:=0)
+ +
+    (loc=Adelaide1; port=4; out=1; loc:=Melbourne1; port:=3; out:=0)
+ +
+    (loc=Melbourne1; port=3; out=1; loc:=Adelaide1; port:=4; out:=0)
+ +
+    (loc=Adelaide2; port=3; out=1; loc:=Melbourne2; port:=3; out:=0)
+ +
+    (loc=Melbourne2; port=3; out=1; loc:=Adelaide2; port:=3; out:=0)
+ +
+    (loc=Adelaide2; port=4; out=1; loc:=Alice_Springs; port:=1; out:=0)
+ +
+    (loc=Alice_Springs; port=1; out=1; loc:=Adelaide2; port:=4; out:=0)
+ +
+    (loc=Melbourne1; port=4; out=1; loc:=Melbourne2; port:=4; out:=0)
+ +
+    (loc=Melbourne2; port=4; out=1; loc:=Melbourne1; port:=4; out:=0)
+ +
+    (loc=Alice_Springs; port=2; out=1; loc:=Darwin; port:=2; out:=0)
+ +
+    (loc=Darwin; port=2; out=1; loc:=Alice_Springs; port:=2; out:=0)
+
+pol =
+    (loc=Adelaide1; out=0; dst=Adelaide2; port:=3; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Alice_Springs; port:=3; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Armidale; port:=3; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Brisbane1; port:=3; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Brisbane2; port:=3; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Cairns; port:=3; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Canberra1; port:=4; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Canberra2; port:=4; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Darwin; port:=2; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Hobart; port:=4; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Melbourne1; port:=4; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Melbourne2; port:=3; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Perth1; port:=1; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Perth2; port:=1; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Rockhampton; port:=3; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Sydney1; port:=3; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Sydney2; port:=3; out:=1)
+ +
+    (loc=Adelaide1; out=0; dst=Townsville; port:=3; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Adelaide1; port:=2; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Alice_Springs; port:=4; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Armidale; port:=3; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Brisbane1; port:=3; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Brisbane2; port:=3; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Cairns; port:=3; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Canberra1; port:=2; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Canberra2; port:=2; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Darwin; port:=2; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Hobart; port:=3; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Melbourne1; port:=2; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Melbourne2; port:=3; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Perth1; port:=1; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Perth2; port:=1; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Rockhampton; port:=3; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Sydney1; port:=3; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Sydney2; port:=3; out:=1)
+ +
+    (loc=Adelaide2; out=0; dst=Townsville; port:=3; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Adelaide1; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Adelaide2; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Armidale; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Brisbane1; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Brisbane2; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Cairns; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Canberra1; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Canberra2; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Darwin; port:=2; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Hobart; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Melbourne1; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Melbourne2; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Perth1; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Perth2; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Rockhampton; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Sydney1; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Sydney2; port:=1; out:=1)
+ +
+    (loc=Alice_Springs; out=0; dst=Townsville; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Adelaide1; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Adelaide2; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Alice_Springs; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Brisbane1; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Brisbane2; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Cairns; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Canberra1; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Canberra2; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Darwin; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Hobart; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Melbourne1; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Melbourne2; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Perth1; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Perth2; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Rockhampton; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Sydney1; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Sydney2; port:=1; out:=1)
+ +
+    (loc=Armidale; out=0; dst=Townsville; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Adelaide1; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Adelaide2; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Alice_Springs; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Armidale; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Brisbane2; port:=2; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Cairns; port:=3; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Canberra1; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Canberra2; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Darwin; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Hobart; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Melbourne1; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Melbourne2; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Perth1; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Perth2; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Rockhampton; port:=3; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Sydney1; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Sydney2; port:=1; out:=1)
+ +
+    (loc=Brisbane1; out=0; dst=Townsville; port:=3; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Adelaide1; port:=1; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Adelaide2; port:=1; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Alice_Springs; port:=1; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Armidale; port:=1; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Brisbane1; port:=2; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Cairns; port:=2; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Canberra1; port:=1; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Canberra2; port:=1; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Darwin; port:=1; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Hobart; port:=1; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Melbourne1; port:=1; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Melbourne2; port:=1; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Perth1; port:=1; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Perth2; port:=1; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Rockhampton; port:=2; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Sydney1; port:=1; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Sydney2; port:=1; out:=1)
+ +
+    (loc=Brisbane2; out=0; dst=Townsville; port:=2; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Adelaide1; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Adelaide2; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Alice_Springs; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Armidale; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Brisbane1; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Brisbane2; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Canberra1; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Canberra2; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Darwin; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Hobart; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Melbourne1; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Melbourne2; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Perth1; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Perth2; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Rockhampton; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Sydney1; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Sydney2; port:=1; out:=1)
+ +
+    (loc=Cairns; out=0; dst=Townsville; port:=1; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Adelaide1; port:=2; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Adelaide2; port:=2; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Alice_Springs; port:=2; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Armidale; port:=1; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Brisbane1; port:=1; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Brisbane2; port:=1; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Cairns; port:=1; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Canberra2; port:=1; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Darwin; port:=2; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Hobart; port:=2; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Melbourne1; port:=2; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Melbourne2; port:=2; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Perth1; port:=2; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Perth2; port:=2; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Rockhampton; port:=1; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Sydney1; port:=1; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Sydney2; port:=1; out:=1)
+ +
+    (loc=Canberra1; out=0; dst=Townsville; port:=1; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Adelaide1; port:=2; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Adelaide2; port:=1; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Alice_Springs; port:=1; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Armidale; port:=1; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Brisbane1; port:=1; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Brisbane2; port:=1; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Cairns; port:=1; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Canberra1; port:=2; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Darwin; port:=2; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Hobart; port:=2; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Melbourne1; port:=2; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Melbourne2; port:=1; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Perth1; port:=2; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Perth2; port:=1; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Rockhampton; port:=1; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Sydney1; port:=1; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Sydney2; port:=1; out:=1)
+ +
+    (loc=Canberra2; out=0; dst=Townsville; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Adelaide1; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Adelaide2; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Alice_Springs; port:=2; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Armidale; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Brisbane1; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Brisbane2; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Cairns; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Canberra1; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Canberra2; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Hobart; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Melbourne1; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Melbourne2; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Perth1; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Perth2; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Rockhampton; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Sydney1; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Sydney2; port:=1; out:=1)
+ +
+    (loc=Darwin; out=0; dst=Townsville; port:=1; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Adelaide1; port:=2; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Adelaide2; port:=1; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Alice_Springs; port:=1; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Armidale; port:=1; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Brisbane1; port:=1; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Brisbane2; port:=1; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Cairns; port:=1; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Canberra1; port:=2; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Canberra2; port:=2; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Darwin; port:=2; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Melbourne1; port:=2; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Melbourne2; port:=1; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Perth1; port:=2; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Perth2; port:=1; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Rockhampton; port:=1; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Sydney1; port:=1; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Sydney2; port:=1; out:=1)
+ +
+    (loc=Hobart; out=0; dst=Townsville; port:=1; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Adelaide1; port:=3; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Adelaide2; port:=3; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Alice_Springs; port:=3; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Armidale; port:=4; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Brisbane1; port:=1; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Brisbane2; port:=4; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Cairns; port:=1; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Canberra1; port:=1; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Canberra2; port:=1; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Darwin; port:=3; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Hobart; port:=2; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Melbourne2; port:=4; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Perth1; port:=3; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Perth2; port:=3; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Rockhampton; port:=1; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Sydney1; port:=1; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Sydney2; port:=4; out:=1)
+ +
+    (loc=Melbourne1; out=0; dst=Townsville; port:=1; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Adelaide1; port:=3; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Adelaide2; port:=3; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Alice_Springs; port:=3; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Armidale; port:=1; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Brisbane1; port:=1; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Brisbane2; port:=1; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Cairns; port:=1; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Canberra1; port:=4; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Canberra2; port:=1; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Darwin; port:=3; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Hobart; port:=2; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Melbourne1; port:=4; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Perth1; port:=3; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Perth2; port:=3; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Rockhampton; port:=1; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Sydney1; port:=1; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Sydney2; port:=1; out:=1)
+ +
+    (loc=Melbourne2; out=0; dst=Townsville; port:=1; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Adelaide1; port:=2; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Adelaide2; port:=1; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Alice_Springs; port:=1; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Armidale; port:=1; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Brisbane1; port:=1; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Brisbane2; port:=1; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Cairns; port:=1; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Canberra1; port:=2; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Canberra2; port:=2; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Darwin; port:=2; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Hobart; port:=2; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Melbourne1; port:=2; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Melbourne2; port:=1; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Perth2; port:=1; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Rockhampton; port:=1; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Sydney1; port:=1; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Sydney2; port:=1; out:=1)
+ +
+    (loc=Perth1; out=0; dst=Townsville; port:=1; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Adelaide1; port:=1; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Adelaide2; port:=2; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Alice_Springs; port:=2; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Armidale; port:=2; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Brisbane1; port:=2; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Brisbane2; port:=2; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Cairns; port:=2; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Canberra1; port:=1; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Canberra2; port:=1; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Darwin; port:=1; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Hobart; port:=2; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Melbourne1; port:=1; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Melbourne2; port:=2; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Perth1; port:=1; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Rockhampton; port:=2; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Sydney1; port:=2; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Sydney2; port:=2; out:=1)
+ +
+    (loc=Perth2; out=0; dst=Townsville; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Adelaide1; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Adelaide2; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Alice_Springs; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Armidale; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Brisbane1; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Brisbane2; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Cairns; port:=1; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Canberra1; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Canberra2; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Darwin; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Hobart; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Melbourne1; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Melbourne2; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Perth1; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Perth2; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Sydney1; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Sydney2; port:=2; out:=1)
+ +
+    (loc=Rockhampton; out=0; dst=Townsville; port:=1; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Adelaide1; port:=2; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Adelaide2; port:=2; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Alice_Springs; port:=2; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Armidale; port:=2; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Brisbane1; port:=3; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Brisbane2; port:=2; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Cairns; port:=3; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Canberra1; port:=1; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Canberra2; port:=1; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Darwin; port:=2; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Hobart; port:=2; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Melbourne1; port:=2; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Melbourne2; port:=2; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Perth1; port:=2; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Perth2; port:=2; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Rockhampton; port:=3; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Sydney2; port:=2; out:=1)
+ +
+    (loc=Sydney1; out=0; dst=Townsville; port:=3; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Adelaide1; port:=4; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Adelaide2; port:=4; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Alice_Springs; port:=4; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Armidale; port:=3; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Brisbane1; port:=1; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Brisbane2; port:=2; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Cairns; port:=1; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Canberra1; port:=1; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Canberra2; port:=1; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Darwin; port:=4; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Hobart; port:=4; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Melbourne1; port:=4; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Melbourne2; port:=4; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Perth1; port:=4; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Perth2; port:=4; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Rockhampton; port:=1; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Sydney1; port:=1; out:=1)
+ +
+    (loc=Sydney2; out=0; dst=Townsville; port:=1; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Adelaide1; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Adelaide2; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Alice_Springs; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Armidale; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Brisbane1; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Brisbane2; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Cairns; port:=1; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Canberra1; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Canberra2; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Darwin; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Hobart; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Melbourne1; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Melbourne2; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Perth1; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Perth2; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Rockhampton; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Sydney1; port:=2; out:=1)
+ +
+    (loc=Townsville; out=0; dst=Sydney2; port:=2; out:=1)
+
+-- NOTE: solution is ~(loc=Brisbane1 & dst=Adelaide2)
+hole = skip
+hop = hole; pol; topo
+net = (hop; dup)*
+
+-- BLOCK BAD PATHS
+-- [Red]: Brisbane1 -> Sydney1 -> Sydney2 -> Melbourne2 -> Adelaide2
+check loc=Brisbane1; dst=Adelaide2; net; loc=Adelaide2 == drop
+
+-- ALLOW GOOD PATHS
+-- [Green]: Adelaide1 -> Melbourne1 -> Canberra1 -> Canberra2
+check (loc=Adelaide1; port=0; out=0; dst=Canberra2; loc:=Melbourne1; port:=3 ; dup; loc:=Canberra1; port:=2 ; dup; loc:=Canberra2; port:=2 ) <= hop; dup; hop; dup; hop
+
+-- [Blue]: Perth1 -> Perth2 -> Adelaide2 -> Melbourne2 -> Sydney2 -> Sydney1 -> Brisbane1
+check (loc=Perth1; port=0; out=0; dst=Brisbane1; loc:=Perth2; port:=1 ; dup; loc:=Adelaide2; port:=1 ; dup; loc:=Melbourne2; port:=3 ; dup; loc:=Sydney2; port:=4 ; dup; loc:=Sydney1; port:=2 ; dup; loc:=Brisbane1; port:=1 ) <= hop; dup; hop; dup; hop; dup; hop; dup; hop; dup; hop
+
+-- [Orange]: Canberra1 -> Melbourne1 -> Adelaide1 -> Adelaide2
+check (loc=Canberra1; port=0; out=0; dst=Adelaide2; loc:=Melbourne1; port:=1 ; dup; loc:=Adelaide1; port:=4 ; dup; loc:=Adelaide2; port:=2 ) <= hop; dup; hop; dup; hop
+
+

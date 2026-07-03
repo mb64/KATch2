@@ -216,8 +216,8 @@ def write_netkat(g, filename, fmt_katch):
     inline_consts = True
     expand_indices = False # requires inline_consts=True
     suppress_nonempty = True
-    num_bad_paths = 2
-    num_good_paths = 3
+    num_bad_paths = 1
+    num_good_paths = 10 
     rand_seed = 3
 
     random.seed(rand_seed)
@@ -541,6 +541,8 @@ def write_netkat(g, filename, fmt_katch):
         # Paths
         ############################################################
 
+        f.write(f"{'//' if fmt_katch else '--'} BLOCK BAD PATHS\n")
+
         bad_paths = random.sample(paths, k=num_bad_paths)
 
         for p in bad_paths:
@@ -550,6 +552,7 @@ def write_netkat(g, filename, fmt_katch):
             d_label = str_label(p[-1])
             #f.write(f"bad path = {name}, first={s_label}, last={d_label}\n")
 
+            f.write(f"{'//' if fmt_katch else '--'} {name}\n")
             f.write(
                 f"{'assert' if fmt_katch else 'check'} {str_field_test('loc',s_label)}; "
                 f"{str_field_test('dst',d_label)}; net; "
@@ -558,7 +561,11 @@ def write_netkat(g, filename, fmt_katch):
 
         f.write("\n")
 
-        good_paths = random.sample(paths, min(num_good_paths, len(paths)))
+        f.write(f"{'//' if fmt_katch else '--'} ALLOW GOOD PATHS\n")
+
+        num_good_paths = min(num_good_paths, len(paths))
+        print(f"Selecting {num_good_paths} out of {len(paths)} total paths")
+        good_paths = random.sample(paths, num_good_paths)
 
         for p in good_paths:
             name = " -> ".join(labels[v] for v in p)
@@ -592,6 +599,7 @@ def write_netkat(g, filename, fmt_katch):
                 #print("Items: ", "; dup; ".join(items))
                 #print("Hops: ", "; dup; ".join(hops))
 
+                f.write(f"{'//' if fmt_katch else '--'} {name}\n")
                 f.write(
                     f"{'assert' if fmt_katch else 'check'} ({first}{'; dup; '.join(items)})"
                     f" <= {'; dup; '.join(hops)}\n"
