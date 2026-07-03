@@ -1,9 +1,43 @@
 use crate::expr::{Exp, Expr};
 use crate::pre::{Field, Value};
+use rand::distr::uniform::{SampleRange, SampleUniform};
+use rand::distr::{Distribution, StandardUniform};
+use rand::rngs::StdRng;
+use rand::{RngExt, SeedableRng};
+use std::cell::RefCell;
+
+thread_local! {
+    /// The RNG behind all fuzz generation on this thread.  OS-seeded by
+    /// default, so behaviour matches the thread RNG unless a test opts into
+    /// determinism via [`seed_fuzzer`].
+    static FUZZ_RNG: RefCell<StdRng> = RefCell::new(StdRng::from_rng(&mut rand::rng()));
+}
+
+/// Reseed this thread's fuzz RNG, making all subsequent generation on the
+/// thread deterministic.  Call at the top of a fuzz test to get reproducible
+/// inputs (each test runs on its own thread, so tests don't interfere).
+pub fn seed_fuzzer(seed: u64) {
+    FUZZ_RNG.with(|r| *r.borrow_mut() = StdRng::seed_from_u64(seed));
+}
+
+/// Drop-in for `rand::random` drawing from the seedable [`FUZZ_RNG`].
+pub(crate) fn random<T>() -> T
+where
+    StandardUniform: Distribution<T>,
+{
+    FUZZ_RNG.with(|r| r.borrow_mut().random())
+}
+
+/// Drop-in for `random_range` drawing from the seedable [`FUZZ_RNG`].
+fn random_range<T, R>(range: R) -> T
+where
+    T: SampleUniform,
+    R: SampleRange<T>,
+{
+    FUZZ_RNG.with(|r| r.borrow_mut().random_range(range))
+}
 
 // --- Random Expression Generation ---
-
-// Note: Generic over R: Rng to fix 'dyn Rng' errors
 
 /// Generates a random field value in the range [0..k]
 fn gen_random_field(k: u32) -> Field {
@@ -11,19 +45,19 @@ fn gen_random_field(k: u32) -> Field {
     if k == 0 {
         panic!("Cannot generate field with k=0");
     }
-    rand::random_range(0..k)
+    random_range(0..k)
 }
 
 /// Generates a random boolean (binary field)
 fn gen_random_value() -> Value {
-    rand::random::<bool>()
+    random::<bool>()
 }
 
 /// Generates a random expression
 fn gen_random_expr(num_fields: u32, max_depth: usize) -> Exp {
     // Base case: terminals or depth limit reached
     if max_depth == 0 {
-        match rand::random_range(0..7) {
+        match random_range(0..7) {
             0 => Expr::zero(),
             1 => Expr::one(),
             2 => Expr::top(),
@@ -40,7 +74,7 @@ fn gen_random_expr(num_fields: u32, max_depth: usize) -> Exp {
             _ => unreachable!(),
         }
     } else {
-        match rand::random_range(0..15) {
+        match random_range(0..15) {
             0 => gen_random_expr(num_fields, max_depth - 1),
             1 => Expr::star(gen_random_expr(num_fields, max_depth - 1)),
             2 => Expr::complement(gen_random_expr(num_fields, max_depth - 1)),
@@ -91,10 +125,10 @@ fn get_distinct_fields(k: u32) -> (Field, Field) {
     if k < 2 {
         panic!("get_distinct_fields called with k < 2");
     }
-    let f1 = rand::random_range(0..k);
-    let mut f2 = rand::random_range(0..k);
+    let f1 = random_range(0..k);
+    let mut f2 = random_range(0..k);
     while f1 == f2 {
-        f2 = rand::random_range(0..k);
+        f2 = random_range(0..k);
     }
     (f1, f2)
 }
@@ -102,7 +136,7 @@ fn get_distinct_fields(k: u32) -> (Field, Field) {
 /// Flips a coin to decide whether to swap the LHS and RHS of an equality.    
 /// (Helper function used in `genax` below)
 fn flip_equality_rand(lhs: Exp, rhs: Exp) -> (Exp, Exp) {
-    let b = rand::random::<bool>();
+    let b = random::<bool>();
     if b { (rhs, lhs) } else { (lhs, rhs) }
 }
 
@@ -188,11 +222,11 @@ pub fn genax(ax_depth: usize, expr_depth: usize, num_fields: u32) -> (Exp, Exp) 
         return (random_expr.clone(), random_expr);
     }
     // Recursive step: pick an axiom and apply it
-    match rand::random_range(0..4) {
+    match random_range(0..4) {
         // Number of recursive calls
         0 => {
             // --- PA Axioms --- (No recursive calls needed)
-            match rand::random_range(0..9) {
+            match random_range(0..9) {
                 0 => {
                     // PA-MOD-MOD-COMM: `xi <- v . xj <- v' = xj <- v' . xi <- v`
                     let (xi, xj) = get_distinct_fields(num_fields);
@@ -280,7 +314,7 @@ pub fn genax(ax_depth: usize, expr_depth: usize, num_fields: u32) -> (Exp, Exp) 
         }
         1 => {
             let (lhs, rhs) = genax(ax_depth - 1, expr_depth, num_fields);
-            match rand::random_range(0..21) {
+            match random_range(0..21) {
                 0 => {
                     // KA-PLUS-ZERO: p + 0 = p
                     let new_lhs = Expr::union(lhs, Expr::zero());
@@ -418,7 +452,7 @@ pub fn genax(ax_depth: usize, expr_depth: usize, num_fields: u32) -> (Exp, Exp) 
         2 => {
             let (p1_lhs, p1_rhs) = genax(ax_depth - 1, expr_depth, num_fields);
             let (p2_lhs, p2_rhs) = genax(ax_depth - 1, expr_depth, num_fields);
-            match rand::random_range(0..18) {
+            match random_range(0..18) {
                 0 => {
                     // KA-PLUS-COMM: p + q = q + p
                     let new_lhs = Expr::union(p1_lhs, p2_lhs);
@@ -573,7 +607,7 @@ pub fn genax(ax_depth: usize, expr_depth: usize, num_fields: u32) -> (Exp, Exp) 
             let (p1_lhs, p1_rhs) = genax(ax_depth - 1, expr_depth, num_fields);
             let (p2_lhs, p2_rhs) = genax(ax_depth - 1, expr_depth, num_fields);
             let (p3_lhs, p3_rhs) = genax(ax_depth - 1, expr_depth, num_fields);
-            match rand::random_range(0..7) {
+            match random_range(0..7) {
                 0 => {
                     // KA-PLUS-ASSOC: p + (q + r) = (p + q) + r
                     let new_lhs = Expr::union(p1_lhs, Expr::union(p2_lhs, p3_lhs));
@@ -659,7 +693,7 @@ pub fn gen_leq(ax_depth: usize, expr_depth: usize, num_fields: u32) -> (Exp, Exp
     }
 
     // Recursive step: choose a method to generate e1 <= e2
-    match rand::random_range(0..4) {
+    match random_range(0..4) {
         0 => {
             // Method 1: Use genax to get equal expressions, then add something to rhs
             let (e1, e2) = genax(ax_depth - 1, expr_depth, num_fields);
@@ -681,7 +715,7 @@ pub fn gen_leq(ax_depth: usize, expr_depth: usize, num_fields: u32) -> (Exp, Exp
             let e1 = gen_random_expr(num_fields, expr_depth);
             let e2 = gen_random_expr(num_fields, expr_depth);
 
-            match rand::random_range(0..3) {
+            match random_range(0..3) {
                 0 => {
                     // Strong until <= Weak until
                     // e1 U e2 <= e1 W e2
@@ -711,7 +745,7 @@ pub fn gen_leq(ax_depth: usize, expr_depth: usize, num_fields: u32) -> (Exp, Exp
             let (e1, e2) = gen_leq(ax_depth - 1, expr_depth, num_fields);
             let (e3, e4) = gen_leq(ax_depth - 1, expr_depth, num_fields);
 
-            match rand::random_range(0..3) {
+            match random_range(0..3) {
                 0 => {
                     // If e1 <= e2 and e3 <= e4, then e1 + e3 <= e2 + e4
                     (Expr::union(e1, e3), Expr::union(e2, e4))

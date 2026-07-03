@@ -196,18 +196,48 @@ impl<'a> Cand<'a> {
         spp
     }
 
-    /// Generalize a `Cand` from examples.
+    /// Generalize a `Cand` from examples, in one shot.
     ///
-    /// `num_vars` is the packet width (length of every `pkt_*`); `num_states`
-    /// is the length of every `states` vector (and, since each state level is a
-    /// predicate over the same state set, also the width of each `NextState`
-    /// node, i.e. every `state` value must lie in `0..num_states`).
+    /// The packet width `nv` is taken from `store` (length of every `pkt_*`);
+    /// the state-vector width `ns` from `dfa.num_states()` (every `states`
+    /// vector has length `ns`, and — since each state level is a predicate over
+    /// the same state set, also the width of each `NextState` node — every
+    /// `state` value must lie in `0..ns`).
     ///
     /// Guarantee: let `out` be the output. Then for each `(input, b)` pair in
     /// the input, `out.accepts_input(input) == b`.
     ///
     /// Returns [`ConflictError`] if two examples give the same concrete `Input`
     /// opposite labels.
+    ///
+    /// # Method (trie + RPNI-style per-level merging)
+    ///
+    /// Same algorithm as [`crate::spp::learner::learn_spp`], over a mixed-arity
+    /// decision diagram.  An example's *decision path* has length
+    /// `nv + ns + nv`: `2*pkt_in[i] + pkt_start[i]` at the `nv` field levels
+    /// (width 4), then `states[j]` at the `ns` state levels (width `ns`), then
+    /// `2*pkt_end[i] + pkt_out[i]` at the `nv` output levels (width 4).
+    ///
+    /// 1. **Trie.** Insert every path into a mixed-arity trie, leaves carrying
+    ///    the label.  This computes *all* the prefix partitions in one pass: a
+    ///    node at depth `d` is exactly the set of examples sharing that
+    ///    length-`d` prefix, and a shared prefix is walked only once.  A leaf
+    ///    reached with two different labels is a [`ConflictError`].
+    /// 2. **Per-level merging (RPNI-style).** Sweep the trie top-down, one
+    ///    level at a time; two prefix cells are *compatible* when their suffix
+    ///    evidence never conflicts.  Each node is greedily merged into the
+    ///    first compatible class at its level (unioning the subtrees), so
+    ///    evidence pooled at one level narrows the don't-cares at every level
+    ///    below.
+    /// 3. **Bottom-up fold.** Fold the merged levels leaves-first, in the same
+    ///    three regions as the path: a leaf class becomes its accept/reject
+    ///    terminal and each output-level class an [`spp::SPPstore::mk`] node;
+    ///    at the boundary, each depth-`nv + ns` class's SPP is wrapped in a
+    ///    [`CandNode::Root`]; state-level classes become
+    ///    [`CandNode::NextState`] and field-level classes
+    ///    [`CandNode::NextField`], hash-consed by [`Builder::mk`].  Don't-care
+    ///    branches (those no example exercises) are filled with the first
+    ///    defined sibling child.
     pub fn from_examples(
         store: &mut spp::SPPstore,
         dfa: &'a ExplicitDFA,
@@ -215,42 +245,10 @@ impl<'a> Cand<'a> {
     ) -> Result<Self, ConflictError> {
         let nv = store.num_vars() as usize;
         let ns = dfa.num_states();
-
-        // Flatten every example into its decision path (and check well-formedness).
-        let decisions: Vec<Vec<usize>> = examples
-            .iter()
-            .map(|(input, _)| {
-                assert_eq!(input.pkt_in.len(), nv);
-                assert_eq!(input.pkt_start.len(), nv);
-                assert_eq!(input.pkt_end.len(), nv);
-                assert_eq!(input.pkt_out.len(), nv);
-                assert_eq!(input.states.len(), ns);
-                let mut path = Vec::with_capacity(nv + ns + nv);
-                for i in 0..nv {
-                    path.push(2 * input.pkt_in[i] as usize + input.pkt_start[i] as usize);
-                }
-                for &s in &input.states {
-                    // The DFA is complete (any sink is a real state), so every
-                    // state value lies in `0..ns`.
-                    assert!(s < ns, "state value out of range");
-                    path.push(s);
-                }
-                for i in 0..nv {
-                    path.push(2 * input.pkt_end[i] as usize + input.pkt_out[i] as usize);
-                }
-                path
-            })
-            .collect();
-
-        // Conflict check: the full path identifies the input, so a repeated
-        // path with opposite labels is a genuine conflict.
-        let mut seen: HashMap<&[usize], bool> = HashMap::new();
-        for (path, &(_, label)) in decisions.iter().zip(examples) {
-            match seen.insert(path, label) {
-                Some(prev) if prev != label => return Err(ConflictError),
-                _ => {}
-            }
-        }
+        let total = nv + ns + nv;
+        // Branch width at each trie depth: field and output levels are 4-way,
+        // state levels are `ns`-way.
+        let width = |d: usize| if d < nv || d >= nv + ns { 4 } else { ns };
 
         let mut builder = Builder::default();
 
@@ -276,48 +274,145 @@ impl<'a> Cand<'a> {
             });
         }
 
-        // Bottom layer: each example maps to the one/zero SPP terminal.
-        let mut spp_map: HashMap<usize, spp::SPP> = (0..examples.len())
-            .map(|e| (e, spp::SPP::new(examples[e].1 as u32)))
+        // Flatten every example into its decision path (and check well-formedness).
+        let decisions: Vec<Vec<usize>> = examples
+            .iter()
+            .map(|(input, _)| {
+                assert_eq!(input.pkt_in.len(), nv);
+                assert_eq!(input.pkt_start.len(), nv);
+                assert_eq!(input.pkt_end.len(), nv);
+                assert_eq!(input.pkt_out.len(), nv);
+                assert_eq!(input.states.len(), ns);
+                let mut path = Vec::with_capacity(total);
+                for i in 0..nv {
+                    path.push(2 * input.pkt_in[i] as usize + input.pkt_start[i] as usize);
+                }
+                for &s in &input.states {
+                    // The DFA is complete (any sink is a real state), so every
+                    // state value lies in `0..ns`.
+                    assert!(s < ns, "state value out of range");
+                    path.push(s);
+                }
+                for i in 0..nv {
+                    path.push(2 * input.pkt_end[i] as usize + input.pkt_out[i] as usize);
+                }
+                path
+            })
             .collect();
 
-        // Output levels: build the SPP bottom-up.
-        for depth in (nv + ns..nv + ns + nv).rev() {
-            spp_map = build_layer(4, depth, &decisions, &spp_map, |row| {
-                store.mk(row[0], row[1], row[2], row[3])
+        // Zero-depth diagram (`nv == 0` and `ns == 0`): every example is the
+        // single empty path, so they must all agree (there is no trie level to
+        // disambiguate them).
+        if total == 0 {
+            let label = examples[0].1;
+            if examples.iter().any(|(_, l)| *l != label) {
+                return Err(ConflictError);
+            }
+            let head = builder.mk(CandNode::Root(spp::SPP::new(label as u32)));
+            return Ok(Cand {
+                nodes: builder.nodes,
+                head,
+                dfa,
             });
         }
 
-        // Boundary: wrap each SPP in a `Root` node.
-        let mut cand_map: HashMap<usize, CandIdx> = HashMap::new();
-        for (&e, &spp) in &spp_map {
-            let node = builder.mk(CandNode::Root(spp));
-            cand_map.insert(e, node);
+        // Step 1: build the decision-path trie (node 0 is the root).  This
+        // computes every prefix partition in one pass.  A leaf reached with two
+        // labels is a conflict (the full path identifies the input).
+        let mut trie: Vec<TrieNode> = vec![TrieNode::Branch(vec![None; width(0)])];
+        for (path, &(_, label)) in decisions.iter().zip(examples) {
+            let mut cur = 0usize;
+            for (d, &b) in path.iter().enumerate() {
+                let is_last = d + 1 == total;
+                let next = match &trie[cur] {
+                    TrieNode::Branch(children) => children[b],
+                    TrieNode::Leaf(_) => unreachable!("path longer than trie depth"),
+                };
+                match next {
+                    Some(nx) => {
+                        if is_last
+                            && let TrieNode::Leaf(prev) = trie[nx as usize]
+                            && prev != label
+                        {
+                            return Err(ConflictError);
+                        }
+                        cur = nx as usize;
+                    }
+                    None => {
+                        let id = trie.len() as u32;
+                        trie.push(if is_last {
+                            TrieNode::Leaf(label)
+                        } else {
+                            TrieNode::Branch(vec![None; width(d + 1)])
+                        });
+                        // Re-borrow after the push (which may have reallocated).
+                        if let TrieNode::Branch(children) = &mut trie[cur] {
+                            children[b] = Some(id);
+                        }
+                        cur = id as usize;
+                    }
+                }
+            }
+        }
+
+        // Step 2: RPNI-style merging of compatible prefix cells, level by level.
+        let levels = merge_levels(&mut trie, total);
+
+        // Step 3: fold the merged levels bottom-up.  Each class is folded once,
+        // however many parent edges point at it, memoized by trie node id.
+
+        // Output levels (and the leaves): fold into SPPs.
+        let mut spp_of: Vec<Option<spp::SPP>> = vec![None; trie.len()];
+        for d in (nv + ns..=total).rev() {
+            for &node in &levels[d] {
+                let s = match &trie[node as usize] {
+                    TrieNode::Leaf(label) => spp::SPP::new(*label as u32),
+                    TrieNode::Branch(children) => {
+                        let row = fill_row(children, &spp_of);
+                        store.mk(row[0], row[1], row[2], row[3])
+                    }
+                };
+                spp_of[node as usize] = Some(s);
+            }
+        }
+
+        // Boundary: wrap each depth-`nv + ns` class's SPP in a `Root` node.
+        let mut cand_of: Vec<Option<CandIdx>> = vec![None; trie.len()];
+        for &node in &levels[nv + ns] {
+            let root = builder.mk(CandNode::Root(spp_of[node as usize].unwrap()));
+            cand_of[node as usize] = Some(root);
         }
 
         // State levels: `ns` levels, each a `NextState` of width `ns` (one child
         // per state of the complete DFA).
-        for depth in (nv..nv + ns).rev() {
-            cand_map = build_layer(ns, depth, &decisions, &cand_map, |row| {
-                builder.mk(CandNode::NextState(row.to_vec()))
-            });
+        for d in (nv..nv + ns).rev() {
+            for &node in &levels[d] {
+                let TrieNode::Branch(children) = &trie[node as usize] else {
+                    unreachable!("leaf above the bottom level");
+                };
+                let row = fill_row(children, &cand_of);
+                cand_of[node as usize] = Some(builder.mk(CandNode::NextState(row)));
+            }
         }
 
         // Field levels (width 4).
-        for depth in (0..nv).rev() {
-            cand_map = build_layer(4, depth, &decisions, &cand_map, |row| {
-                builder.mk(CandNode::NextField {
+        for d in (0..nv).rev() {
+            for &node in &levels[d] {
+                let TrieNode::Branch(children) = &trie[node as usize] else {
+                    unreachable!("leaf above the bottom level");
+                };
+                let row = fill_row(children, &cand_of);
+                cand_of[node as usize] = Some(builder.mk(CandNode::NextField {
                     b00: row[0],
                     b01: row[1],
                     b10: row[2],
                     b11: row[3],
-                })
-            });
+                }));
+            }
         }
 
-        // At depth 0 every example shares the empty prefix, so they all map to
-        // the single root node.
-        let head = cand_map[&0];
+        // The root (node 0) is the sole depth-0 class.
+        let head = cand_of[0].unwrap();
         Ok(Cand {
             nodes: builder.nodes,
             head,
@@ -394,49 +489,106 @@ impl Builder {
     }
 }
 
-/// Build one layer of the diagram, bottom-up.
-///
-/// `below` maps each example to the node it reaches *just below* this layer
-/// (depth `depth + 1`).  Examples are grouped by their length-`depth` prefix —
-/// everything sharing a prefix reaches the same node here — and each group's
-/// `width` child branches are populated from the examples' decision at `depth`.
-/// Branches no example exercises are filled with one of the group's defined
-/// children, then `mk` hash-conses the node.  Returns the map from each example
-/// to its node at this layer.
-fn build_layer<Id: Copy + Eq + std::hash::Hash>(
-    width: usize,
-    depth: usize,
-    decisions: &[Vec<usize>],
-    below: &HashMap<usize, Id>,
-    mut mk: impl FnMut(&[Id]) -> Id,
-) -> HashMap<usize, Id> {
-    // Group examples by their prefix up to (but excluding) this layer.
-    let mut groups: HashMap<&[usize], Vec<usize>> = HashMap::new();
-    for &e in below.keys() {
-        groups.entry(&decisions[e][..depth]).or_default().push(e);
-    }
+/// A node of the decision-path trie: an internal branch (width 4 at field and
+/// output levels, `ns` at state levels — merging and compatibility only ever
+/// compare same-depth nodes, so the width is implicit) or an accept/reject
+/// leaf.
+#[derive(Clone)]
+enum TrieNode {
+    Branch(Vec<Option<u32>>),
+    Leaf(bool),
+}
 
-    let mut result = HashMap::new();
-    for (_prefix, members) in groups {
-        let mut row: Vec<Option<Id>> = vec![None; width];
-        for &e in &members {
-            row[decisions[e][depth]] = Some(below[&e]);
+/// Merge compatible trie nodes level by level, top-down (RPNI-style).
+///
+/// The nodes at depth `d` are the prefix cells of the examples; each level is
+/// swept in order, greedily merging every node into the first [`compatible`]
+/// class found at that level (unioning the subtrees and redirecting the parent
+/// edge), or starting a new class.  Pooled evidence at one level narrows the
+/// don't-cares at every level below.  The result is a layered DAG; returns the
+/// surviving class nodes per level, root (depth 0) first.
+fn merge_levels(trie: &mut [TrieNode], total: usize) -> Vec<Vec<u32>> {
+    let mut levels: Vec<Vec<u32>> = Vec::with_capacity(total + 1);
+    levels.push(vec![0]);
+    for d in 0..total {
+        // Gather the populated (parent, branch, child) slots feeding depth d+1.
+        let mut slots: Vec<(u32, usize, u32)> = Vec::new();
+        for &p in &levels[d] {
+            if let TrieNode::Branch(children) = &trie[p as usize] {
+                for (b, child) in children.iter().enumerate() {
+                    if let Some(n) = child {
+                        slots.push((p, b, *n));
+                    }
+                }
+            }
         }
-        // Every group has at least one member, hence at least one defined
-        // branch to fill the don't-cares with.
-        let fill = row
-            .iter()
-            .flatten()
-            .next()
-            .copied()
-            .expect("non-empty group");
-        let full: Vec<Id> = row.into_iter().map(|c| c.unwrap_or(fill)).collect();
-        let node = mk(&full);
-        for e in members {
-            result.insert(e, node);
+        let mut classes: Vec<u32> = Vec::new();
+        for (p, b, n) in slots {
+            match classes
+                .iter()
+                .copied()
+                .find(|&c| compatible(trie, c as usize, n as usize))
+            {
+                Some(c) => {
+                    merge(trie, c as usize, n as usize);
+                    if let TrieNode::Branch(children) = &mut trie[p as usize] {
+                        children[b] = Some(c);
+                    }
+                }
+                None => classes.push(n),
+            }
+        }
+        levels.push(classes);
+    }
+    levels
+}
+
+/// Do two same-depth subtrees agree on every decision path they both exercise?
+fn compatible(trie: &[TrieNode], a: usize, b: usize) -> bool {
+    match (&trie[a], &trie[b]) {
+        (TrieNode::Leaf(la), TrieNode::Leaf(lb)) => la == lb,
+        (TrieNode::Branch(ca), TrieNode::Branch(cb)) => {
+            ca.iter().zip(cb).all(|(x, y)| match (x, y) {
+                (Some(x), Some(y)) => compatible(trie, *x as usize, *y as usize),
+                _ => true,
+            })
+        }
+        _ => unreachable!("compatibility check across depths"),
+    }
+}
+
+/// Union subtree `b` into `a` (same depth, already checked [`compatible`]).
+/// `b` becomes unreachable afterwards.
+fn merge(trie: &mut [TrieNode], a: usize, b: usize) {
+    let (mut merged, cb) = match (&trie[a], &trie[b]) {
+        (TrieNode::Branch(ca), TrieNode::Branch(cb)) => (ca.clone(), cb.clone()),
+        _ => return, // leaves: labels already known to agree
+    };
+    for (slot, y) in merged.iter_mut().zip(cb) {
+        match (*slot, y) {
+            (Some(x), Some(y)) => merge(trie, x as usize, y as usize),
+            (None, Some(y)) => *slot = Some(y),
+            _ => {}
         }
     }
-    result
+    trie[a] = TrieNode::Branch(merged);
+}
+
+/// Look up the already-folded results of a branch class's children in `done`
+/// and fill the don't-care slots (branches no example exercises) with the
+/// first defined sibling child.
+fn fill_row<T: Copy>(children: &[Option<u32>], done: &[Option<T>]) -> Vec<T> {
+    let row: Vec<Option<T>> = children
+        .iter()
+        .map(|c| c.map(|id| done[id as usize].unwrap()))
+        .collect();
+    let fill = row
+        .iter()
+        .flatten()
+        .next()
+        .copied()
+        .expect("trie branch has at least one child");
+    row.into_iter().map(|c| c.unwrap_or(fill)).collect()
 }
 
 #[cfg(test)]
@@ -596,6 +748,42 @@ mod tests {
         let dfa = example_dfa(&mut store, 2);
         let cand = Cand::from_examples(&mut store, &dfa, &examples).unwrap();
         assert_consistent(&cand, &mut store, &examples);
+    }
+
+    /// Two prefix cells with non-conflicting suffix evidence must be merged, so
+    /// evidence observed under one prefix generalizes to the other (the analogue
+    /// of `merges_compatible_prefixes` in `spp::learner`).
+    ///
+    /// With `nv = 1`, `ns = 1` a decision path is `[field, state, output]`:
+    ///
+    /// * A: `(in=0, start=0)`, state 0, `(end=0, out=0)`, positive → `[0, 0, 0] ↦ 1`
+    /// * B: `(in=1, start=1)`, state 0, `(end=1, out=0)`, negative → `[3, 0, 2] ↦ 0`
+    ///
+    /// The field-level cells at branches 0 and 3 exercise *disjoint* output
+    /// branches (0 vs 2), so they are compatible and merge into one class; the
+    /// merged output node has row `[1, ·, 0, ·]`, and the fill policy (first
+    /// defined sibling child) completes it to `mk(1, 1, 0, 1)`.  So the query
+    /// `(in=1, start=1)`, state 0, `(end=0, out=0)` — B's prefix with A's
+    /// suffix — routes through field branch 3 to the merged class and lands on
+    /// output branch 0, an accept.  Without merging, B's prefix cell holds only
+    /// the lone negative and collapses to reject-all, so the query is rejected.
+    #[test]
+    fn merges_compatible_prefixes() {
+        let mut store = spp::SPPstore::new(1);
+        let dfa = example_dfa(&mut store, 1);
+        let examples = vec![
+            (input(&[false], &[false], &[0], &[false], &[false]), true),
+            (input(&[true], &[true], &[0], &[true], &[false]), false),
+        ];
+        let cand = Cand::from_examples(&mut store, &dfa, &examples).unwrap();
+        assert_consistent(&cand, &mut store, &examples);
+        assert!(
+            cand.accepts_input(
+                &mut store,
+                &input(&[true], &[true], &[0], &[false], &[false])
+            ),
+            "positive evidence under prefix (0,0) must generalize to the merged prefix (1,1)"
+        );
     }
 
     /// The `ENFA` view must agree with `accepts_input`.
