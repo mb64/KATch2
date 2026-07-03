@@ -23,8 +23,7 @@
 //!    conflicts, i.e. no decision path both exercise ends in different labels.
 //!    Each node is greedily merged into the first compatible class at its
 //!    level, unioning the two subtrees, so evidence pooled at one level narrows
-//!    the don't-cares at every level below.  This is the state merging the
-//!    pre-trie learner did with explicit example partitions.
+//!    the don't-cares at every level below.
 //! 3. **Bottom-up fold.** Walk the merged levels leaves-first: a leaf class
 //!    becomes its accept (`1`) / reject (`0`) terminal; a branch class becomes
 //!    [`SPPstore::mk`] of its four children, with don't-care branches (those no
@@ -234,7 +233,7 @@ fn build_spp(trie: &[TrieNode], levels: &[Vec<u32>], store: &mut SPPstore) -> SP
 
     let mut spp_of: Vec<Option<SPP>> = vec![None; trie.len()];
     let mut zero = SPP::new(0);
-    for (i,level) in levels.iter().enumerate().rev() {
+    for (i, level) in levels.iter().enumerate().rev() {
         for &node in level {
             let spp = match trie[node as usize] {
                 TrieNode::Leaf(label) => SPP::new(label as u32),
