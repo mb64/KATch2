@@ -5,11 +5,11 @@
 //! returns an [`SPP`] consistent with all of them, or [`ConflictError`] if two
 //! examples give the same pair opposite labels.
 //!
-//! # Method (trie + RPNI-style eager merging)
+//! # Method (trie + RPNI-style per-level merging)
 //!
 //! An [`SPP`] over `n` fields is an order-`n` decision diagram: level `i` is a
 //! 4-way branch on the `(input[i], output[i])` bit pair, terminating in
-//! accept/reject.  We build it in two steps:
+//! accept/reject.  We build it in three steps:
 //!
 //! 1. **Trie.** Insert every example's length-`n` *decision path* —
 //!    `2*input[i] + output[i]` at field `i` — into a 4-ary trie, leaves carrying
@@ -17,16 +17,26 @@
 //!    pass: a node at depth `d` is exactly the set of examples sharing that
 //!    length-`d` prefix, and a shared prefix is walked only once.  A leaf reached
 //!    with two different labels is a [`ConflictError`].
-//! 2. **Bottom-up fold.** Post-order over the trie: a leaf becomes its accept
-//!    (`1`) / reject (`0`) terminal; a branch becomes [`SPPstore::mk`] of its
-//!    four children, with don't-care branches (those no example exercises) taking
-//!    a sibling — the eager generalization.  Hash-consing in `mk` collapses nodes
-//!    with identical suffix behaviour — the state merge.
+//! 2. **Per-level merging (RPNI-style).** Sweep the trie top-down, one level at
+//!    a time.  The nodes at depth `d` are the length-`d` prefix cells of the
+//!    examples; two cells are *compatible* when their suffix evidence never
+//!    conflicts, i.e. no decision path both exercise ends in different labels.
+//!    Each node is greedily merged into the first compatible class at its
+//!    level, unioning the two subtrees, so evidence pooled at one level narrows
+//!    the don't-cares at every level below.  This is the state merging the
+//!    pre-trie learner did with explicit example partitions.
+//! 3. **Bottom-up fold.** Walk the merged levels leaves-first: a leaf class
+//!    becomes its accept (`1`) / reject (`0`) terminal; a branch class becomes
+//!    [`SPPstore::mk`] of its four children, with don't-care branches (those no
+//!    example exercises) filled heuristically — the eager generalization.
+//!    Hash-consing in `mk` collapses any identical classes the greedy merge
+//!    missed.
 //!
 //! Building the trie first means each partition is computed once instead of being
-//! re-derived at every level.  An example's own path is never redirected by a
-//! fill, so the result accepts every positive example and rejects every negative
-//! one; the generalization only touches inputs no example pins down.
+//! re-derived at every level.  Merging only unions non-conflicting evidence and
+//! fills only touch branches no example exercises, so an example's own path is
+//! never redirected: the result accepts every positive example and rejects every
+//! negative one, and the generalization only touches inputs no example pins down.
 
 use super::{SPP, SPPstore};
 
@@ -121,8 +131,11 @@ pub fn learn_spp(
         }
     }
 
-    // Step 2: fold the trie bottom-up into an SPP.
-    Ok(build_spp(&trie, 0, spp_store))
+    // Step 2: RPNI-style merging of compatible prefix cells, level by level.
+    let levels = merge_levels(&mut trie, nv);
+
+    // Step 3: fold the merged levels bottom-up into an SPP.
+    Ok(build_spp(&trie, &levels, spp_store))
 }
 
 /// A node of the decision-path trie: an internal 4-way branch (indexed by
@@ -133,29 +146,115 @@ enum TrieNode {
     Leaf(bool),
 }
 
-/// Fold the trie rooted at `node` into an [`SPP`], bottom-up.
+/// Merge compatible trie nodes level by level, top-down (RPNI-style).
 ///
-/// A leaf becomes its accept/reject terminal.  A branch becomes [`SPPstore::mk`]
-/// of its four children, with don't-care branches (those no example exercises)
-/// taking a sibling — the eager generalization.  Each trie node has a single
-/// parent, so this visits every node once; `mk` hash-conses, merging nodes with
-/// identical suffix behaviour.
-fn build_spp(trie: &[TrieNode], node: usize, store: &mut SPPstore) -> SPP {
-    let children = match trie[node] {
-        TrieNode::Leaf(label) => return SPP::new(label as u32),
-        TrieNode::Branch(children) => children,
-    };
-    let mut spps: [Option<SPP>; 4] = [None; 4];
-    for (b, &child) in children.iter().enumerate() {
-        if let Some(id) = child {
-            spps[b] = Some(build_spp(trie, id as usize, store));
+/// The nodes at depth `d` are the prefix cells of the examples; each level is
+/// swept in order, greedily merging every node into the first [`compatible`]
+/// class found at that level (unioning the subtrees and redirecting the parent
+/// edge), or starting a new class.  Pooled evidence at one level narrows the
+/// don't-cares at every level below.  The result is a layered DAG; returns the
+/// surviving class nodes per level, root (depth 0) first.
+fn merge_levels(trie: &mut [TrieNode], nv: usize) -> Vec<Vec<u32>> {
+    let mut levels: Vec<Vec<u32>> = Vec::with_capacity(nv + 1);
+    levels.push(vec![0]);
+    for d in 0..nv {
+        // Gather the populated (parent, branch, child) slots feeding depth d+1.
+        let mut slots: Vec<(u32, usize, u32)> = Vec::new();
+        for &p in &levels[d] {
+            if let TrieNode::Branch(children) = trie[p as usize] {
+                for (b, child) in children.iter().enumerate() {
+                    if let Some(n) = child {
+                        slots.push((p, b, *n));
+                    }
+                }
+            }
         }
+        let mut classes: Vec<u32> = Vec::new();
+        for (p, b, n) in slots {
+            match classes
+                .iter()
+                .copied()
+                .find(|&c| compatible(trie, c as usize, n as usize))
+            {
+                Some(c) => {
+                    merge(trie, c as usize, n as usize);
+                    if let TrieNode::Branch(children) = &mut trie[p as usize] {
+                        children[b] = Some(c);
+                    }
+                }
+                None => classes.push(n),
+            }
+        }
+        levels.push(classes);
     }
-
-    heuristic_fill(spps, store)
+    levels
 }
 
-fn heuristic_fill(spps: [Option<SPP>; 4], store: &mut SPPstore) -> SPP {
+/// Do two same-depth subtrees agree on every decision path they both exercise?
+fn compatible(trie: &[TrieNode], a: usize, b: usize) -> bool {
+    match (trie[a], trie[b]) {
+        (TrieNode::Leaf(la), TrieNode::Leaf(lb)) => la == lb,
+        (TrieNode::Branch(ca), TrieNode::Branch(cb)) => {
+            ca.iter().zip(&cb).all(|(x, y)| match (x, y) {
+                (Some(x), Some(y)) => compatible(trie, *x as usize, *y as usize),
+                _ => true,
+            })
+        }
+        _ => unreachable!("compatibility check across depths"),
+    }
+}
+
+/// Union subtree `b` into `a` (same depth, already checked [`compatible`]).
+/// `b` becomes unreachable afterwards.
+fn merge(trie: &mut [TrieNode], a: usize, b: usize) {
+    let (ca, cb) = match (trie[a], trie[b]) {
+        (TrieNode::Branch(ca), TrieNode::Branch(cb)) => (ca, cb),
+        _ => return, // leaves: labels already known to agree
+    };
+    let mut merged = ca;
+    for (slot, y) in merged.iter_mut().zip(cb) {
+        match (*slot, y) {
+            (Some(x), Some(y)) => merge(trie, x as usize, y as usize),
+            (None, Some(y)) => *slot = Some(y),
+            _ => {}
+        }
+    }
+    trie[a] = TrieNode::Branch(merged);
+}
+
+/// Fold the merged, layered trie into an [`SPP`], one whole level at a time
+/// from the leaves up.
+///
+/// A leaf class becomes its accept/reject terminal.  A branch class becomes
+/// [`SPPstore::mk`] of its four children (already folded, one level below),
+/// with don't-care branches filled by [`heuristic_fill`].  Each class is folded
+/// once, however many parent edges point at it.
+fn build_spp(trie: &[TrieNode], levels: &[Vec<u32>], store: &mut SPPstore) -> SPP {
+    assert_eq!(levels.len(), 1 + store.num_vars() as usize);
+
+    let mut spp_of: Vec<Option<SPP>> = vec![None; trie.len()];
+    let mut zero = SPP::new(0);
+    for (i,level) in levels.iter().enumerate().rev() {
+        for &node in level {
+            let spp = match trie[node as usize] {
+                TrieNode::Leaf(label) => SPP::new(label as u32),
+                TrieNode::Branch(children) => {
+                    let spps = children.map(|c| c.map(|id| spp_of[id as usize].unwrap()));
+                    heuristic_fill(spps, zero, store)
+                }
+            };
+            spp_of[node as usize] = Some(spp);
+        }
+
+        // Except at the first iteration:
+        if i != store.num_vars() as usize {
+            zero = store.mk(zero, zero, zero, zero);
+        }
+    }
+    spp_of[0].unwrap()
+}
+
+fn heuristic_fill(spps: [Option<SPP>; 4], zero: SPP, store: &mut SPPstore) -> SPP {
     // Every branch has ≥1 child to fill the don't-cares with.
     let fill = spps
         .iter()
@@ -167,14 +266,6 @@ fn heuristic_fill(spps: [Option<SPP>; 4], store: &mut SPPstore) -> SPP {
     // Heuristic: don't change a field if we don't observe it changing
     let [x00, mut x01, mut x10, x11] = spps;
     if x01.is_none() && x10.is_none() {
-        // build a zero SPP of the right height
-        let mut zero = SPP::new(0);
-        let mut tmp = fill;
-        while tmp != SPP::new(0) && tmp != SPP::new(1) {
-            tmp = store.get(tmp).x00;
-            zero = store.mk(zero, zero, zero, zero);
-        }
-
         x01 = Some(zero);
         x10 = Some(zero);
     }
@@ -286,6 +377,26 @@ mod tests {
         for (i, o) in neg {
             assert!(!store.accepts(spp, i, o), "negative ({i:?},{o:?}) accepted");
         }
+    }
+
+    /// Two prefix cells with non-conflicting suffix evidence must be merged, so
+    /// positive evidence seen under one prefix generalizes to the other.  Here
+    /// the field-0 cells (0,0) and (1,1) exercise disjoint field-1 branches;
+    /// after merging, the accept observed under (0,0) at field 1 (branch (0,0))
+    /// carries over to the (1,1) prefix — without merging that cell holds only
+    /// the lone negative and collapses to reject-all.
+    #[test]
+    fn merges_compatible_prefixes() {
+        let mut store = SPPstore::new(N);
+        let spp = learn_spp(
+            [
+                ex(&[false, false], &[false, false], true),
+                ex(&[true, true], &[true, false], false),
+            ],
+            &mut store,
+        )
+        .unwrap();
+        assert!(store.accepts(spp, &[true, false], &[true, false]));
     }
 
     /// The core guarantee, fuzzed: for any non-conflicting example set, the

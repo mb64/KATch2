@@ -2114,7 +2114,7 @@ mod tests {
         let n = dfa.num_states();
         let wrapper = RandomVisibility {
             inner: dfa,
-            visible: (0..n).map(|_| rand::random::<bool>()).collect(),
+            visible: (0..n).map(|_| crate::fuzz::random::<bool>()).collect(),
         };
         EpsilonClosure::new(wrapper)
     }
@@ -2125,6 +2125,7 @@ mod tests {
         // independent of which states are visible.  So wrapping an
         // ExplicitDFA with random visibility flags and pushing it through
         // EpsilonClosure should give the same emptiness verdict.
+        crate::fuzz::seed_fuzzer(0x5EED_0001);
         let expr_depth = 4;
         let num_fields = 3;
         let max_trials = 500;
@@ -2151,6 +2152,7 @@ mod tests {
         // possibly through invisible intermediates.  Concatenating these per-
         // step paths yields a full path through the inner ENFA, every step of
         // which must be a valid `inner.transitions` step.
+        crate::fuzz::seed_fuzzer(0x5EED_0002);
         let expr_depth = 4;
         let num_fields = 3;
         let max_trials = 500;
@@ -2219,6 +2221,7 @@ mod tests {
         //   * have exactly one start (so dfa_start works);
         //   * accept its own random trace under both dfa_accepts and the
         //     underlying NFA's nfa_accepts.
+        crate::fuzz::seed_fuzzer(0x5EED_0003);
         let expr_depth = 4;
         let num_fields = 3;
         let max_trials = 500;
@@ -2265,6 +2268,7 @@ mod tests {
         // `reachable_from_trace` must reach at least all of those pairs --
         // it explores the full nondeterministic frontier, which is a
         // superset of any one accepting path.
+        crate::fuzz::seed_fuzzer(0x5EED_0004);
         let expr_depth = 4;
         let num_fields = 3;
         let max_trials = 500;
@@ -2305,6 +2309,7 @@ mod tests {
         // For a DFA `D` and any concrete triple `(input, trace, output)`:
         //   D.dfa_accepts(triple) iff NOT complement(D).dfa_accepts(triple).
         // Verify with a triple from each side (when non-empty).
+        crate::fuzz::seed_fuzzer(0x5EED_0005);
         let expr_depth = 4;
         let num_fields = 3;
         let max_trials = 500;
@@ -2349,6 +2354,7 @@ mod tests {
         // Property: union(A, B) accepts a triple iff A or B accepts it.
         // Forward: if A or B accepts a triple, union should too.
         // Reverse: any triple union accepts must be accepted by A or B.
+        crate::fuzz::seed_fuzzer(0x5EED_0006);
         let expr_depth = 4;
         let num_fields = 3;
         let max_trials = 500;
@@ -2398,6 +2404,7 @@ mod tests {
         // Property: intersection(A, B) accepts a triple iff both A and B do.
         // Tests both the NFA case and the DFA-DFA case (where the result is
         // a real DFA via the conditional `impl<A: DFA, B: DFA> DFA for ...`).
+        crate::fuzz::seed_fuzzer(0x5EED_0007);
         let expr_depth = 4;
         let num_fields = 3;
         let max_trials = 500;
@@ -2466,6 +2473,7 @@ mod tests {
 
     #[test]
     fn fuzz_explicit_dfa() {
+        crate::fuzz::seed_fuzzer(0x5EED_0008);
         let expr_depth = 4;
         let num_fields = 3;
         let max_trials = 500;
