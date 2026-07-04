@@ -200,7 +200,7 @@ def export_dot(g, filename, engine="neato"):
     print(f"Wrote {pdf_path}")
 
 
-def write_netkat(g, filename, fmt_katch):
+def write_netkat(g, filename, args):
     """
     Generate a NetKAT model from an igraph topology.
 
@@ -213,12 +213,14 @@ def write_netkat(g, filename, fmt_katch):
             port  -- output/input port
     """
 
-    inline_consts = True
-    expand_indices = False # requires inline_consts=True
-    suppress_nonempty = True
-    num_bad_paths = 1
-    num_good_paths = 10 
-    rand_seed = 3
+    output_comments = not args.no_comments
+    fmt_katch = not args.nkpl
+    inline_consts = not args.no_inline
+    expand_indices = args.expand_indices # requires inline_consts=True
+    suppress_nonempty = not args.allow_neq
+    num_bad_paths = args.num_bad
+    num_good_paths = args.num_good
+    rand_seed = args.seed
 
     random.seed(rand_seed)
 
@@ -276,7 +278,7 @@ def write_netkat(g, filename, fmt_katch):
         label_table = {}
         for i, label in enumerate(labels, start=1):
             if not inline_consts:
-                f.write(f"{label} = {i}\n")
+                f.write(f"{'def ' if fmt_katch else ''}{label} = {i}\n")
             label_table[label] = i
 
         if not inline_consts:
@@ -324,10 +326,16 @@ def write_netkat(g, filename, fmt_katch):
                 u_label = str(label_table[u_label])
             return u_label
 
+        def write_comment(f, indent, s):
+            if output_comments:
+                sp = " " * indent
+                f.write(f"{sp}{'//' if fmt_katch else '--'} {s}")
+
         ############################################################
         # topo
         ############################################################
 
+        write_comment(f, 0, f"NETWORK TOPOLOGY\n\n")
         f.write(f"{'def ' if fmt_katch else ''}topo =\n")
 
         first = True
@@ -343,12 +351,13 @@ def write_netkat(g, filename, fmt_katch):
                 (v, pv, u, pu),
             ]:
                 if not first:
-                    f.write("\n +\n")
+                    f.write(" +\n")
                 first = False
 
                 src_label = str_label(src)
                 dst_label = str_label(dst)
 
+                write_comment(f, 4, f"LINK: loc={labels[src]}, port={src_port}, dir=OUT --> loc:={labels[dst]}, port:={dst_port}, dir:=IN  \n")
                 f.write(
                     "    "
                     f"({str_field_test('loc',src_label)}; "
@@ -365,6 +374,7 @@ def write_netkat(g, filename, fmt_katch):
         # pol
         ############################################################
 
+        write_comment(f, 0, f"FORWARDING POLICY\n\n")
         f.write(f"{'def ' if fmt_katch else ''}pol =\n")
 
         flood = False
@@ -400,9 +410,10 @@ def write_netkat(g, filename, fmt_katch):
                         )
 
                         if not first:
-                            f.write("\n +\n")
+                            f.write(" +\n")
                         first = False
 
+                        write_comment(f, 4, f"RULE: loc={labels[here]}, port={in_port}, dir=IN --> port:={out_port}, dir:=OUT  \n")
                         f.write("    " + rule)
 
             f.write("\n\n")
@@ -494,16 +505,17 @@ def write_netkat(g, filename, fmt_katch):
 
                 rule = (
                     f"({str_field_test('loc',here_label)}; "
-                    f"{str_field_test('out',0)}; "
                     f"{str_field_test('dst',dst_label)}; "
+                    f"{str_field_test('out',0)}; "
                     f"{str_field_assign('port',out_port)}; "
                     f"{str_field_assign('out',1)})"
                 )
 
                 if not first:
-                    f.write("\n +\n")
+                    f.write(" +\n")
 
                 first = False
+                write_comment(f, 4, f"RULE: loc={labels[here]}, dst={labels[dst]}, dir=IN --> port:={out_port}, dir:=OUT  \n")
                 f.write("    " + rule)
 
             f.write("\n\n")
@@ -512,6 +524,7 @@ def write_netkat(g, filename, fmt_katch):
 
         ############################################################
 
+        write_comment(f, 0, f"GLOBAL NETWORK BEHAVIOR\n\n")
         f.write(f"{'hole h1' if fmt_katch else 'hole = skip'}\n")
         f.write(f"{'def ' if fmt_katch else ''}hop = {'h1' if fmt_katch else 'hole'}; pol; topo\n")
         f.write(f"{'def ' if fmt_katch else ''}net = (hop; dup)*\n\n")
@@ -520,7 +533,9 @@ def write_netkat(g, filename, fmt_katch):
         # Reachability checks
         ############################################################
 
+
         if not suppress_nonempty:
+            write_comment(f, 0, f"REACHABILITY CHECKS\n\n")
             for s in range(g.vcount()):
                 for d in range(g.vcount()):
                     if s == d:
@@ -529,6 +544,7 @@ def write_netkat(g, filename, fmt_katch):
                     s_label = str_label(s)
                     d_label = str_label(d)
 
+                    write_comment(f, 0, f"{labels[s]} --> {labels[d]}\n")
                     f.write(
                         f"{'assert' if fmt_katch else 'check'} {str_field_test('loc',s_label)}; "
                         f"net; "
@@ -541,7 +557,7 @@ def write_netkat(g, filename, fmt_katch):
         # Paths
         ############################################################
 
-        f.write(f"{'//' if fmt_katch else '--'} BLOCK BAD PATHS\n")
+        write_comment(f, 0, f"BLOCK BAD PATHS\n\n")
 
         bad_paths = random.sample(paths, k=num_bad_paths)
 
@@ -552,7 +568,7 @@ def write_netkat(g, filename, fmt_katch):
             d_label = str_label(p[-1])
             #f.write(f"bad path = {name}, first={s_label}, last={d_label}\n")
 
-            f.write(f"{'//' if fmt_katch else '--'} {name}\n")
+            write_comment(f, 0, f"{name}\n")
             f.write(
                 f"{'assert' if fmt_katch else 'check'} {str_field_test('loc',s_label)}; "
                 f"{str_field_test('dst',d_label)}; net; "
@@ -561,7 +577,7 @@ def write_netkat(g, filename, fmt_katch):
 
         f.write("\n")
 
-        f.write(f"{'//' if fmt_katch else '--'} ALLOW GOOD PATHS\n")
+        write_comment(f, 0, f"ALLOW GOOD PATHS\n\n")
 
         num_good_paths = min(num_good_paths, len(paths))
         print(f"Selecting {num_good_paths} out of {len(paths)} total paths")
@@ -569,7 +585,7 @@ def write_netkat(g, filename, fmt_katch):
 
         for p in good_paths:
             name = " -> ".join(labels[v] for v in p)
-            if True or name=="POR -> AVL -> WLG -> NLS":
+            if True: #or name=="POR -> AVL -> WLG -> NLS":
                 #print("\n\nPath:", name)
                 #print("Ports: ", port_of)
                 items = []
@@ -599,7 +615,7 @@ def write_netkat(g, filename, fmt_katch):
                 #print("Items: ", "; dup; ".join(items))
                 #print("Hops: ", "; dup; ".join(hops))
 
-                f.write(f"{'//' if fmt_katch else '--'} {name}\n")
+                write_comment(f, 0, f"{name}\n")
                 f.write(
                     f"{'assert' if fmt_katch else 'check'} ({first}{'; dup; '.join(items)})"
                     f" <= {'; dup; '.join(hops)}\n"
@@ -609,7 +625,14 @@ def write_netkat(g, filename, fmt_katch):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--nkpl", action="store_true")
+    parser.add_argument("--nkpl", action="store_true", help="Generate .nkpl (instead of .nksynth)")
+    parser.add_argument("--no-comments", action="store_true", help="Suppress comments in outputted solver file")
+    parser.add_argument("--no-inline", action="store_true", help="Don't inline named constants")
+    parser.add_argument("--expand-indices", action="store_true", help="Use expansion x[0..4]~13 --> x0=1;x1=1;x2=0;x3=1 (cannot be combined with --no-inline)")
+    parser.add_argument("--allow-neq", action="store_true", help="Allow use of <expr> != <expr>")
+    parser.add_argument("--num-bad", type=int, default=1, help="Number of bad paths")
+    parser.add_argument("--num-good", type=int, default=10, help="Number of good paths")
+    parser.add_argument("--seed", type=int, default=3, help="Random seed")
     parser.add_argument("filenames", nargs="+")
 
     args = parser.parse_args()
@@ -625,7 +648,7 @@ def main():
         print_edges(g)
 
         export_dot(g, filename, engine="neato")
-        write_netkat(g, filename, not args.nkpl)
+        write_netkat(g, filename, args)
 
         #draw_graph(g)
 
