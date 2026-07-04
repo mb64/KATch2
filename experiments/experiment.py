@@ -296,7 +296,7 @@ def write_netkat(g, filename, args):
                     return (loc_bits,loc_bits+loc_bits)
                 case "port":
                     return (loc_bits+loc_bits,loc_bits+loc_bits+port_bits)
-                case "out":
+                case "dir":
                     return (loc_bits+loc_bits+port_bits,loc_bits+loc_bits+port_bits+1)
 
         def str_field_ops(f, v, op1, op2):
@@ -362,10 +362,10 @@ def write_netkat(g, filename, args):
                     "    "
                     f"({str_field_test('loc',src_label)}; "
                     f"{str_field_test('port',src_port)}; "
-                    f"{str_field_test('out',1)}; "
+                    f"{str_field_test('dir',1)}; "
                     f"{str_field_assign('loc',dst_label)}; "
                     f"{str_field_assign('port',dst_port)}; "
-                    f"{str_field_assign('out',0)})"
+                    f"{str_field_assign('dir',0)})"
                 )
 
         f.write("\n\n")
@@ -404,9 +404,9 @@ def write_netkat(g, filename, args):
                         rule = (
                             f"({str_field_test('loc',here_label)}; "
                             f"{str_field_test('port',in_port)}; "
-                            f"{str_field_test('out',0)}; "
+                            f"{str_field_test('dir',0)}; "
                             f"{str_field_assign('port',out_port)}; "
-                            f"{str_field_assign('out',1)})"
+                            f"{str_field_assign('dir',1)})"
                         )
 
                         if not first:
@@ -506,9 +506,9 @@ def write_netkat(g, filename, args):
                 rule = (
                     f"({str_field_test('loc',here_label)}; "
                     f"{str_field_test('dst',dst_label)}; "
-                    f"{str_field_test('out',0)}; "
+                    f"{str_field_test('dir',0)}; "
                     f"{str_field_assign('port',out_port)}; "
-                    f"{str_field_assign('out',1)})"
+                    f"{str_field_assign('dir',1)})"
                 )
 
                 if not first:
@@ -600,7 +600,7 @@ def write_netkat(g, filename, args):
                         first = (
                             f"{str_field_test('loc',x_label)}; "
                             f"{str_field_test('port',0)}; "
-                            f"{str_field_test('out',0)}; "
+                            f"{str_field_test('dir',0)}; "
                         )
                     else:
                         #print("  port: ", str(port_of[(x,prev)]))
