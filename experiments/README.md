@@ -46,15 +46,15 @@ The direction `dir=OUT` (`dir=1`) means the packet is outgoing from that port, a
 `dir=IN` (`dir=0`) means the packet is incoming.
 
 The network topology moves the packet from an output port of one node,
-to an input port on another node, according to the links in the physical toplogy.
+to an input port on another node, according to the links in the physical topology.
 
 The forwarding policy moves the packet from an input port of a node to an ouput port
-of that node, based on the destination node (`dst=...`), using all-pairs shortest paths.
+of the same node, based on the destination node (`dst=...`), using all-pairs shortest paths.
 
 A certain number of bad/good paths are selected, based on the all-pairs shortest paths.
 For each bad path `src -> ... -> dst`, we assert that the set of paths from `src` to
 `dst` in the network is empty.
-For each good path `loc1 -> loc2 -> ... -> locN`, we assert that the path is contained
+For each good path `loc0 -> loc1 -> ... -> locN`, we assert that the path is contained
 in the N-hop unrolling of the network.
 ```
 // NETWORK TOPOLOGY
