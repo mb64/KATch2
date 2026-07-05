@@ -152,12 +152,12 @@ FINAL_VERDICTS = {"SAT", "UNSAT", "UNKNOWN"}
 
 def load_completed(csv_path):
     """
-    Return the set of (gml_file, num_bad, num_good, full, expand_indices)
-    tuples that have a final solver verdict already recorded in the CSV.
-    Rows that failed for non-solver reasons (TIMEOUT, ERROR, EXPERIMENT_ERROR,
-    MISSING_OUTPUT) are left out so they get retried. `full` and
-    `expand_indices` are tracked so switching either mode doesn't skip combos
-    solved under a different mode.
+    Return the set of (gml_file, num_bad, num_good, full, expand_indices,
+    force_unsat) tuples that have a final solver verdict already recorded in
+    the CSV. Rows that failed for non-solver reasons (TIMEOUT, ERROR,
+    EXPERIMENT_ERROR, MISSING_OUTPUT) are left out so they get retried.
+    `full`, `expand_indices`, and `force_unsat` are tracked so switching any
+    of these modes doesn't skip combos solved under a different mode.
     """
     completed = set()
     if not csv_path.exists():
@@ -174,6 +174,7 @@ def load_completed(csv_path):
                     int(row["num_good"]),
                     row.get("full", "True") == "True",
                     row.get("expand_indices", "True") == "True",
+                    row.get("force_unsat", "False") == "True",
                 ))
             except (KeyError, ValueError):
                 continue
@@ -189,6 +190,7 @@ FIELDNAMES = [
     "num_good",
     "full",
     "expand_indices",
+    "force_unsat",
     "seed",
     "experiment_returncode",
     "experiment_time_s",
@@ -232,6 +234,7 @@ def main():
     parser.add_argument("--no-full", dest="full", action="store_false", help="Use nksynth without --full")
     parser.add_argument("--expand-indices", dest="expand_indices", action="store_true", help="Pass --expand-indices to experiment.py")
     parser.add_argument("--no-expand-indices", dest="expand_indices", action="store_false", default=True, help="Don't pass --expand-indices to experiment.py (default)")
+    parser.add_argument("--force-unsat", action="store_true", help="Pass --force-unsat to experiment.py (selects bad paths as suffixes of good paths, to force UNSAT)")
     parser.add_argument("--force", action="store_true", help="Re-run combinations already present in the output CSV")
     args = parser.parse_args()
 
@@ -263,7 +266,7 @@ def main():
 
     total = len(combos)
     for i, (gml_path, num_bad, num_good) in enumerate(combos, 1):
-        key = (str(gml_path), num_bad, num_good, args.full, args.expand_indices)
+        key = (str(gml_path), num_bad, num_good, args.full, args.expand_indices, args.force_unsat)
         if key in completed:
             print(f"[{i}/{total}] skipping (already done): {gml_path} num_bad={num_bad} num_good={num_good}")
             continue
@@ -281,6 +284,8 @@ def main():
         ]
         if args.expand_indices:
             experiment_cmd.append("--expand-indices")
+        if args.force_unsat:
+            experiment_cmd.append("--force-unsat")
 
         row = {
             "gml_file": str(gml_path),
@@ -290,6 +295,7 @@ def main():
             "num_good": num_good,
             "full": args.full,
             "expand_indices": args.expand_indices,
+            "force_unsat": args.force_unsat,
             "seed": args.seed,
             "experiment_returncode": None,
             "experiment_time_s": None,

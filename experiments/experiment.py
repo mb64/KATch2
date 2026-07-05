@@ -558,14 +558,69 @@ def write_netkat(g, filename, args):
         # Paths
         ############################################################
 
-        write_comment(f, 0, f"BLOCK BAD PATHS\n\n")
+        def select_bad_and_good_paths(paths, num_bad_paths, num_good_paths):
+            """
+            Choose which shortest paths to block (bad) and which to require
+            (good). Isolated here so the selection strategy can be swapped
+            out later.
+            """
+            print(f"Selecting {num_bad_paths} out of {len(paths)} paths")
+            bad_paths = random.sample(paths, k=num_bad_paths)
 
-        print(f"Selecting {num_bad_paths} out of {len(paths)} paths")
-        bad_paths = random.sample(paths, k=num_bad_paths)
+            candidates = [p for p in paths if p not in bad_paths]
+
+            # A good path can never be reproduced if some bad path is a
+            # trailing segment of it (same destination, blocked source on
+            # its route) -- blocking that bad path would necessarily also
+            # block the good path.
+            candidates = [
+                p for p in candidates
+                if not any(b[-1] == p[-1] and b[0] in p for b in bad_paths)
+            ]
+
+            num_good = min(num_good_paths, len(candidates))
+            print(f"Selecting {num_good} out of {len(candidates)} paths")
+            good_paths = random.sample(candidates, num_good)
+
+            return bad_paths, good_paths
+
+        def select_bad_and_good_paths_force_unsat(paths, num_bad_paths, num_good_paths):
+            """
+            Deliberately construct an UNSAT instance: good paths are chosen
+            normally (restricted to length >= 3 so a suffix can be taken),
+            but each bad path is a random-length trailing suffix of one of
+            the good paths -- which forces a direct contradiction, since
+            blocking that suffix necessarily blocks the good path too (see
+            select_bad_and_good_paths).
+            """
+            candidates = [p for p in paths if len(p) >= 3]
+            if not candidates:
+                raise ValueError(
+                    "--force-unsat needs at least one shortest path of length >= 3 "
+                    "(3+ nodes) to take a suffix from, but this graph has none "
+                    "(likely a complete or near-complete graph, where every "
+                    "shortest path is a single direct edge)"
+                )
+
+            num_good = min(num_good_paths, len(candidates))
+            print(f"Selecting {num_good} out of {len(candidates)} paths (length >= 3)")
+            good_paths = random.sample(candidates, num_good)
+
+            bad_paths = []
+            for _ in range(num_bad_paths):
+                p = random.choice(good_paths)
+                start = random.randrange(0, len(p) - 1)  # leave >= 1 hop in the suffix
+                bad_paths.append(p[start:])
+
+            return bad_paths, good_paths
+
+        selector = select_bad_and_good_paths_force_unsat if args.force_unsat else select_bad_and_good_paths
+        bad_paths, good_paths = selector(paths, num_bad_paths, num_good_paths)
+
+        write_comment(f, 0, f"BLOCK BAD PATHS\n\n")
 
         for p in bad_paths:
             name = " -> ".join(labels[v] for v in p)
-            paths.remove(p)
             s_label = str_label(p[0])
             d_label = str_label(p[-1])
             #f.write(f"bad path = {name}, first={s_label}, last={d_label}\n")
@@ -579,19 +634,7 @@ def write_netkat(g, filename, args):
 
         f.write("\n")
 
-        # A good path can never be reproduced if some bad path is a trailing
-        # segment of it (same destination, blocked source on its route) --
-        # blocking that bad path would necessarily also block the good path.
-        paths = [
-            p for p in paths
-            if not any(b[-1] == p[-1] and b[0] in p for b in bad_paths)
-        ]
-
         write_comment(f, 0, f"ALLOW GOOD PATHS\n\n")
-
-        num_good_paths = min(num_good_paths, len(paths))
-        print(f"Selecting {num_good_paths} out of {len(paths)} paths")
-        good_paths = random.sample(paths, num_good_paths)
 
         for p in good_paths:
             name = " -> ".join(labels[v] for v in p)
@@ -643,6 +686,7 @@ def main():
     parser.add_argument("--allow-neq", action="store_true", help="Allow use of <expr> != <expr>")
     parser.add_argument("--num-bad", type=int, default=1, help="Number of bad paths")
     parser.add_argument("--num-good", type=int, default=10, help="Number of good paths")
+    parser.add_argument("--force-unsat", action="store_true", help="Select bad paths as suffixes of good paths, to force the model to be UNSAT")
     parser.add_argument("--seed", type=int, default=3, help="Random seed")
     parser.add_argument("filenames", nargs="+")
 
