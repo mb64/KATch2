@@ -100,4 +100,7 @@ assert (x[0..5]~17; x[10..13]~0; x[13..14]~0; x[5..10]~18; x[0..5]:=15; x[10..13
 
 # results-03.csv
 ./run-all.py --num-bad 1 --num-good 2 --timeout 30 --no-full
+
+# results-04.csv
+./run-all.py --num-bad 1 --num-good 3 --timeout 30 --no-full
 ```
