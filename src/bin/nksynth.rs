@@ -8,10 +8,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::thread;
 
 use clap::Parser;
 use katch2::holes::cegis::CegisError;
 use katch2::holes::parser::{desugar, parse_program};
+
+/// Large topologies can produce deeply recursive NetKAT expressions during
+/// automaton construction, which can overflow the default ~8MB main-thread
+/// stack. Run the solve on a thread with a much bigger stack instead.
+const STACK_SIZE: usize = 1 << 30; // 1 GiB
 
 /// Solve NetKAT synthesis (`.nksynth`) problems, reporting SAT or UNSAT.
 #[derive(Parser)]
@@ -36,6 +42,15 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
+    thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(run)
+        .expect("failed to spawn solver thread")
+        .join()
+        .expect("solver thread panicked")
+}
+
+fn run() -> ExitCode {
     let cli = Cli::parse();
     let full = cli.full && !cli.no_full;
 

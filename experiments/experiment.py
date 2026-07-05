@@ -284,7 +284,7 @@ def write_netkat(g, filename, args):
         if not inline_consts:
             f.write("\n")
 
-        num_elements = len(label_table)
+        num_elements = len(labels)
         loc_bits = num_elements.bit_length()
         #print(f"num elements = {num_elements}, bits = {loc_bits}")
 
@@ -323,7 +323,7 @@ def write_netkat(g, filename, args):
         def str_label(u):
             u_label = labels[u]
             if inline_consts:
-                u_label = str(label_table[u_label])
+                u_label = str(u + 1)
             return u_label
 
         def write_comment(f, indent, s):
@@ -453,10 +453,11 @@ def write_netkat(g, filename, args):
                         continue
 
                     path = g.get_shortest_paths(src, to=dst, output="vpath")[0]
-                    paths.append(path)
 
                     if len(path) < 2:
                         continue
+
+                    paths.append(path)
 
                     #
                     # Record the next hop for every switch on the path.
@@ -578,6 +579,14 @@ def write_netkat(g, filename, args):
 
         f.write("\n")
 
+        # A good path can never be reproduced if some bad path is a trailing
+        # segment of it (same destination, blocked source on its route) --
+        # blocking that bad path would necessarily also block the good path.
+        paths = [
+            p for p in paths
+            if not any(b[-1] == p[-1] and b[0] in p for b in bad_paths)
+        ]
+
         write_comment(f, 0, f"ALLOW GOOD PATHS\n\n")
 
         num_good_paths = min(num_good_paths, len(paths))
@@ -626,6 +635,7 @@ def write_netkat(g, filename, args):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--no-dot", action="store_true", help="Skip generating .dot/.pdf visualization")
     parser.add_argument("--nkpl", action="store_true", help="Generate .nkpl (instead of .nksynth)")
     parser.add_argument("--no-comments", action="store_true", help="Suppress comments in outputted solver file")
     parser.add_argument("--no-inline", action="store_true", help="Don't inline named constants")
@@ -648,7 +658,8 @@ def main():
         print_nodes(g)
         print_edges(g)
 
-        export_dot(g, filename, engine="neato")
+        if not args.no_dot:
+            export_dot(g, filename, engine="neato")
         write_netkat(g, filename, args)
 
         #draw_graph(g)

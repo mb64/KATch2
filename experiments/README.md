@@ -88,3 +88,10 @@ assert x[0..5]~7; x[5..10]~15; net; x[0..5]~15 = 0
 // check (loc=17; port=0; dir=IN; dst=18; loc:=15; port:=3 ; dup; loc:=18; port:=1 ) <= hop; dup; hop
 assert (x[0..5]~17; x[10..13]~0; x[13..14]~0; x[5..10]~18; x[0..5]:=15; x[10..13]:=3 ; dup; x[0..5]:=18; x[10..13]:=1 ) <= hop; dup; hop
 ```
+
+## Experimental Results
+
+```
+# results-01.csv
+./run-all.py --num-bad 1 --num-good 1 --timeout 30 --no-full
+```
