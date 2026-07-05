@@ -559,6 +559,7 @@ def write_netkat(g, filename, args):
 
         write_comment(f, 0, f"BLOCK BAD PATHS\n\n")
 
+        print(f"Selecting {num_bad_paths} out of {len(paths)} paths")
         bad_paths = random.sample(paths, k=num_bad_paths)
 
         for p in bad_paths:
@@ -580,7 +581,7 @@ def write_netkat(g, filename, args):
         write_comment(f, 0, f"ALLOW GOOD PATHS\n\n")
 
         num_good_paths = min(num_good_paths, len(paths))
-        print(f"Selecting {num_good_paths} out of {len(paths)} total paths")
+        print(f"Selecting {num_good_paths} out of {len(paths)} paths")
         good_paths = random.sample(paths, num_good_paths)
 
         for p in good_paths:
