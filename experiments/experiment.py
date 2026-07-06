@@ -217,6 +217,7 @@ def write_netkat(g, filename, args):
     fmt_katch = not args.nkpl
     inline_consts = not args.no_inline
     expand_indices = args.expand_indices # requires inline_consts=True
+    reverse_bits = args.reverse_bits
     suppress_nonempty = not args.allow_neq
     num_bad_paths = args.num_bad
     num_good_paths = args.num_good
@@ -307,7 +308,9 @@ def write_netkat(g, filename, args):
                     # KATch's x[start..end] is little-endian (position `start`
                     # is the LSB), but Python's :b format is MSB-first -- so
                     # reverse it before pairing with the ascending positions.
-                    binary = f"{int(v):0{width}b}"[::-1]
+                    binary = f"{int(v):0{width}b}"
+                    if reverse_bits:
+                        binary = binary[::-1]
                     pairs = list(zip(range(bits[0], bits[1]), map(int, binary)))
                     s = "; ".join(f"x{i}{op2}{bit}" for i, bit in pairs)
                 else:
@@ -686,6 +689,8 @@ def main():
     parser.add_argument("--no-comments", action="store_true", help="Suppress comments in outputted solver file")
     parser.add_argument("--no-inline", action="store_true", help="Don't inline named constants")
     parser.add_argument("--expand-indices", action="store_true", help="Use expansion x[0..4]~13 --> x0=1;x1=0;x2=1;x3=1 (cannot be combined with --no-inline)")
+    parser.add_argument("--reverse-bits", dest="reverse_bits", action="store_true", default=True, help="With --expand-indices, order expanded bits to match KATch's little-endian x[start..end] convention (default)")
+    parser.add_argument("--no-reverse-bits", dest="reverse_bits", action="store_false", help="With --expand-indices, don't reverse bit order (pre-fix/buggy behavior, for comparison)")
     parser.add_argument("--allow-neq", action="store_true", help="Allow use of <expr> != <expr>")
     parser.add_argument("--num-bad", type=int, default=1, help="Number of bad paths")
     parser.add_argument("--num-good", type=int, default=10, help="Number of good paths")
