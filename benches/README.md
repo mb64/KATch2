@@ -1,11 +1,12 @@
 # Synthesis benchmarks
 
 `benches/synthesis.rs` times the end-to-end CEGIS loop
-(`ProblemInstance::solve` / `solve_full`). It exists to measure the two
-clause-shrinking optimizations:
+(`ProblemInstance::solve` / `solve_full`). It exists to measure the three
+solver-shrinking optimizations:
 
-- the lower-bound **min-cut clause** builder (`src/holes/cegis.rs`), and
-- the **SMT clause simplification / merge** (`src/holes/smt.rs`).
+- the lower-bound **min-cut clause** builder (`src/holes/cegis.rs`),
+- the **SMT clause simplification / merge** (`src/holes/smt.rs`), and
+- the **greedy example cover** before passive learning (`src/holes/smt.rs`).
 
 ## Workload
 
@@ -27,21 +28,23 @@ cargo bench --bench synthesis            # all groups
 cargo bench --bench synthesis -- corpus  # filter by name substring
 ```
 
-## Did the optimizations help? (A/B via feature flags)
+## Did the optimizations help? (A/B via runtime flags)
 
-Each optimization is a Cargo feature (both on by default), so all four on/off
-combinations build from one tree — no branch-switching needed:
+Each optimization is a runtime flag (`katch2::flags`, all on by default),
+toggled with an environment variable, so every on/off combination runs from
+one compiled tree — no rebuilds or branch-switching needed:
 
-| feature | optimization |
+| env var | optimization |
 | --- | --- |
-| `lb_mincut` | lower-bound clause via min cut (vs. the frontier clause) |
-| `clause_merge` | collate SMT membership disjuncts before solving |
+| `KATCH2_LB_MINCUT` | lower-bound clause via min cut (vs. the frontier clause) |
+| `KATCH2_CLAUSE_MERGE` | collate SMT membership disjuncts before solving |
+| `KATCH2_EXAMPLE_COVER` | greedy set cover of examples before passive learning |
 
 The `Makefile` runs the synthesis bench under every combo, saving a Criterion
 baseline per combo so they auto-compare:
 
 ```sh
-make bench-all          # baselines: default, none, mincut, merge
+make bench-all          # baselines: default, none, mincut, merge, cover
 # then compare any two saved baselines (negative % = first is faster):
 cargo bench --bench synthesis -- --load-baseline mincut --baseline none
 ```
@@ -49,9 +52,11 @@ cargo bench --bench synthesis -- --load-baseline mincut --baseline none
 Or drive a single combo directly:
 
 ```sh
-cargo bench --bench synthesis                         # both on (default)
-cargo bench --bench synthesis --no-default-features   # both off (baseline)
-cargo bench --bench synthesis --no-default-features --features lb_mincut
+cargo bench --bench synthesis                      # all on (default)
+KATCH2_LB_MINCUT=0 KATCH2_CLAUSE_MERGE=0 KATCH2_EXAMPLE_COVER=0 \
+  cargo bench --bench synthesis                    # all off (baseline)
+KATCH2_CLAUSE_MERGE=0 KATCH2_EXAMPLE_COVER=0 \
+  cargo bench --bench synthesis                    # min cut only
 ```
 
 (The corpus is seeded, so it is identical across combos and the medians are

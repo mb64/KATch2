@@ -40,29 +40,20 @@
 //! * Lower-bound (`accept_literal`) is implemented for [`spp::SPP`] only;
 //!   [`crate::holes::cand::Cand`] panics if a lower-bound counterexample arises.
 
-#[cfg(feature = "lb_mincut")]
-use std::collections::VecDeque;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-#[cfg(feature = "lb_mincut")]
 use petgraph::Direction;
-#[cfg(feature = "lb_mincut")]
 use petgraph::algo::dinics;
-#[cfg(feature = "lb_mincut")]
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
-#[cfg(feature = "lb_mincut")]
 use petgraph::visit::EdgeRef;
 
+use crate::flags;
 use crate::holes::aut::{ENFA, ExplicitDFA, backward_reachable, forward_reachable};
 use crate::holes::candidate::Candidate;
 use crate::holes::inst::{self, Instantiate, LowerBoundCounterexample};
-#[cfg(not(feature = "lb_mincut"))]
-use crate::holes::nk_with_holes::AutWithHoles;
-use crate::holes::nk_with_holes::{EdgeLabel, Hole, State};
+use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Hole, State};
 use crate::holes::problem::Constraint;
-#[cfg(feature = "lb_mincut")]
-use crate::holes::smt::Literal;
-use crate::holes::smt::{AbstractClause, SmtLearner};
+use crate::holes::smt::{AbstractClause, Literal, SmtLearner};
 use crate::sp;
 use crate::spp;
 
@@ -239,7 +230,6 @@ fn add_upper_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     learner.add_clause(AbstractClause { literals }, sp_store);
 }
 
-#[cfg(feature = "lb_mincut")]
 /// One of the three packet regions an outer `(state, position)` node is split
 /// into in the abstract cut graph.
 ///
@@ -259,7 +249,6 @@ enum Region {
     Bwd,
 }
 
-#[cfg(feature = "lb_mincut")]
 /// Drop every non-`Outer` `(state, position)` key, projecting an
 /// [`Instantiate`] reachability map onto the underlying [`AutWithHoles`] states.
 fn outer_only<S>(map: HashMap<(inst::State<S>, usize), sp::SP>) -> HashMap<(State, usize), sp::SP> {
@@ -272,7 +261,6 @@ fn outer_only<S>(map: HashMap<(inst::State<S>, usize), sp::SP>) -> HashMap<(Stat
 }
 
 /// The SP of packets in `region` at outer node `(q, i)`.
-#[cfg(feature = "lb_mincut")]
 fn region_sp(
     store: &mut spp::SPPstore,
     forward: &HashMap<(State, usize), sp::SP>,
@@ -294,7 +282,6 @@ fn region_sp(
     }
 }
 
-#[cfg(feature = "lb_mincut")]
 /// Resolve a `(region, q, i)` to its graph node, allocating an `Int` node on
 /// demand.  Every `Fwd` region collapses into the single `source`, every `Bwd`
 /// into the single `sink` (the infinite-capacity connectors of the original
@@ -324,7 +311,6 @@ fn node_for(
 /// capacity, backward edges carrying flow) and returning every original edge
 /// from `R` into its complement.  Those edges are exactly saturated, and — by
 /// max-flow/min-cut — their total capacity is the max flow.
-#[cfg(feature = "lb_mincut")]
 fn min_cut_edges(graph: &DiGraph<(), u32>, source: NodeIndex, sink: NodeIndex) -> Vec<EdgeIndex> {
     let (_max_flow, flows) = dinics(graph, source, sink);
 
@@ -357,7 +343,27 @@ fn min_cut_edges(graph: &DiGraph<(), u32>, source: NodeIndex, sink: NodeIndex) -
         .collect()
 }
 
-#[cfg(feature = "lb_mincut")]
+/// Convert a lower-bound counterexample into an existential disjunctive clause
+/// for the learner, dispatching on [`flags::lb_mincut`]: the min-cut clause
+/// ([`add_lower_bound_clause_mincut`]) when on, the frontier clause
+/// ([`add_lower_bound_clause_frontier`]) when off.
+fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
+    cex: LowerBoundCounterexample,
+    inst: &mut Instantiate<C>,
+    hole_to_var: &HashMap<Hole, C::Var>,
+    learner: &mut L,
+    store: &mut spp::SPPstore,
+    reference_dfa: &'a ExplicitDFA,
+) where
+    <C as ENFA>::State: Ord,
+{
+    if flags::lb_mincut() {
+        add_lower_bound_clause_mincut(cex, inst, hole_to_var, learner, store, reference_dfa)
+    } else {
+        add_lower_bound_clause_frontier(cex, inst, hole_to_var, learner, store, reference_dfa)
+    }
+}
+
 /// Convert a lower-bound counterexample into an existential disjunctive clause
 /// for the learner, using a **min-cut** over an abstract reachability graph to
 /// keep the clause small.
@@ -387,7 +393,7 @@ fn min_cut_edges(graph: &DiGraph<(), u32>, source: NodeIndex, sink: NodeIndex) -
 /// is a set of hole edges separating "reachable now" from "co-reaches the
 /// output"; the disjunction of their literals is the clause.  An empty cut →
 /// empty clause → instant UNSAT (no extension can fix the counterexample).
-fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
+fn add_lower_bound_clause_mincut<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     cex: LowerBoundCounterexample,
     inst: &mut Instantiate<C>,
     hole_to_var: &HashMap<Hole, C::Var>,
@@ -566,8 +572,8 @@ fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
 }
 
 /// Convert a lower-bound counterexample into an existential disjunctive
-/// clause for the learner — the **frontier** clause used when the `lb_mincut`
-/// optimization is disabled.
+/// clause for the learner — the **frontier** clause used when
+/// [`flags::lb_mincut`] is off.
 ///
 /// For each hole-bearing edge or output summand in the automaton, we compute
 /// three SPs: (1) packets that actually reach the in-side under the *current*
@@ -576,8 +582,7 @@ fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
 /// *all-top* instantiation.  The site is viable iff `(1)` and `(3) ∩ ¬(2)` are
 /// both non-empty; every viable site becomes a positive literal, all joined
 /// into one clause.  Empty sites → empty clause → instant UNSAT.
-#[cfg(not(feature = "lb_mincut"))]
-fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
+fn add_lower_bound_clause_frontier<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     cex: LowerBoundCounterexample,
     inst: &mut Instantiate<C>,
     hole_to_var: &HashMap<Hole, C::Var>,
@@ -652,7 +657,6 @@ fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
 
 /// A single hole site discovered while walking the hole-bearing automaton along
 /// the counterexample trace (frontier clause; see [`add_lower_bound_clause`]).
-#[cfg(not(feature = "lb_mincut"))]
 struct HoleSite<'a> {
     hole: Hole,
     /// SP of carry-in packets that *are* forward-reachable under the current
@@ -667,7 +671,6 @@ struct HoleSite<'a> {
 
 /// Walk every state reachable from `start` and collect a [`HoleSite`] for each
 /// hole edge whose `(in_sp, out_sp)` are both non-empty.
-#[cfg(not(feature = "lb_mincut"))]
 fn collect_hole_sites<'a>(
     aut: &mut AutWithHoles,
     start: State,
@@ -1051,12 +1054,10 @@ mod tests {
 
     // ---- min-cut helper ------------------------------------------------
 
-    #[cfg(feature = "lb_mincut")]
     use petgraph::graph::DiGraph;
 
     /// Two capacity-1 (hole) edges in series, joined by an infinite (concrete)
     /// backbone edge: the min cut is the single bottleneck, not both holes.
-    #[cfg(feature = "lb_mincut")]
     #[test]
     fn min_cut_series_picks_one() {
         const INF: u32 = 1 << 30;
@@ -1075,7 +1076,6 @@ mod tests {
 
     /// Two capacity-1 edges in parallel: both must be cut (no smaller
     /// separator exists), so shrinking would be unsound.
-    #[cfg(feature = "lb_mincut")]
     #[test]
     fn min_cut_parallel_keeps_both() {
         let mut g: DiGraph<(), u32> = DiGraph::new();
@@ -1092,7 +1092,6 @@ mod tests {
 
     /// A diamond: one hole into a fork, then two holes out.  The single
     /// upstream hole is the bottleneck, so the cut is just that one edge.
-    #[cfg(feature = "lb_mincut")]
     #[test]
     fn min_cut_diamond_bottleneck() {
         const INF: u32 = 1 << 30;
@@ -1111,7 +1110,6 @@ mod tests {
     }
 
     /// No source→sink path → empty cut (an unfixable, purely-concrete gap).
-    #[cfg(feature = "lb_mincut")]
     #[test]
     fn min_cut_disconnected_is_empty() {
         let mut g: DiGraph<(), u32> = DiGraph::new();

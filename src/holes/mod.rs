@@ -282,11 +282,11 @@ pub fn solve_holes_full<'a>(
 
 #[cfg(test)]
 mod test {
-    use katch2::expr::Expr;
-    use katch2::holes::aut::expr_to_dfa;
-    use katch2::holes::nk_with_holes::{Expr as HExpr, Hole};
-    use katch2::holes::solve_holes;
-    use katch2::spp::SPPstore;
+    use crate::expr::Expr;
+    use crate::holes::aut::expr_to_dfa;
+    use crate::holes::nk_with_holes::{Expr as HExpr, Hole};
+    use crate::holes::solve_holes;
+    use crate::spp::SPPstore;
 
     #[test]
     fn two_holes() {
@@ -361,8 +361,8 @@ mod test {
         slow(4);
     }
 
-    use katch2::holes::cegis::CegisError;
-    use katch2::holes::{full_reference_dfa, solve_holes_full};
+    use crate::holes::cegis::CegisError;
+    use crate::holes::{full_reference_dfa, solve_holes_full};
 
     /// `solve_holes_full` should solve a problem that `solve_holes` already
     /// handles with a plain dup-free SPP: `dup ; Hole(0) == dup ; (x0 := 1)`.
@@ -469,7 +469,7 @@ mod test {
     // (see `roundtrip_three_hole_chain_blowup`), and the cap turns that into
     // a tolerated `IterationLimit` rather than a (very long) wait.
 
-    use katch2::expr::Exp;
+    use crate::expr::Exp;
     use std::collections::BTreeSet;
 
     /// Field count for the fuzzer.  Small keeps the SPPs (and DFAs) tiny.
@@ -1004,9 +1004,9 @@ mod test {
 /// and solve it.
 #[cfg(test)]
 mod end_to_end {
-    use katch2::holes::cegis::CegisError;
-    use katch2::holes::parser::{desugar, parse_program};
-    use katch2::holes::problem::Hole;
+    use crate::holes::cegis::CegisError;
+    use crate::holes::parser::{desugar, parse_program};
+    use crate::holes::problem::Hole;
 
     /// `h == (x0 := 1)`: the dup-free solver finds the assignment SPP directly.
     #[test]
@@ -1048,7 +1048,7 @@ mod end_to_end {
     }
 
     /// `h == (x0 := 1) ; dup`: the hole must emit a `dup`, which a dup-free
-    /// [`SPP`](katch2::spp::SPP) cannot — so `solve` reports infeasible, while
+    /// [`SPP`](crate::spp::SPP) cannot — so `solve` reports infeasible, while
     /// `solve_full` synthesizes it (returning the hole as a DFA).
     #[test]
     fn full_solver_handles_dup() {

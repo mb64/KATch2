@@ -18,7 +18,7 @@
 //! into [`crate::expr::Expr::Hole`] and inlining definitions — is a separate
 //! pass and not the parser's job.
 
-use crate::desugar::{desugar_with_env, DesugarEnv, DesugarError};
+use crate::desugar::{DesugarEnv, DesugarError, desugar_with_env};
 use crate::expr::{Exp, Expr, Hole};
 use crate::holes::aut::expr_to_dfa;
 use crate::holes::nk_with_holes::Expr as HExpr;
