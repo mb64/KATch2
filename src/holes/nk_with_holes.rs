@@ -58,6 +58,27 @@ impl Expr {
     pub fn star(e: Expr) -> Self {
         Expr::Star(Box::new(e))
     }
+
+    /// Recursively collapse fully-concrete subterms into single SPPs:
+    /// `Sequence(Spp, Spp)`, `Union(Spp, Spp)`, and `Star(Spp)` fold via
+    /// the corresponding [`spp::SPPstore`] operations.
+    pub fn simplify(&self, store: &mut spp::SPPstore) -> Expr {
+        match self {
+            Expr::Spp(_) | Expr::Hole(_) | Expr::Dup => self.clone(),
+            Expr::Union(a, b) => match (a.simplify(store), b.simplify(store)) {
+                (Expr::Spp(a), Expr::Spp(b)) => Expr::Spp(store.union(a, b)),
+                (a, b) => Expr::union(a, b),
+            },
+            Expr::Sequence(a, b) => match (a.simplify(store), b.simplify(store)) {
+                (Expr::Spp(a), Expr::Spp(b)) => Expr::Spp(store.sequence(a, b)),
+                (a, b) => Expr::sequence(a, b),
+            },
+            Expr::Star(e) => match e.simplify(store) {
+                Expr::Spp(s) => Expr::Spp(store.star(s)),
+                e => Expr::star(e),
+            },
+        }
+    }
 }
 
 /// One edge of the automaton: either a concrete SPP or a hole standing for
