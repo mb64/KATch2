@@ -7,6 +7,7 @@
 pub mod aut;
 pub mod desugar;
 pub mod expr;
+pub mod flags;
 #[cfg(test)]
 pub mod fuzz;
 pub mod holes;

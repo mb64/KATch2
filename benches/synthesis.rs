@@ -3,8 +3,9 @@
 //! These time the full CEGIS loop ([`ProblemInstance::solve`] /
 //! [`ProblemInstance::solve_full`]), so they measure the cost of everything the
 //! optimizations touch: the lower-bound min-cut clause builder (`holes::cegis`)
-//! and the SMT clause simplification (`holes::smt`). Both shrink the formulas
-//! handed to Z3, so the signal shows up as reduced wall-clock solve time.
+//! and the SMT clause simplification and greedy example cover (`holes::smt`).
+//! All shrink the formulas handed to Z3 or the examples handed to the passive
+//! learners, so the signal shows up as reduced wall-clock solve time.
 //!
 //! The headline workload is a **synthetic corpus**: a seeded, deterministic set
 //! of randomly-generated *satisfiable-by-construction* instances (same
@@ -19,9 +20,10 @@
 //! deterministic, refinement-heavy UNSAT workload — the case that most stresses
 //! the lower-bound clause machinery.
 //!
-//! Each optimization is a Cargo feature (`lb_mincut`, `clause_merge`, both on
-//! by default), so all four on/off combinations build from one tree — see
-//! `benches/README.md` and the `Makefile` (`make bench-all`) for the A/B.
+//! Each optimization is a runtime flag (`katch2::flags`, all on by default),
+//! toggled via `KATCH2_*` environment variables, so every on/off combination
+//! runs from one compiled tree — see `benches/README.md` and the `Makefile`
+//! (`make bench-all`) for the A/B.
 
 use std::collections::BTreeSet;
 use std::hint::black_box;

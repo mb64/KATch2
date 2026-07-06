@@ -27,8 +27,9 @@
 //! Positive SPP membership disjuncts are stated over packet *sets*
 //! ([`Literal::SppMember`], a triple `(spp, in_sp, out_sp)` meaning
 //! "∃ i ∈ in_sp, o ∈ out_sp. (i,o) ∈ spp").  [`SmtLearner::add_clause`] first
-//! collates these triples with [`merge_by`] — unioning output sets that share
-//! an `(spp, in_sp)`, then input sets that share an `(spp, out_sp)` — and only
+//! collates these triples with [`merge_by`] (the [`flags::clause_merge`]
+//! optimization) — unioning output sets that share an `(spp, in_sp)`, then
+//! input sets that share an `(spp, out_sp)` — and only
 //! then allocates the existentials and SP-membership constraints that encode
 //! each surviving disjunct.  Deferring existentialization this way is what lets
 //! the set-merge fire; the merge is equivalence-preserving because the shared
@@ -47,29 +48,34 @@
 //!    Bool^{n} (pkt_end) x Bool^{n} (pkt_out) -> Bool`, where `N` is the DFA's
 //!    state count.
 //! 2. Each clause becomes a disjunction of literals, each an application of the
-//!    slot's function (or its negation when polarity is false).
-//! 3. After Z3 solves, [`z3::FuncInterp::get_entries`] gives a list of concrete
-//!    inputs, fed to the appropriate BDD-style learner.
-//!
-//! `model.compact = false` is set globally so each function interpretation
-//! enumerates every input that the constraints touch; the `else` default is
-//! discarded.  This is sound because in the quantifier-free encoding every
-//! application is at a concrete (or Z3-decided existential) pattern, so each
-//! constrained input appears as an explicit entry.
+//!    slot's function (or its negation when polarity is false); each asserted
+//!    literal is also recorded so the clause structure survives to extraction.
+//! 3. After Z3 solves, a greedy set-cover pass (the [`flags::example_cover`]
+//!    optimization; flag off → every constrained atom is kept) walks the
+//!    clauses in assertion order and selects, for each clause not already
+//!    covered, one literal that is true under the model.  Atoms are keyed by
+//!    (slot, concrete evaluated arguments), so one selected atom covers every
+//!    clause it appears in.
+//! 4. Only the selected literals become training examples for the BDD-style
+//!    learners: the argument bits evaluated under the model, labelled with the
+//!    literal's polarity.  This is sound — every clause keeps a true literal,
+//!    and the learners agree with every example fed to them — and dropping the
+//!    unselected atoms frees the learners to generalize, producing smaller
+//!    diagrams than replaying Z3's full function interpretations would.
 
 use z3::{
-    FuncDecl, SatResult, Solver, Sort,
+    FuncDecl, Model, SatResult, Solver, Sort,
     ast::{Ast, Bool, Dynamic, Int},
-    set_global_param,
 };
 
+use crate::flags;
 use crate::holes::aut::ExplicitDFA;
 use crate::holes::cand::{Cand, Input};
 use crate::sp::{SP, SPstore};
 use crate::spp::learner::{Example, learn_spp};
 use crate::spp::{SPP, SPPstore, Var};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -200,6 +206,29 @@ pub trait SmtLearner<'a> {
     fn extract(&mut self, spp_store: &mut SPPstore) -> Result<Solution<'a>, InconsistentError>;
 }
 
+/// Which learnable slot a [`TrackedLit`] applies, by slot index.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+enum SlotRef {
+    Spp(u32),
+    Cand(u32),
+}
+
+/// One asserted literal, mirrored from its Z3 assertion for extraction: the
+/// slot whose membership function is applied, the exact argument ASTs it was
+/// applied to (these may contain existential Bool consts), and the polarity.
+struct TrackedLit {
+    slot: SlotRef,
+    args: Vec<Dynamic>,
+    polarity: bool,
+}
+
+/// The examples chosen by [`Z3::select_examples`], grouped by slot index.
+/// Slots absent from a map had no literal selected for them.
+struct SelectedExamples {
+    spps: HashMap<u32, Vec<Example>>,
+    cands: HashMap<u32, Vec<(Input, bool)>>,
+}
+
 /// [`SmtLearner`] backed by Z3, driving its `QF_UF` solver.
 pub struct Z3<'a> {
     num_vars: Var,
@@ -211,17 +240,21 @@ pub struct Z3<'a> {
     /// it predicates over, indexed by [`CandVar::0`].
     cands: Vec<(FuncDecl, &'a ExplicitDFA)>,
     existentials: Vec<Bool>,
+    /// One entry per asserted clause, in assertion order: the literals of the
+    /// disjunction, mirroring the Z3 assertion literal-for-literal.  Consumed
+    /// by the example selection in [`SmtLearner::extract`].
+    clauses: Vec<Vec<TrackedLit>>,
 }
 
 impl<'a> SmtLearner<'a> for Z3<'a> {
     fn new(num_vars: Var) -> Self {
-        set_global_param("model.compact", "false");
         Self {
             num_vars,
             solver: Solver::new(),
             spps: Vec::new(),
             cands: Vec::new(),
             existentials: Vec::new(),
+            clauses: Vec::new(),
         }
     }
 
@@ -279,12 +312,13 @@ impl<'a> SmtLearner<'a> for Z3<'a> {
     /// Add an abstract clause.  The corresponding Z3 assertion is added
     /// immediately.
     ///
-    /// [`Literal::SppMember`] disjuncts are first collated by [`merge_by`] —
-    /// merging output sets that share an `(spp, in_sp)`, then input sets that
-    /// share an `(spp, out_sp)` — before each surviving triple is turned into
-    /// existentials plus SP-membership constraints.  The merge is
-    /// equivalence-preserving (the shared `∃` factors out of the union), so it
-    /// shrinks the disjunction without changing its meaning.
+    /// When [`flags::clause_merge`] is on, [`Literal::SppMember`] disjuncts
+    /// are first collated by [`merge_by`] — merging output sets that share an
+    /// `(spp, in_sp)`, then input sets that share an `(spp, out_sp)` — before
+    /// each surviving triple is turned into existentials plus SP-membership
+    /// constraints.  The merge is equivalence-preserving (the shared `∃`
+    /// factors out of the union), so it shrinks the disjunction without
+    /// changing its meaning.
     fn add_clause(&mut self, clause: AbstractClause, sp_store: &mut SPstore) {
         let n = self.num_vars as usize;
 
@@ -299,12 +333,11 @@ impl<'a> SmtLearner<'a> for Z3<'a> {
             }
         }
 
-        // Collate the membership disjuncts (the `clause_merge` optimization):
-        // rule 1 unions output sets sharing a (hole, input set); rule 2 unions
-        // input sets sharing a (hole, output set).  Disabled → each triple is
-        // existentialized on its own.
-        #[cfg(feature = "clause_merge")]
-        let members = {
+        // Collate the membership disjuncts (the [`flags::clause_merge`]
+        // optimization): rule 1 unions output sets sharing a (hole, input
+        // set); rule 2 unions input sets sharing a (hole, output set).
+        // Disabled → each triple is existentialized on its own.
+        let members = if flags::clause_merge() {
             let members = merge_by(
                 members,
                 |&(h, s, _)| (h.0, s.0),
@@ -315,9 +348,12 @@ impl<'a> SmtLearner<'a> for Z3<'a> {
                 |&(h, _, t)| (h.0, t.0),
                 |a, b| (a.0, sp_store.union(a.1, b.1), a.2),
             )
+        } else {
+            members
         };
 
         let mut lit_asts: Vec<Bool> = Vec::with_capacity(members.len() + others.len());
+        let mut tracked: Vec<TrackedLit> = Vec::with_capacity(members.len() + others.len());
 
         // Each merged membership triple becomes a fresh existential pair pinned
         // to its (in_sp, out_sp) by SP-membership, applied positively.
@@ -328,17 +364,24 @@ impl<'a> SmtLearner<'a> for Z3<'a> {
             self.add_sp_membership(out_sp, &out_vars, sp_store);
             let ap1: AbstractPacket = in_vars.into_iter().map(AbstractBit::Exist).collect();
             let ap2: AbstractPacket = out_vars.into_iter().map(AbstractBit::Exist).collect();
-            lit_asts.push(self.apply_spp(spp, &ap1, &ap2, true));
+            let slot = SlotRef::Spp(spp.0);
+            let args = self.spp_args(&ap1, &ap2);
+            lit_asts.push(self.apply_slot(slot, &args, true));
+            tracked.push(TrackedLit {
+                slot,
+                args,
+                polarity: true,
+            });
         }
 
         for lit in &others {
-            let applied = match lit {
+            let (slot, args, polarity) = match lit {
                 Literal::Spp {
                     spp,
                     ap1,
                     ap2,
                     polarity,
-                } => self.apply_spp(*spp, ap1, ap2, *polarity),
+                } => (SlotRef::Spp(spp.0), self.spp_args(ap1, ap2), *polarity),
                 Literal::SppMember { .. } => unreachable!("SppMember split out above"),
                 Literal::Cand {
                     cand,
@@ -348,39 +391,18 @@ impl<'a> SmtLearner<'a> for Z3<'a> {
                     pkt_end,
                     pkt_out,
                     polarity,
-                } => {
-                    let (f, dfa) = &self.cands[cand.0 as usize];
-                    let ns = dfa.num_states();
-                    assert_eq!(pkt_in.len(), n, "pkt_in length mismatch");
-                    assert_eq!(pkt_start.len(), n, "pkt_start length mismatch");
-                    assert_eq!(pkt_end.len(), n, "pkt_end length mismatch");
-                    assert_eq!(pkt_out.len(), n, "pkt_out length mismatch");
-                    assert_eq!(states.len(), ns, "states length mismatch");
-                    let mut args: Vec<Dynamic> = Vec::with_capacity(4 * n + ns);
-                    for b in pkt_in {
-                        args.push(self.bit_arg(b));
-                    }
-                    for b in pkt_start {
-                        args.push(self.bit_arg(b));
-                    }
-                    for &s in states {
-                        // The DFA is complete (any sink is a real state), so every
-                        // state value lies in `0..ns`.
-                        assert!(s < ns, "state value out of range");
-                        args.push(Dynamic::from_ast(&Int::from_u64(s as u64)));
-                    }
-                    for b in pkt_end {
-                        args.push(self.bit_arg(b));
-                    }
-                    for b in pkt_out {
-                        args.push(self.bit_arg(b));
-                    }
-                    let arg_refs: Vec<&dyn Ast> = args.iter().map(|a| a as &dyn Ast).collect();
-                    let a = f.apply(&arg_refs).as_bool().expect("f has Bool range");
-                    if *polarity { a } else { a.not() }
-                }
+                } => (
+                    SlotRef::Cand(cand.0),
+                    self.cand_args(*cand, pkt_in, pkt_start, states, pkt_end, pkt_out),
+                    *polarity,
+                ),
             };
-            lit_asts.push(applied);
+            lit_asts.push(self.apply_slot(slot, &args, polarity));
+            tracked.push(TrackedLit {
+                slot,
+                args,
+                polarity,
+            });
         }
 
         let body = match lit_asts.len() {
@@ -389,14 +411,18 @@ impl<'a> SmtLearner<'a> for Z3<'a> {
             _ => Bool::or(&lit_asts),
         };
         self.solver.assert(&body);
+        self.clauses.push(tracked);
     }
 
     /// Solve once and extract a concrete diagram for each allocated slot.
     ///
-    /// Each SPP comes from feeding its function's [`z3::FuncInterp`] entries
-    /// into [`crate::spp::learner::learn_spp`]; each [`Cand`] from feeding its
-    /// entries into [`Cand::from_examples`].  Both inherit the
-    /// BDD-style inductive bias of those learners.
+    /// After Z3 finds a model, [`Z3::select_examples`] picks the training
+    /// examples for [`crate::spp::learner::learn_spp`] (SPP slots) and
+    /// [`Cand::from_examples`] (Cand slots).  Under [`flags::example_cover`]
+    /// (the default) it greedily picks one literal true under the model per
+    /// not-yet-covered clause; feeding fewer examples keeps every clause
+    /// satisfied while leaving more room for the BDD-style inductive bias of
+    /// those learners.
     fn extract(&mut self, spp_store: &mut SPPstore) -> Result<Solution<'a>, InconsistentError> {
         match self.solver.check() {
             SatResult::Unsat => return Err(InconsistentError),
@@ -404,63 +430,22 @@ impl<'a> SmtLearner<'a> for Z3<'a> {
             SatResult::Sat => {}
         }
         let model = self.solver.get_model().expect("model after Sat");
-        let n = self.num_vars as usize;
+        let mut examples = self.select_examples(&model, flags::example_cover());
 
-        // SPP slots.
+        // SPP slots.  A slot with no selected literals gets no examples and
+        // learns the empty SPP.
         let mut spps = HashMap::with_capacity(self.spps.len());
-        for (idx, f) in self.spps.iter().enumerate() {
-            // Each func-interp entry is one concrete training example; an
-            // unconstrained UF has no interp, so no examples → the empty SPP.
-            let mut examples: Vec<Example> = Vec::new();
-            if let Some(interp) = model.get_func_interp(f) {
-                for entry in interp.get_entries() {
-                    let args = entry.get_args();
-                    let in_spp = read_polarity(&entry.get_value());
-                    let bits: Vec<bool> = args.iter().map(read_bit).collect();
-                    assert_eq!(bits.len(), 2 * n);
-                    examples.push(Example {
-                        input: bits[..n].to_vec(),
-                        output: bits[n..].to_vec(),
-                        in_spp,
-                    });
-                }
-            }
-
-            let spp = learn_spp(examples, spp_store).expect("Z3 model is internally consistent");
-            spps.insert(SppVar(idx as u32), spp);
+        for idx in 0..self.spps.len() as u32 {
+            let exs = examples.spps.remove(&idx).unwrap_or_default();
+            let spp = learn_spp(exs, spp_store).expect("Z3 model is internally consistent");
+            spps.insert(SppVar(idx), spp);
         }
 
         // Cand slots.
         let mut cands = HashMap::with_capacity(self.cands.len());
-        for (idx, (f, dfa)) in self.cands.iter().enumerate() {
-            let ns = dfa.num_states();
-            let mut examples: Vec<(Input, bool)> = Vec::new();
-
-            if let Some(interp) = model.get_func_interp(f) {
-                for entry in interp.get_entries() {
-                    let args = entry.get_args();
-                    assert_eq!(args.len(), 4 * n + ns);
-                    let polarity = read_polarity(&entry.get_value());
-                    let pkt_in = args[..n].iter().map(read_bit).collect();
-                    let pkt_start = args[n..2 * n].iter().map(read_bit).collect();
-                    let states: Vec<usize> =
-                        args[2 * n..2 * n + ns].iter().map(read_state).collect();
-                    let pkt_end = args[2 * n + ns..3 * n + ns].iter().map(read_bit).collect();
-                    let pkt_out = args[3 * n + ns..4 * n + ns].iter().map(read_bit).collect();
-                    examples.push((
-                        Input {
-                            pkt_in,
-                            pkt_start,
-                            states,
-                            pkt_end,
-                            pkt_out,
-                        },
-                        polarity,
-                    ));
-                }
-            }
-
-            let cand = Cand::from_examples(spp_store, dfa, &examples)
+        for (idx, (_, dfa)) in self.cands.iter().enumerate() {
+            let exs = examples.cands.remove(&(idx as u32)).unwrap_or_default();
+            let cand = Cand::from_examples(spp_store, dfa, &exs)
                 .expect("Z3 model is internally consistent");
             cands.insert(CandVar(idx as u32), cand);
         }
@@ -511,15 +496,9 @@ impl<'a> Z3<'a> {
         result
     }
 
-    /// Build the Z3 Bool for an SPP-membership literal: apply slot `spp`'s
-    /// uninterpreted function to `(ap1, ap2)`, negating when `!polarity`.
-    fn apply_spp(
-        &self,
-        spp: SppVar,
-        ap1: &[AbstractBit],
-        ap2: &[AbstractBit],
-        polarity: bool,
-    ) -> Bool {
+    /// Z3 arguments for an SPP-membership application: the bits of `ap1`
+    /// followed by the bits of `ap2`.
+    fn spp_args(&self, ap1: &[AbstractBit], ap2: &[AbstractBit]) -> Vec<Dynamic> {
         let n = self.num_vars as usize;
         assert_eq!(ap1.len(), n, "ap1 length mismatch");
         assert_eq!(ap2.len(), n, "ap2 length mismatch");
@@ -529,10 +508,197 @@ impl<'a> Z3<'a> {
                 args.push(self.bit_arg(b));
             }
         }
+        args
+    }
+
+    /// Z3 arguments for a Cand-membership application:
+    /// `pkt_in ++ pkt_start ++ states ++ pkt_end ++ pkt_out`.
+    fn cand_args(
+        &self,
+        cand: CandVar,
+        pkt_in: &[AbstractBit],
+        pkt_start: &[AbstractBit],
+        states: &[usize],
+        pkt_end: &[AbstractBit],
+        pkt_out: &[AbstractBit],
+    ) -> Vec<Dynamic> {
+        let n = self.num_vars as usize;
+        let (_, dfa) = &self.cands[cand.0 as usize];
+        let ns = dfa.num_states();
+        assert_eq!(pkt_in.len(), n, "pkt_in length mismatch");
+        assert_eq!(pkt_start.len(), n, "pkt_start length mismatch");
+        assert_eq!(pkt_end.len(), n, "pkt_end length mismatch");
+        assert_eq!(pkt_out.len(), n, "pkt_out length mismatch");
+        assert_eq!(states.len(), ns, "states length mismatch");
+        let mut args: Vec<Dynamic> = Vec::with_capacity(4 * n + ns);
+        for b in pkt_in {
+            args.push(self.bit_arg(b));
+        }
+        for b in pkt_start {
+            args.push(self.bit_arg(b));
+        }
+        for &s in states {
+            // The DFA is complete (any sink is a real state), so every
+            // state value lies in `0..ns`.
+            assert!(s < ns, "state value out of range");
+            args.push(Dynamic::from_ast(&Int::from_u64(s as u64)));
+        }
+        for b in pkt_end {
+            args.push(self.bit_arg(b));
+        }
+        for b in pkt_out {
+            args.push(self.bit_arg(b));
+        }
+        args
+    }
+
+    /// The uninterpreted membership function declared for `slot`.
+    fn slot_fn(&self, slot: SlotRef) -> &FuncDecl {
+        match slot {
+            SlotRef::Spp(i) => &self.spps[i as usize],
+            SlotRef::Cand(i) => &self.cands[i as usize].0,
+        }
+    }
+
+    /// Build the Z3 Bool for a membership literal: apply `slot`'s
+    /// uninterpreted function to `args`, negating when `!polarity`.
+    fn apply_slot(&self, slot: SlotRef, args: &[Dynamic], polarity: bool) -> Bool {
         let arg_refs: Vec<&dyn Ast> = args.iter().map(|a| a as &dyn Ast).collect();
-        let f = &self.spps[spp.0 as usize];
-        let a = f.apply(&arg_refs).as_bool().expect("f has Bool range");
+        let a = self
+            .slot_fn(slot)
+            .apply(&arg_refs)
+            .as_bool()
+            .expect("slot fn has Bool range");
         if polarity { a } else { a.not() }
+    }
+
+    /// Choose the training examples for the passive learners from `model`.
+    ///
+    /// With `minimize` (the [`flags::example_cover`] optimization) this is a
+    /// greedy set cover of the tracked clauses by literals true under the
+    /// model.  Clauses are walked in assertion order.  A clause containing a
+    /// true literal whose *atom* — its (slot, concrete evaluated arguments)
+    /// pair — was already selected is covered for free; otherwise the first
+    /// true literal is selected.  Each selected atom yields exactly one
+    /// training example: its evaluated argument bits labelled with the
+    /// selecting literal's polarity (the literal is true under the model, so
+    /// the slot function's value at those arguments *is* the polarity).
+    /// Linear in the total number of literals; no attempt at an optimal
+    /// cover.  Panics if some clause has no true literal — impossible after
+    /// `Sat`.
+    ///
+    /// Without `minimize`, every atom appearing in any clause becomes an
+    /// example (deduplicated), labelled with the slot function's value under
+    /// the model — the pre-cover behavior, kept as the flag-off baseline.
+    fn select_examples(&self, model: &Model, minimize: bool) -> SelectedExamples {
+        let mut selected: HashSet<(SlotRef, Vec<u64>)> = HashSet::new();
+        let mut out = SelectedExamples {
+            spps: HashMap::new(),
+            cands: HashMap::new(),
+        };
+
+        for clause in &self.clauses {
+            // First true literal of the clause, kept in case no already-selected
+            // atom covers it.
+            let mut fallback: Option<(Vec<u64>, Vec<Dynamic>, &TrackedLit)> = None;
+            let mut covered = false;
+            for lit in clause {
+                // Evaluate the arguments (existentials included) to concrete
+                // values, with model completion for anything left unpinned.
+                let concrete: Vec<Dynamic> = lit
+                    .args
+                    .iter()
+                    .map(|a| {
+                        model
+                            .eval(a, true)
+                            .expect("model completion yields a value")
+                    })
+                    .collect();
+                // The literal is true iff the slot function's value at those
+                // arguments matches the polarity.
+                let value = model
+                    .eval(&self.apply_slot(lit.slot, &concrete, true), true)
+                    .and_then(|b| b.as_bool())
+                    .expect("model completion yields a concrete Bool");
+                let key = encode_args(&concrete);
+                if !minimize {
+                    // Keep every atom, labelled with its value under the model.
+                    if selected.insert((lit.slot, key)) {
+                        self.push_example(&mut out, lit.slot, &concrete, value);
+                    }
+                    continue;
+                }
+                if value != lit.polarity {
+                    continue;
+                }
+                if selected.contains(&(lit.slot, key.clone())) {
+                    covered = true;
+                    break;
+                }
+                if fallback.is_none() {
+                    fallback = Some((key, concrete, lit));
+                }
+            }
+            if !minimize || covered {
+                continue;
+            }
+            let Some((key, concrete, lit)) = fallback else {
+                unreachable!("Z3 said Sat but a clause has no true literal")
+            };
+            selected.insert((lit.slot, key));
+            self.push_example(&mut out, lit.slot, &concrete, lit.polarity);
+        }
+
+        out
+    }
+
+    /// Append one training example to `out`: `slot`'s membership at the
+    /// concrete (model-evaluated) arguments `concrete`, labelled `label`.
+    fn push_example(
+        &self,
+        out: &mut SelectedExamples,
+        slot: SlotRef,
+        concrete: &[Dynamic],
+        label: bool,
+    ) {
+        let n = self.num_vars as usize;
+        match slot {
+            SlotRef::Spp(i) => {
+                let bits: Vec<bool> = concrete.iter().map(read_bit).collect();
+                assert_eq!(bits.len(), 2 * n);
+                out.spps.entry(i).or_default().push(Example {
+                    input: bits[..n].to_vec(),
+                    output: bits[n..].to_vec(),
+                    in_spp: label,
+                });
+            }
+            SlotRef::Cand(i) => {
+                let ns = self.cands[i as usize].1.num_states();
+                assert_eq!(concrete.len(), 4 * n + ns);
+                let pkt_in = concrete[..n].iter().map(read_bit).collect();
+                let pkt_start = concrete[n..2 * n].iter().map(read_bit).collect();
+                let states: Vec<usize> =
+                    concrete[2 * n..2 * n + ns].iter().map(read_state).collect();
+                let pkt_end = concrete[2 * n + ns..3 * n + ns]
+                    .iter()
+                    .map(read_bit)
+                    .collect();
+                let pkt_out = concrete[3 * n + ns..4 * n + ns]
+                    .iter()
+                    .map(read_bit)
+                    .collect();
+                out.cands.entry(i).or_default().push((
+                    Input {
+                        pkt_in,
+                        pkt_start,
+                        states,
+                        pkt_end,
+                        pkt_out,
+                    },
+                    label,
+                ));
+            }
+        }
     }
 }
 
@@ -542,7 +708,6 @@ impl<'a> Z3<'a> {
 ///
 /// `merge(a, b)` is called left-to-right within each key group; it must keep
 /// the key invariant (its result must share the key of both inputs).
-#[cfg(feature = "clause_merge")]
 fn merge_by<T, K: Ord>(
     mut items: Vec<T>,
     mut key: impl FnMut(&T) -> K,
@@ -563,25 +728,30 @@ fn merge_by<T, K: Ord>(
     out
 }
 
-/// Read a concrete `bool` out of a func-interp argument/value.
+/// Read a concrete `bool` out of a model-evaluated argument.
 fn read_bit(d: &Dynamic) -> bool {
     d.as_bool()
         .and_then(|b| b.as_bool())
-        .expect("entry arg is a concrete Bool")
+        .expect("evaluated arg is a concrete Bool")
 }
 
-/// Read a concrete state index out of a func-interp argument.
+/// Read a concrete state index out of a model-evaluated argument.
 fn read_state(d: &Dynamic) -> usize {
     d.as_int()
         .and_then(|i| i.as_u64())
-        .expect("entry arg is a concrete Int") as usize
+        .expect("evaluated arg is a concrete Int") as usize
 }
 
-/// Read a concrete polarity out of a func-interp entry value.
-fn read_polarity(d: &Dynamic) -> bool {
-    d.as_bool()
-        .and_then(|b| b.as_bool())
-        .expect("entry value is a concrete Bool")
+/// Canonical hashable encoding of concrete (model-evaluated) arguments: Bools
+/// become 0/1, Ints their value.  Argument sorts are fixed per slot, so the
+/// encoding is injective within a slot — good enough for the atom dedup key.
+fn encode_args(args: &[Dynamic]) -> Vec<u64> {
+    args.iter()
+        .map(|a| match a.as_bool().and_then(|b| b.as_bool()) {
+            Some(b) => b as u64,
+            None => read_state(a) as u64,
+        })
+        .collect()
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -948,7 +1118,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "clause_merge")]
     #[test]
     fn test_merge_by_collates_adjacent_keys() {
         // Key on `.0`, sum the `.1` of each group: (0,1),(0,2),(1,3) → (0,3),(1,3).
@@ -960,7 +1129,6 @@ mod tests {
         assert_eq!(merged, vec![(0, 3), (1, 3)]);
     }
 
-    #[cfg(feature = "clause_merge")]
     #[test]
     fn test_merge_by_unsorted_input() {
         // Groups need not be pre-sorted; `merge_by` sorts first.
@@ -1011,5 +1179,151 @@ mod tests {
         let a = spp_accepts(&store, spp, &in_pkt, &out_a);
         let b = spp_accepts(&store, spp, &in_pkt, &out_b);
         assert!(a || b, "merged membership disjunct not realized");
+    }
+
+    /// Two clauses sharing the atom `(p,q) ∈ s`: a unit clause and a
+    /// disjunction with a second, unforced atom.  The greedy cover selects the
+    /// shared atom once, covers the second clause with it, and feeds exactly
+    /// one example.
+    fn shared_atom_learner(store: &mut SPPstore, positive: bool) -> (Z3<'static>, SppVar) {
+        let p = [false, false, false];
+        let q = [true, true, true];
+        let r = [true, false, true];
+        let t = [false, true, false];
+        let mut learner = Z3::new(N);
+        let s = learner.fresh_spp();
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![spp_lit(s, ap_concrete(&p), ap_concrete(&q), positive)],
+            },
+            &mut store.sp,
+        );
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![
+                    spp_lit(s, ap_concrete(&p), ap_concrete(&q), positive),
+                    spp_lit(s, ap_concrete(&r), ap_concrete(&t), true),
+                ],
+            },
+            &mut store.sp,
+        );
+        (learner, s)
+    }
+
+    #[test]
+    fn test_greedy_cover_selects_shared_atom_once() {
+        let mut store = SPPstore::new(N);
+        let (learner, s) = shared_atom_learner(&mut store, true);
+        assert_eq!(learner.solver.check(), SatResult::Sat);
+        let model = learner.solver.get_model().unwrap();
+        let selected = learner.select_examples(&model, true);
+        let examples = &selected.spps[&s.0];
+        assert_eq!(examples.len(), 1, "shared atom must be selected only once");
+        assert_eq!(examples[0].input, vec![false, false, false]);
+        assert_eq!(examples[0].output, vec![true, true, true]);
+        assert!(examples[0].in_spp);
+        assert!(selected.cands.is_empty());
+    }
+
+    #[test]
+    fn test_greedy_cover_selects_shared_negative_atom_once() {
+        // Same shape, with the shared atom appearing negatively: the unit
+        // clause forces (p,q) ∉ s, so the second clause is covered by the
+        // negative atom and the single example is labelled `false`.
+        let mut store = SPPstore::new(N);
+        let (learner, s) = shared_atom_learner(&mut store, false);
+        assert_eq!(learner.solver.check(), SatResult::Sat);
+        let model = learner.solver.get_model().unwrap();
+        let selected = learner.select_examples(&model, true);
+        let examples = &selected.spps[&s.0];
+        assert_eq!(examples.len(), 1, "shared atom must be selected only once");
+        assert_eq!(examples[0].input, vec![false, false, false]);
+        assert_eq!(examples[0].output, vec![true, true, true]);
+        assert!(!examples[0].in_spp);
+    }
+
+    #[test]
+    fn test_select_all_examples_keeps_unshared_atom() {
+        // Same clauses, but with minimization off: both atoms — the shared
+        // (p,q) and the unforced (r,t) — become examples, deduplicated, each
+        // labelled with its value under the model.
+        let mut store = SPPstore::new(N);
+        let (learner, s) = shared_atom_learner(&mut store, true);
+        assert_eq!(learner.solver.check(), SatResult::Sat);
+        let model = learner.solver.get_model().unwrap();
+        let selected = learner.select_examples(&model, false);
+        let examples = &selected.spps[&s.0];
+        assert_eq!(examples.len(), 2, "both atoms kept, each exactly once");
+        assert_eq!(examples[0].input, vec![false, false, false]);
+        assert_eq!(examples[0].output, vec![true, true, true]);
+        assert!(examples[0].in_spp, "the forced atom keeps its model value");
+    }
+
+    #[test]
+    fn test_extract_with_shared_atom() {
+        // End-to-end: extraction over the shared-atom clauses learns an SPP
+        // from the single selected example, which must accept (p,q).
+        let mut store = SPPstore::new(N);
+        let (mut learner, s) = shared_atom_learner(&mut store, true);
+        let spp = learner.extract(&mut store).unwrap().spps[&s];
+        assert!(spp_accepts(
+            &store,
+            spp,
+            &[false, false, false],
+            &[true, true, true],
+        ));
+    }
+
+    #[test]
+    fn test_mixed_spp_cand_clause() {
+        // One clause spanning an SPP slot and a Cand slot: the learner must
+        // satisfy at least one disjunct.
+        let mut store = SPPstore::new(N);
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![]],
+            outputs: vec![store.zero],
+        };
+        let mut learner = Z3::new(N);
+        let s = learner.fresh_spp();
+        let cv = learner.fresh_cand(&dfa);
+        let input = Input {
+            pkt_in: vec![false, false, false],
+            pkt_start: vec![true, false, true],
+            states: vec![0],
+            pkt_end: vec![true, true, true],
+            pkt_out: vec![false, false, false],
+        };
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![
+                    spp_lit(
+                        s,
+                        ap_concrete(&[false, false, false]),
+                        ap_concrete(&[true, true, true]),
+                        true,
+                    ),
+                    Literal::Cand {
+                        cand: cv,
+                        pkt_in: ap_concrete(&input.pkt_in),
+                        pkt_start: ap_concrete(&input.pkt_start),
+                        states: input.states.clone(),
+                        pkt_end: ap_concrete(&input.pkt_end),
+                        pkt_out: ap_concrete(&input.pkt_out),
+                        polarity: true,
+                    },
+                ],
+            },
+            &mut store.sp,
+        );
+        let solution = learner.extract(&mut store).unwrap();
+        let a = spp_accepts(
+            &store,
+            solution.spps[&s],
+            &[false, false, false],
+            &[true, true, true],
+        );
+        let b = solution.cands[&cv].accepts_input(&mut store, &input);
+        assert!(a || b, "no disjunct satisfied across SPP and Cand");
     }
 }

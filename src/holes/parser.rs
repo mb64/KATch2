@@ -314,19 +314,19 @@ fn build_constraint(
             // neither has holes) on the automaton side.
             let (hole_side, dfa_side) = if rhs_holes { (rhs, lhs) } else { (lhs, rhs) };
             let dfa = expr_to_dfa(dfa_side, store);
-            let hole_expr = to_hole_expr(hole_side, store);
+            let hole_expr = to_hole_expr(hole_side, store).simplify(store);
             Constraint::equality(store, &hole_expr, dfa)
         }
         AssertOp::Leq if rhs_holes => {
             // lhs ⊆ rhs[holes]: the DFA is a lower bound on the automaton.
             let dfa = expr_to_dfa(lhs, store);
-            let hole_expr = to_hole_expr(rhs, store);
+            let hole_expr = to_hole_expr(rhs, store).simplify(store);
             Constraint::lower_bound(store, &hole_expr, dfa)
         }
         AssertOp::Leq => {
             // lhs[holes] ⊆ rhs: the DFA is an upper bound on the automaton.
             let dfa = expr_to_dfa(rhs, store);
-            let hole_expr = to_hole_expr(lhs, store);
+            let hole_expr = to_hole_expr(lhs, store).simplify(store);
             Constraint::upper_bound(store, &hole_expr, dfa)
         }
     };

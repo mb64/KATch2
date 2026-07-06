@@ -39,6 +39,20 @@ struct Cli {
     /// instead of looping until solved or proven infeasible.
     #[arg(long, value_name = "N")]
     iteration_limit: Option<usize>,
+
+    /// Disable the lower-bound min-cut optimization (emit the frontier clause
+    /// instead of a min cut).
+    #[arg(long)]
+    no_lb_mincut: bool,
+
+    /// Disable collating SMT membership disjuncts by shared input/output set.
+    #[arg(long)]
+    no_clause_merge: bool,
+
+    /// Disable shrinking the SMT model to a greedy set cover of examples
+    /// before passive learning.
+    #[arg(long)]
+    no_example_cover: bool,
 }
 
 fn main() -> ExitCode {
@@ -53,6 +67,16 @@ fn main() -> ExitCode {
 fn run() -> ExitCode {
     let cli = Cli::parse();
     let full = cli.full && !cli.no_full;
+
+    if cli.no_lb_mincut {
+        katch2::flags::set_lb_mincut(false);
+    }
+    if cli.no_clause_merge {
+        katch2::flags::set_clause_merge(false);
+    }
+    if cli.no_example_cover {
+        katch2::flags::set_example_cover(false);
+    }
 
     let mut exit = ExitCode::SUCCESS;
     for path in &cli.files {
