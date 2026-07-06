@@ -304,7 +304,10 @@ def write_netkat(g, filename, args):
                 bits = bits_field(f)
                 if expand_indices:
                     width = bits[1]-bits[0]
-                    binary = f"{int(v):0{width}b}"
+                    # KATch's x[start..end] is little-endian (position `start`
+                    # is the LSB), but Python's :b format is MSB-first -- so
+                    # reverse it before pairing with the ascending positions.
+                    binary = f"{int(v):0{width}b}"[::-1]
                     pairs = list(zip(range(bits[0], bits[1]), map(int, binary)))
                     s = "; ".join(f"x{i}{op2}{bit}" for i, bit in pairs)
                 else:
@@ -682,7 +685,7 @@ def main():
     parser.add_argument("--nkpl", action="store_true", help="Generate .nkpl (instead of .nksynth)")
     parser.add_argument("--no-comments", action="store_true", help="Suppress comments in outputted solver file")
     parser.add_argument("--no-inline", action="store_true", help="Don't inline named constants")
-    parser.add_argument("--expand-indices", action="store_true", help="Use expansion x[0..4]~13 --> x0=1;x1=1;x2=0;x3=1 (cannot be combined with --no-inline)")
+    parser.add_argument("--expand-indices", action="store_true", help="Use expansion x[0..4]~13 --> x0=1;x1=0;x2=1;x3=1 (cannot be combined with --no-inline)")
     parser.add_argument("--allow-neq", action="store_true", help="Allow use of <expr> != <expr>")
     parser.add_argument("--num-bad", type=int, default=1, help="Number of bad paths")
     parser.add_argument("--num-good", type=int, default=10, help="Number of good paths")

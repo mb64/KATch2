@@ -66,9 +66,9 @@ def topo =
     // LINK: loc=Standish, port=1, dir=OUT --> loc:=Portland, port:=5, dir:=IN  
     (x[0..5]~16; x[10..13]~1; x[13..14]~1; x[0..5]:=12; x[10..13]:=5; x[13..14]:=0) +
     // LINK: loc=Turner, port=1, dir=OUT --> loc:=Augusta, port:=1, dir:=IN  
-    (x[0..5]~13; x[10..13]~1; x[13..14]~1; x[0..5]:=20; x[10..13]:=1; x[13..14]:=0) +
+    (x[0..5]~13; x[10..13]~1; x[13..14]~1; x[0..5]:=18; x[10..13]:=1; x[13..14]:=0) +
     // LINK: loc=Augusta, port=1, dir=OUT --> loc:=Turner, port:=1, dir:=IN  
-    (x[0..5]~20; x[10..13]~1; x[13..14]~1; x[0..5]:=13; x[10..13]:=1; x[13..14]:=0) +
+    (x[0..5]~18; x[10..13]~1; x[13..14]~1; x[0..5]:=13; x[10..13]:=1; x[13..14]:=0) +
     // LINK: loc=Turner, port=2, dir=OUT --> loc:=Bethel, port:=1, dir:=IN  
     (x[0..5]~13; x[10..13]~2; x[13..14]~1; x[0..5]:=14; x[10..13]:=1; x[13..14]:=0) +
     // LINK: loc=Bethel, port=1, dir=OUT --> loc:=Turner, port:=2, dir:=IN  
@@ -90,17 +90,17 @@ def topo =
     // LINK: loc=Buckfield, port=2, dir=OUT --> loc:=Standish, port:=3, dir:=IN  
     (x[0..5]~17; x[10..13]~2; x[13..14]~1; x[0..5]:=16; x[10..13]:=3; x[13..14]:=0) +
     // LINK: loc=Buckfield, port=3, dir=OUT --> loc:=Augusta, port:=2, dir:=IN  
-    (x[0..5]~17; x[10..13]~3; x[13..14]~1; x[0..5]:=20; x[10..13]:=2; x[13..14]:=0) +
+    (x[0..5]~17; x[10..13]~3; x[13..14]~1; x[0..5]:=18; x[10..13]:=2; x[13..14]:=0) +
     // LINK: loc=Augusta, port=2, dir=OUT --> loc:=Buckfield, port:=3, dir:=IN  
-    (x[0..5]~20; x[10..13]~2; x[13..14]~1; x[0..5]:=17; x[10..13]:=3; x[13..14]:=0) +
+    (x[0..5]~18; x[10..13]~2; x[13..14]~1; x[0..5]:=17; x[10..13]:=3; x[13..14]:=0) +
     // LINK: loc=Augusta, port=3, dir=OUT --> loc:=Lewiston, port:=3, dir:=IN  
-    (x[0..5]~20; x[10..13]~3; x[13..14]~1; x[0..5]:=19; x[10..13]:=3; x[13..14]:=0) +
+    (x[0..5]~18; x[10..13]~3; x[13..14]~1; x[0..5]:=19; x[10..13]:=3; x[13..14]:=0) +
     // LINK: loc=Lewiston, port=3, dir=OUT --> loc:=Augusta, port:=3, dir:=IN  
-    (x[0..5]~19; x[10..13]~3; x[13..14]~1; x[0..5]:=20; x[10..13]:=3; x[13..14]:=0) +
+    (x[0..5]~19; x[10..13]~3; x[13..14]~1; x[0..5]:=18; x[10..13]:=3; x[13..14]:=0) +
     // LINK: loc=Augusta, port=4, dir=OUT --> loc:=Augusta, port:=2, dir:=IN  
-    (x[0..5]~20; x[10..13]~4; x[13..14]~1; x[0..5]:=20; x[10..13]:=2; x[13..14]:=0) +
+    (x[0..5]~18; x[10..13]~4; x[13..14]~1; x[0..5]:=20; x[10..13]:=2; x[13..14]:=0) +
     // LINK: loc=Augusta, port=2, dir=OUT --> loc:=Augusta, port:=4, dir:=IN  
-    (x[0..5]~20; x[10..13]~2; x[13..14]~1; x[0..5]:=20; x[10..13]:=4; x[13..14]:=0) +
+    (x[0..5]~20; x[10..13]~2; x[13..14]~1; x[0..5]:=18; x[10..13]:=4; x[13..14]:=0) +
     // LINK: loc=Lewiston, port=4, dir=OUT --> loc:=Augusta, port:=3, dir:=IN  
     (x[0..5]~19; x[10..13]~4; x[13..14]~1; x[0..5]:=20; x[10..13]:=3; x[13..14]:=0) +
     // LINK: loc=Augusta, port=3, dir=OUT --> loc:=Lewiston, port:=4, dir:=IN  
@@ -110,83 +110,83 @@ def topo =
 
 def pol =
     // RULE: loc=Augusta, dst=Augusta, dir=IN --> port:=4, dir:=OUT  
-    (x[0..5]~20; x[5..10]~20; x[13..14]~0; x[10..13]:=4; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~20; x[13..14]~0; x[10..13]:=4; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Augusta, dir=IN --> port:=2, dir:=OUT  
-    (x[0..5]~20; x[5..10]~20; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
+    (x[0..5]~20; x[5..10]~18; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Bangor, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~20; x[5..10]~11; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~11; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Bangor, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~20; x[5..10]~11; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Bethel, dir=IN --> port:=1, dir:=OUT  
-    (x[0..5]~20; x[5..10]~14; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~14; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Bethel, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~20; x[5..10]~14; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Biddeford, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~20; x[5..10]~3; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~3; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Biddeford, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~20; x[5..10]~3; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Boston, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~20; x[5..10]~5; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~5; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Boston, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~20; x[5..10]~5; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Buckfield, dir=IN --> port:=2, dir:=OUT  
-    (x[0..5]~20; x[5..10]~17; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~17; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Buckfield, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~20; x[5..10]~17; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Dover, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~20; x[5..10]~2; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~2; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Dover, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~20; x[5..10]~2; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Framingham, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~20; x[5..10]~6; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~6; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Framingham, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~20; x[5..10]~6; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Keene, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~20; x[5..10]~8; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~8; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Keene, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~20; x[5..10]~8; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Lewiston, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~20; x[5..10]~19; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~19; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Lewiston, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~20; x[5..10]~19; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Manchester, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~20; x[5..10]~7; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~7; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Manchester, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~20; x[5..10]~7; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Norway, dir=IN --> port:=2, dir:=OUT  
-    (x[0..5]~20; x[5..10]~15; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~15; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Norway, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~20; x[5..10]~15; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Portland, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~20; x[5..10]~12; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~12; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Portland, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~20; x[5..10]~12; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Portsmouth, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~20; x[5..10]~1; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~1; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Portsmouth, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~20; x[5..10]~1; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Sanford, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~20; x[5..10]~4; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~4; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Sanford, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~20; x[5..10]~4; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Springfield, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~20; x[5..10]~10; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~10; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Springfield, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~20; x[5..10]~10; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Standish, dir=IN --> port:=2, dir:=OUT  
-    (x[0..5]~20; x[5..10]~16; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~16; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Standish, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~20; x[5..10]~16; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Turner, dir=IN --> port:=1, dir:=OUT  
-    (x[0..5]~20; x[5..10]~13; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~13; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Turner, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~20; x[5..10]~13; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Worcester, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~20; x[5..10]~9; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~18; x[5..10]~9; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Augusta, dst=Worcester, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~20; x[5..10]~9; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Bangor, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
-    (x[0..5]~11; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
+    (x[0..5]~11; x[5..10]~18; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Bangor, dst=Augusta, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~11; x[5..10]~20; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Bangor, dst=Bethel, dir=IN --> port:=1, dir:=OUT  
@@ -224,7 +224,7 @@ def pol =
     // RULE: loc=Bangor, dst=Worcester, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~11; x[5..10]~9; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Bethel, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
-    (x[0..5]~14; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
+    (x[0..5]~14; x[5..10]~18; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Bethel, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~14; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Bethel, dst=Bangor, dir=IN --> port:=1, dir:=OUT  
@@ -262,7 +262,7 @@ def pol =
     // RULE: loc=Bethel, dst=Worcester, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~14; x[5..10]~9; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Biddeford, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
-    (x[0..5]~3; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
+    (x[0..5]~3; x[5..10]~18; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Biddeford, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~3; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Biddeford, dst=Bangor, dir=IN --> port:=1, dir:=OUT  
@@ -300,7 +300,7 @@ def pol =
     // RULE: loc=Biddeford, dst=Worcester, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~3; x[5..10]~9; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Boston, dst=Augusta, dir=IN --> port:=2, dir:=OUT  
-    (x[0..5]~5; x[5..10]~20; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
+    (x[0..5]~5; x[5..10]~18; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Boston, dst=Augusta, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~5; x[5..10]~20; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Boston, dst=Bangor, dir=IN --> port:=2, dir:=OUT  
@@ -338,7 +338,7 @@ def pol =
     // RULE: loc=Boston, dst=Worcester, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~5; x[5..10]~9; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Buckfield, dst=Augusta, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~17; x[5..10]~20; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~17; x[5..10]~18; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Buckfield, dst=Augusta, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~17; x[5..10]~20; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Buckfield, dst=Bangor, dir=IN --> port:=3, dir:=OUT  
@@ -376,7 +376,7 @@ def pol =
     // RULE: loc=Buckfield, dst=Worcester, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~17; x[5..10]~9; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Dover, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
-    (x[0..5]~2; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
+    (x[0..5]~2; x[5..10]~18; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Dover, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~2; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Dover, dst=Bangor, dir=IN --> port:=1, dir:=OUT  
@@ -414,7 +414,7 @@ def pol =
     // RULE: loc=Dover, dst=Worcester, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~2; x[5..10]~9; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Framingham, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
-    (x[0..5]~6; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
+    (x[0..5]~6; x[5..10]~18; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Framingham, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~6; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Framingham, dst=Bangor, dir=IN --> port:=1, dir:=OUT  
@@ -452,7 +452,7 @@ def pol =
     // RULE: loc=Framingham, dst=Worcester, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~6; x[5..10]~9; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Keene, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
-    (x[0..5]~8; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
+    (x[0..5]~8; x[5..10]~18; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Keene, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~8; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Keene, dst=Bangor, dir=IN --> port:=1, dir:=OUT  
@@ -490,7 +490,7 @@ def pol =
     // RULE: loc=Keene, dst=Worcester, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~8; x[5..10]~9; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Lewiston, dst=Augusta, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~19; x[5..10]~20; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~19; x[5..10]~18; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Lewiston, dst=Augusta, dir=IN --> port:=4, dir:=OUT  
     (x[0..5]~19; x[5..10]~20; x[13..14]~0; x[10..13]:=4; x[13..14]:=1) +
     // RULE: loc=Lewiston, dst=Bangor, dir=IN --> port:=1, dir:=OUT  
@@ -528,7 +528,7 @@ def pol =
     // RULE: loc=Lewiston, dst=Worcester, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~19; x[5..10]~9; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Manchester, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
-    (x[0..5]~7; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
+    (x[0..5]~7; x[5..10]~18; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Manchester, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~7; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Manchester, dst=Bangor, dir=IN --> port:=1, dir:=OUT  
@@ -566,7 +566,7 @@ def pol =
     // RULE: loc=Manchester, dst=Worcester, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~7; x[5..10]~9; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Norway, dst=Augusta, dir=IN --> port:=2, dir:=OUT  
-    (x[0..5]~15; x[5..10]~20; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
+    (x[0..5]~15; x[5..10]~18; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Norway, dst=Augusta, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~15; x[5..10]~20; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Norway, dst=Bangor, dir=IN --> port:=3, dir:=OUT  
@@ -604,7 +604,7 @@ def pol =
     // RULE: loc=Norway, dst=Worcester, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~15; x[5..10]~9; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Portland, dst=Augusta, dir=IN --> port:=4, dir:=OUT  
-    (x[0..5]~12; x[5..10]~20; x[13..14]~0; x[10..13]:=4; x[13..14]:=1) +
+    (x[0..5]~12; x[5..10]~18; x[13..14]~0; x[10..13]:=4; x[13..14]:=1) +
     // RULE: loc=Portland, dst=Augusta, dir=IN --> port:=4, dir:=OUT  
     (x[0..5]~12; x[5..10]~20; x[13..14]~0; x[10..13]:=4; x[13..14]:=1) +
     // RULE: loc=Portland, dst=Bangor, dir=IN --> port:=4, dir:=OUT  
@@ -642,7 +642,7 @@ def pol =
     // RULE: loc=Portland, dst=Worcester, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~12; x[5..10]~9; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Portsmouth, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
-    (x[0..5]~1; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
+    (x[0..5]~1; x[5..10]~18; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Portsmouth, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~1; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Portsmouth, dst=Bangor, dir=IN --> port:=1, dir:=OUT  
@@ -680,7 +680,7 @@ def pol =
     // RULE: loc=Portsmouth, dst=Worcester, dir=IN --> port:=3, dir:=OUT  
     (x[0..5]~1; x[5..10]~9; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Sanford, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
-    (x[0..5]~4; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
+    (x[0..5]~4; x[5..10]~18; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Sanford, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~4; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Sanford, dst=Bangor, dir=IN --> port:=1, dir:=OUT  
@@ -718,7 +718,7 @@ def pol =
     // RULE: loc=Sanford, dst=Worcester, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~4; x[5..10]~9; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Springfield, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
-    (x[0..5]~10; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
+    (x[0..5]~10; x[5..10]~18; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Springfield, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~10; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Springfield, dst=Bangor, dir=IN --> port:=1, dir:=OUT  
@@ -756,7 +756,7 @@ def pol =
     // RULE: loc=Springfield, dst=Worcester, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~10; x[5..10]~9; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Standish, dst=Augusta, dir=IN --> port:=3, dir:=OUT  
-    (x[0..5]~16; x[5..10]~20; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
+    (x[0..5]~16; x[5..10]~18; x[13..14]~0; x[10..13]:=3; x[13..14]:=1) +
     // RULE: loc=Standish, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~16; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Standish, dst=Bangor, dir=IN --> port:=1, dir:=OUT  
@@ -794,7 +794,7 @@ def pol =
     // RULE: loc=Standish, dst=Worcester, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~16; x[5..10]~9; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Turner, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
-    (x[0..5]~13; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
+    (x[0..5]~13; x[5..10]~18; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Turner, dst=Augusta, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~13; x[5..10]~20; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Turner, dst=Bangor, dir=IN --> port:=1, dir:=OUT  
@@ -832,7 +832,7 @@ def pol =
     // RULE: loc=Turner, dst=Worcester, dir=IN --> port:=1, dir:=OUT  
     (x[0..5]~13; x[5..10]~9; x[13..14]~0; x[10..13]:=1; x[13..14]:=1) +
     // RULE: loc=Worcester, dst=Augusta, dir=IN --> port:=2, dir:=OUT  
-    (x[0..5]~9; x[5..10]~20; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
+    (x[0..5]~9; x[5..10]~18; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Worcester, dst=Augusta, dir=IN --> port:=2, dir:=OUT  
     (x[0..5]~9; x[5..10]~20; x[13..14]~0; x[10..13]:=2; x[13..14]:=1) +
     // RULE: loc=Worcester, dst=Bangor, dir=IN --> port:=2, dir:=OUT  
@@ -885,11 +885,7 @@ assert x[0..5]~16; x[5..10]~20; net; x[0..5]~20 = 0
 
 // ALLOW GOOD PATHS
 
-// Norway -> Bethel
-assert (x[0..5]~15; x[10..13]~0; x[13..14]~0; x[5..10]~14; x[0..5]:=14; x[10..13]:=2 ) <= hop
-// Sanford -> Portsmouth -> Portland -> Lewiston -> Bangor
-assert (x[0..5]~4; x[10..13]~0; x[13..14]~0; x[5..10]~11; x[0..5]:=1; x[10..13]:=2 ; dup; x[0..5]:=12; x[10..13]:=1 ; dup; x[0..5]:=19; x[10..13]:=2 ; dup; x[0..5]:=11; x[10..13]:=1 ) <= hop; dup; hop; dup; hop; dup; hop
-// Bangor -> Lewiston -> Portland -> Portsmouth
-assert (x[0..5]~11; x[10..13]~0; x[13..14]~0; x[5..10]~1; x[0..5]:=19; x[10..13]:=1 ; dup; x[0..5]:=12; x[10..13]:=4 ; dup; x[0..5]:=1; x[10..13]:=1 ) <= hop; dup; hop; dup; hop
-// Buckfield -> Standish -> Portland -> Dover -> Keene
-assert (x[0..5]~17; x[10..13]~0; x[13..14]~0; x[5..10]~8; x[0..5]:=16; x[10..13]:=3 ; dup; x[0..5]:=12; x[10..13]:=5 ; dup; x[0..5]:=2; x[10..13]:=1 ; dup; x[0..5]:=8; x[10..13]:=1 ) <= hop; dup; hop; dup; hop; dup; hop
+// Norway -> Buckfield
+assert (x[0..5]~15; x[10..13]~0; x[13..14]~0; x[5..10]~17; x[0..5]:=17; x[10..13]:=1 ) <= hop
+// Sanford -> Portsmouth -> Portland -> Lewiston -> Augusta -> Turner
+assert (x[0..5]~4; x[10..13]~0; x[13..14]~0; x[5..10]~13; x[0..5]:=1; x[10..13]:=2 ; dup; x[0..5]:=12; x[10..13]:=1 ; dup; x[0..5]:=19; x[10..13]:=2 ; dup; x[0..5]:=18; x[10..13]:=3 ; dup; x[0..5]:=13; x[10..13]:=1 ) <= hop; dup; hop; dup; hop; dup; hop; dup; hop
