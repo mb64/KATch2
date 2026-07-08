@@ -1,0 +1,131 @@
+// NETWORK TOPOLOGY
+
+def topo =
+    // LINK: loc=Grodno, port=1, dir=OUT --> loc:=Minsk, port:=1, dir:=IN  
+    (x[0..3]~1; x[6..9]~1; x[9..10]~1; x[0..3]:=2; x[6..9]:=1; x[9..10]:=0) +
+    // LINK: loc=Minsk, port=1, dir=OUT --> loc:=Grodno, port:=1, dir:=IN  
+    (x[0..3]~2; x[6..9]~1; x[9..10]~1; x[0..3]:=1; x[6..9]:=1; x[9..10]:=0) +
+    // LINK: loc=Minsk, port=2, dir=OUT --> loc:=Vitebsk, port:=1, dir:=IN  
+    (x[0..3]~2; x[6..9]~2; x[9..10]~1; x[0..3]:=3; x[6..9]:=1; x[9..10]:=0) +
+    // LINK: loc=Vitebsk, port=1, dir=OUT --> loc:=Minsk, port:=2, dir:=IN  
+    (x[0..3]~3; x[6..9]~1; x[9..10]~1; x[0..3]:=2; x[6..9]:=2; x[9..10]:=0) +
+    // LINK: loc=Minsk, port=3, dir=OUT --> loc:=Mogilev, port:=1, dir:=IN  
+    (x[0..3]~2; x[6..9]~3; x[9..10]~1; x[0..3]:=4; x[6..9]:=1; x[9..10]:=0) +
+    // LINK: loc=Mogilev, port=1, dir=OUT --> loc:=Minsk, port:=3, dir:=IN  
+    (x[0..3]~4; x[6..9]~1; x[9..10]~1; x[0..3]:=2; x[6..9]:=3; x[9..10]:=0) +
+    // LINK: loc=Minsk, port=4, dir=OUT --> loc:=Gomel, port:=1, dir:=IN  
+    (x[0..3]~2; x[6..9]~4; x[9..10]~1; x[0..3]:=5; x[6..9]:=1; x[9..10]:=0) +
+    // LINK: loc=Gomel, port=1, dir=OUT --> loc:=Minsk, port:=4, dir:=IN  
+    (x[0..3]~5; x[6..9]~1; x[9..10]~1; x[0..3]:=2; x[6..9]:=4; x[9..10]:=0) +
+    // LINK: loc=Minsk, port=5, dir=OUT --> loc:=Brest, port:=1, dir:=IN  
+    (x[0..3]~2; x[6..9]~5; x[9..10]~1; x[0..3]:=6; x[6..9]:=1; x[9..10]:=0) +
+    // LINK: loc=Brest, port=1, dir=OUT --> loc:=Minsk, port:=5, dir:=IN  
+    (x[0..3]~6; x[6..9]~1; x[9..10]~1; x[0..3]:=2; x[6..9]:=5; x[9..10]:=0) +
+    // LINK: loc=Minsk, port=6, dir=OUT --> loc:=Pionier_GEANT_2, port:=1, dir:=IN  
+    (x[0..3]~2; x[6..9]~6; x[9..10]~1; x[0..3]:=7; x[6..9]:=1; x[9..10]:=0) +
+    // LINK: loc=Pionier_GEANT_2, port=1, dir=OUT --> loc:=Minsk, port:=6, dir:=IN  
+    (x[0..3]~7; x[6..9]~1; x[9..10]~1; x[0..3]:=2; x[6..9]:=6; x[9..10]:=0)
+
+// FORWARDING POLICY
+
+def pol =
+    // RULE: loc=Brest, dst=Gomel, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~6; x[3..6]~5; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Brest, dst=Grodno, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~6; x[3..6]~1; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Brest, dst=Minsk, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~6; x[3..6]~2; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Brest, dst=Mogilev, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~6; x[3..6]~4; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Brest, dst=Pionier_GEANT_2, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~6; x[3..6]~7; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Brest, dst=Vitebsk, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~6; x[3..6]~3; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Gomel, dst=Brest, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~5; x[3..6]~6; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Gomel, dst=Grodno, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~5; x[3..6]~1; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Gomel, dst=Minsk, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~5; x[3..6]~2; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Gomel, dst=Mogilev, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~5; x[3..6]~4; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Gomel, dst=Pionier_GEANT_2, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~5; x[3..6]~7; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Gomel, dst=Vitebsk, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~5; x[3..6]~3; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Grodno, dst=Brest, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~1; x[3..6]~6; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Grodno, dst=Gomel, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~1; x[3..6]~5; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Grodno, dst=Minsk, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~1; x[3..6]~2; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Grodno, dst=Mogilev, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~1; x[3..6]~4; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Grodno, dst=Pionier_GEANT_2, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~1; x[3..6]~7; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Grodno, dst=Vitebsk, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~1; x[3..6]~3; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Minsk, dst=Brest, dir=IN --> port:=5, dir:=OUT  
+    (x[0..3]~2; x[3..6]~6; x[9..10]~0; x[6..9]:=5; x[9..10]:=1) +
+    // RULE: loc=Minsk, dst=Gomel, dir=IN --> port:=4, dir:=OUT  
+    (x[0..3]~2; x[3..6]~5; x[9..10]~0; x[6..9]:=4; x[9..10]:=1) +
+    // RULE: loc=Minsk, dst=Grodno, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~2; x[3..6]~1; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Minsk, dst=Mogilev, dir=IN --> port:=3, dir:=OUT  
+    (x[0..3]~2; x[3..6]~4; x[9..10]~0; x[6..9]:=3; x[9..10]:=1) +
+    // RULE: loc=Minsk, dst=Pionier_GEANT_2, dir=IN --> port:=6, dir:=OUT  
+    (x[0..3]~2; x[3..6]~7; x[9..10]~0; x[6..9]:=6; x[9..10]:=1) +
+    // RULE: loc=Minsk, dst=Vitebsk, dir=IN --> port:=2, dir:=OUT  
+    (x[0..3]~2; x[3..6]~3; x[9..10]~0; x[6..9]:=2; x[9..10]:=1) +
+    // RULE: loc=Mogilev, dst=Brest, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~4; x[3..6]~6; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Mogilev, dst=Gomel, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~4; x[3..6]~5; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Mogilev, dst=Grodno, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~4; x[3..6]~1; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Mogilev, dst=Minsk, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~4; x[3..6]~2; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Mogilev, dst=Pionier_GEANT_2, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~4; x[3..6]~7; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Mogilev, dst=Vitebsk, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~4; x[3..6]~3; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Pionier_GEANT_2, dst=Brest, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~7; x[3..6]~6; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Pionier_GEANT_2, dst=Gomel, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~7; x[3..6]~5; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Pionier_GEANT_2, dst=Grodno, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~7; x[3..6]~1; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Pionier_GEANT_2, dst=Minsk, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~7; x[3..6]~2; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Pionier_GEANT_2, dst=Mogilev, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~7; x[3..6]~4; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Pionier_GEANT_2, dst=Vitebsk, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~7; x[3..6]~3; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Vitebsk, dst=Brest, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~3; x[3..6]~6; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Vitebsk, dst=Gomel, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~3; x[3..6]~5; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Vitebsk, dst=Grodno, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~3; x[3..6]~1; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Vitebsk, dst=Minsk, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~3; x[3..6]~2; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Vitebsk, dst=Mogilev, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~3; x[3..6]~4; x[9..10]~0; x[6..9]:=1; x[9..10]:=1) +
+    // RULE: loc=Vitebsk, dst=Pionier_GEANT_2, dir=IN --> port:=1, dir:=OUT  
+    (x[0..3]~3; x[3..6]~7; x[9..10]~0; x[6..9]:=1; x[9..10]:=1)
+
+// GLOBAL NETWORK BEHAVIOR
+
+hole h1
+def hop = h1; pol; topo
+def net = (hop; dup)*
+
+// BLOCK BAD PATHS
+
+// Minsk -> Gomel
+assert x[0..3]~2; x[3..6]~5; net; x[0..3]~5 = 0
+
+// ALLOW GOOD PATHS
+
+// Vitebsk -> Minsk -> Gomel
+assert (x[0..3]~3; x[6..9]~0; x[9..10]~0; x[3..6]~5; x[0..3]:=2; x[6..9]:=2 ; dup; x[0..3]:=5; x[6..9]:=1 ) <= hop; dup; hop
