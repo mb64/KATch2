@@ -177,7 +177,11 @@ impl<'a> Candidate<'a> for Cand<'a> {
             .iter()
             .filter_map(|c| match c {
                 Constraint::UpperBound { dfa, .. } | Constraint::Equality { dfa, .. } => {
-                    Some(ops::WithSinkState(dfa))
+                    if let Some(_spp) = dfa.is_spp() {
+                        None
+                    } else {
+                        Some(ops::WithSinkState(dfa))
+                    }
                 }
                 Constraint::LowerBound { .. } => None,
             })
