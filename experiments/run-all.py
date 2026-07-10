@@ -153,11 +153,12 @@ FINAL_VERDICTS = {"SAT", "UNSAT", "UNKNOWN"}
 def load_completed(csv_path):
     """
     Return the set of (gml_file, num_bad, num_good, full, expand_indices,
-    force_unsat) tuples that have a final solver verdict already recorded in
-    the CSV. Rows that failed for non-solver reasons (TIMEOUT, ERROR,
-    EXPERIMENT_ERROR, MISSING_OUTPUT) are left out so they get retried.
-    `full`, `expand_indices`, and `force_unsat` are tracked so switching any
-    of these modes doesn't skip combos solved under a different mode.
+    force_unsat, num_repeats) tuples that have a final solver verdict already
+    recorded in the CSV. Rows that failed for non-solver reasons (TIMEOUT,
+    ERROR, EXPERIMENT_ERROR, MISSING_OUTPUT) are left out so they get
+    retried. `full`, `expand_indices`, `force_unsat`, and `num_repeats` are
+    tracked so switching any of these doesn't skip combos solved under a
+    different mode/repeat count.
     """
     completed = set()
     if not csv_path.exists():
@@ -175,6 +176,7 @@ def load_completed(csv_path):
                     row.get("full", "True") == "True",
                     row.get("expand_indices", "True") == "True",
                     row.get("force_unsat", "False") == "True",
+                    int(row.get("num_repeats", 1)),
                 ))
             except (KeyError, ValueError):
                 continue
@@ -182,6 +184,25 @@ def load_completed(csv_path):
     return completed
 
 
+# Columns that must be IDENTICAL across all repeats of the same experiment --
+# since repeats reuse the same seed (hence the same generated .nksynth file),
+# any disagreement here means something is non-deterministic and wrong.
+CONSISTENCY_FIELDS = [
+    "num_nodes", "num_edges", "experiment_returncode", "nksynth_returncode",
+    "verdict", "timed_out",
+]
+
+# Numeric measurement columns averaged across repeats to smooth out system
+# noise (OS scheduling, cache effects) -- not genuine algorithmic variance,
+# since every repeat solves the exact same file.
+AVERAGE_FIELDS = [
+    "experiment_time_s", "wall_time_s", "user_time_s", "sys_time_s",
+    "cpu_percent", "max_rss_kb", "max_rss_mb",
+]
+
+# New columns MUST be appended at the end, never inserted in the middle --
+# an existing results.csv keeps its old (shorter) header, so inserting a
+# column here would misalign every field after it for all pre-existing rows.
 FIELDNAMES = [
     "gml_file",
     "num_nodes",
@@ -204,6 +225,7 @@ FIELDNAMES = [
     "max_rss_kb",
     "max_rss_mb",
     "timestamp",
+    "num_repeats",
 ]
 
 
@@ -215,6 +237,127 @@ def append_row(csv_path, row):
             writer.writeheader()
         writer.writerow(row)
         f.flush()
+
+
+def run_combo_once(args, gml_path, num_bad, num_good, time_bin, label):
+    """Run the experiment.py + nksynth pipeline once, returning a fully populated row dict."""
+    nksynth_path = gml_path.with_suffix(".nksynth")
+
+    experiment_cmd = [
+        args.experiment_script,
+        str(gml_path),
+        "--num-bad", str(num_bad),
+        "--num-good", str(num_good),
+        "--no-comments",
+        "--no-dot",
+        "--seed", str(args.seed),
+    ]
+    if args.expand_indices:
+        experiment_cmd.append("--expand-indices")
+    if args.force_unsat:
+        experiment_cmd.append("--force-unsat")
+
+    row = {
+        "gml_file": str(gml_path),
+        "num_nodes": None,
+        "num_edges": None,
+        "num_bad": num_bad,
+        "num_good": num_good,
+        "full": args.full,
+        "expand_indices": args.expand_indices,
+        "force_unsat": args.force_unsat,
+        "seed": args.seed,
+        "num_repeats": args.repeats,
+        "experiment_returncode": None,
+        "experiment_time_s": None,
+        "nksynth_returncode": None,
+        "verdict": None,
+        "timed_out": False,
+        "wall_time_s": None,
+        "user_time_s": None,
+        "sys_time_s": None,
+        "cpu_percent": None,
+        "max_rss_kb": None,
+        "max_rss_mb": None,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+    exp_start = time.time()
+    exp_proc = subprocess.run(experiment_cmd, capture_output=True, text=True)
+    row["experiment_time_s"] = round(time.time() - exp_start, 3)
+    row["experiment_returncode"] = exp_proc.returncode
+
+    num_nodes, num_edges = parse_node_edge_counts(exp_proc.stdout)
+    row["num_nodes"] = num_nodes
+    row["num_edges"] = num_edges
+
+    counts_suffix = f" nodes={num_nodes} edges={num_edges}" if num_nodes is not None and num_edges is not None else ""
+    print(f"{label} {gml_path} num_bad={num_bad} num_good={num_good}{counts_suffix}")
+
+    if exp_proc.returncode != 0:
+        print(f"  experiment.py failed (rc={exp_proc.returncode}), skipping nksynth")
+        print(exp_proc.stderr, file=sys.stderr)
+        row["verdict"] = "EXPERIMENT_ERROR"
+        return row
+
+    if not nksynth_path.exists():
+        print(f"  expected output not found: {nksynth_path}, skipping nksynth")
+        row["verdict"] = "MISSING_OUTPUT"
+        return row
+
+    nksynth_cmd = [str(args.nksynth_bin)]
+    if args.full:
+        nksynth_cmd.append("--full")
+    nksynth_cmd.append(str(nksynth_path))
+
+    returncode, stdout, stderr, timed_out, wall_fallback, metrics = run_profiled(
+        nksynth_cmd, args.timeout, time_bin
+    )
+
+    row["nksynth_returncode"] = returncode
+    row["timed_out"] = timed_out
+    row["wall_time_s"] = metrics["wall_time_s"] if metrics["wall_time_s"] is not None else round(wall_fallback, 3)
+    row["user_time_s"] = metrics["user_time_s"]
+    row["sys_time_s"] = metrics["sys_time_s"]
+    row["cpu_percent"] = metrics["cpu_percent"]
+    row["max_rss_kb"] = metrics["max_rss_kb"]
+    row["max_rss_mb"] = round(metrics["max_rss_kb"] / 1024, 2) if metrics["max_rss_kb"] else None
+
+    if timed_out:
+        row["verdict"] = "TIMEOUT"
+        print(f"  {colorize('TIMEOUT')} after {args.timeout}s")
+    else:
+        verdict = stdout.strip().splitlines()[-1] if stdout.strip() else "ERROR"
+        row["verdict"] = verdict
+        print(f"  {colorize(verdict)} in {row['wall_time_s']}s, max RSS {row['max_rss_mb']} MB")
+        if returncode != 0:
+            print(stderr, file=sys.stderr)
+
+    return row
+
+
+def average_runs(runs, gml_path, num_bad, num_good):
+    """
+    Merge `runs` (row dicts from repeated identical experiments) into one row:
+    error out if any CONSISTENCY_FIELDS disagree, else average AVERAGE_FIELDS.
+    """
+    first = runs[0]
+
+    for field in CONSISTENCY_FIELDS:
+        values = {r[field] for r in runs}
+        if len(values) > 1:
+            sys.exit(
+                f"FATAL: non-deterministic '{field}' across {len(runs)} repeats "
+                f"for {gml_path} num_bad={num_bad} num_good={num_good}: {values} "
+                f"(repeats use the same seed, so this should never happen)"
+            )
+
+    row = dict(first)
+    for field in AVERAGE_FIELDS:
+        values = [float(r[field]) for r in runs if r[field] is not None]
+        row[field] = round(sum(values) / len(values), 3) if values else None
+
+    return row
 
 
 def main():
@@ -235,6 +378,7 @@ def main():
     parser.add_argument("--expand-indices", dest="expand_indices", action="store_true", help="Pass --expand-indices to experiment.py")
     parser.add_argument("--no-expand-indices", dest="expand_indices", action="store_false", default=True, help="Don't pass --expand-indices to experiment.py (default)")
     parser.add_argument("--force-unsat", action="store_true", help="Pass --force-unsat to experiment.py (selects bad paths as suffixes of good paths, to force UNSAT)")
+    parser.add_argument("--repeats", type=int, default=1, help="Repeat each experiment N times (same seed) and average the timing/RAM columns to smooth out system noise")
     parser.add_argument("--force", action="store_true", help="Re-run combinations already present in the output CSV")
     args = parser.parse_args()
 
@@ -266,103 +410,20 @@ def main():
 
     total = len(combos)
     for i, (gml_path, num_bad, num_good) in enumerate(combos, 1):
-        key = (str(gml_path), num_bad, num_good, args.full, args.expand_indices, args.force_unsat)
+        key = (str(gml_path), num_bad, num_good, args.full, args.expand_indices, args.force_unsat, args.repeats)
         if key in completed:
             print(f"[{i}/{total}] skipping (already done): {gml_path} num_bad={num_bad} num_good={num_good}")
             continue
 
-        nksynth_path = gml_path.with_suffix(".nksynth")
+        runs = []
+        for rep in range(args.repeats):
+            label = f"[{i}/{total}]" if args.repeats == 1 else f"[{i}/{total}] (repeat {rep + 1}/{args.repeats})"
+            runs.append(run_combo_once(args, gml_path, num_bad, num_good, time_bin, label))
 
-        experiment_cmd = [
-            args.experiment_script,
-            str(gml_path),
-            "--num-bad", str(num_bad),
-            "--num-good", str(num_good),
-            "--no-comments",
-            "--no-dot",
-            "--seed", str(args.seed),
-        ]
-        if args.expand_indices:
-            experiment_cmd.append("--expand-indices")
-        if args.force_unsat:
-            experiment_cmd.append("--force-unsat")
+        row = average_runs(runs, gml_path, num_bad, num_good) if args.repeats > 1 else runs[0]
 
-        row = {
-            "gml_file": str(gml_path),
-            "num_nodes": None,
-            "num_edges": None,
-            "num_bad": num_bad,
-            "num_good": num_good,
-            "full": args.full,
-            "expand_indices": args.expand_indices,
-            "force_unsat": args.force_unsat,
-            "seed": args.seed,
-            "experiment_returncode": None,
-            "experiment_time_s": None,
-            "nksynth_returncode": None,
-            "verdict": None,
-            "timed_out": False,
-            "wall_time_s": None,
-            "user_time_s": None,
-            "sys_time_s": None,
-            "cpu_percent": None,
-            "max_rss_kb": None,
-            "max_rss_mb": None,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-
-        exp_start = time.time()
-        exp_proc = subprocess.run(experiment_cmd, capture_output=True, text=True)
-        row["experiment_time_s"] = round(time.time() - exp_start, 3)
-        row["experiment_returncode"] = exp_proc.returncode
-
-        num_nodes, num_edges = parse_node_edge_counts(exp_proc.stdout)
-        row["num_nodes"] = num_nodes
-        row["num_edges"] = num_edges
-
-        counts_suffix = f" nodes={num_nodes} edges={num_edges}" if num_nodes is not None and num_edges is not None else ""
-        print(f"[{i}/{total}] {gml_path} num_bad={num_bad} num_good={num_good}{counts_suffix}")
-
-        if exp_proc.returncode != 0:
-            print(f"  experiment.py failed (rc={exp_proc.returncode}), skipping nksynth")
-            print(exp_proc.stderr, file=sys.stderr)
-            row["verdict"] = "EXPERIMENT_ERROR"
-            append_row(csv_path, row)
-            continue
-
-        if not nksynth_path.exists():
-            print(f"  expected output not found: {nksynth_path}, skipping nksynth")
-            row["verdict"] = "MISSING_OUTPUT"
-            append_row(csv_path, row)
-            continue
-
-        nksynth_cmd = [str(args.nksynth_bin)]
-        if args.full:
-            nksynth_cmd.append("--full")
-        nksynth_cmd.append(str(nksynth_path))
-
-        returncode, stdout, stderr, timed_out, wall_fallback, metrics = run_profiled(
-            nksynth_cmd, args.timeout, time_bin
-        )
-
-        row["nksynth_returncode"] = returncode
-        row["timed_out"] = timed_out
-        row["wall_time_s"] = metrics["wall_time_s"] if metrics["wall_time_s"] is not None else round(wall_fallback, 3)
-        row["user_time_s"] = metrics["user_time_s"]
-        row["sys_time_s"] = metrics["sys_time_s"]
-        row["cpu_percent"] = metrics["cpu_percent"]
-        row["max_rss_kb"] = metrics["max_rss_kb"]
-        row["max_rss_mb"] = round(metrics["max_rss_kb"] / 1024, 2) if metrics["max_rss_kb"] else None
-
-        if timed_out:
-            row["verdict"] = "TIMEOUT"
-            print(f"  {colorize('TIMEOUT')} after {args.timeout}s")
-        else:
-            verdict = stdout.strip().splitlines()[-1] if stdout.strip() else "ERROR"
-            row["verdict"] = verdict
-            print(f"  {colorize(verdict)} in {row['wall_time_s']}s, max RSS {row['max_rss_mb']} MB")
-            if returncode != 0:
-                print(stderr, file=sys.stderr)
+        if args.repeats > 1 and row["verdict"] not in ("EXPERIMENT_ERROR", "MISSING_OUTPUT"):
+            print(f"  averaged over {args.repeats} runs: {colorize(row['verdict'])} in {row['wall_time_s']}s, max RSS {row['max_rss_mb']} MB")
 
         append_row(csv_path, row)
 
