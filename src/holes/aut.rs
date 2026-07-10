@@ -1187,6 +1187,15 @@ impl ExplicitDFA {
         self.transitions.len()
     }
 
+    /// If it's equivalent to an SPP, then this is the equivalent SPP
+    pub fn is_spp(&self) -> Option<spp::SPP> {
+        if self.transitions[self.start].is_empty() {
+            Some(self.outputs[self.start])
+        } else {
+            None
+        }
+    }
+
     /// Materialize any [`DFA`] as a dense `ExplicitDFA` reachable from its start.
     ///
     /// The DFA is wrapped in a [`Memo`] (which assigns dense `usize` IDs to its
