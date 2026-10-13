@@ -2,8 +2,8 @@
 //! list of [`Constraint`]s simultaneously.
 //!
 //! Each [`Constraint`] relates a hole-bearing automaton
-//! ([`AutWithHoles`]) to a concrete [`ExplicitDFA`], asking that the
-//! instantiated automaton be contained in the DFA ([`Constraint::UpperBound`]),
+//! ([`crate::holes::nk_with_holes::AutWithHoles`]) to a concrete [`ExplicitDFA`],
+//! asking that the instantiated automaton be contained in the DFA ([`Constraint::UpperBound`]),
 //! contain it ([`Constraint::LowerBound`]), or equal it
 //! ([`Constraint::Equality`]).  The synthesized candidates are shared across
 //! every constraint, so [`run`] looks for one assignment that satisfies them
@@ -51,7 +51,7 @@ use crate::flags;
 use crate::holes::aut::{ENFA, ExplicitDFA, backward_reachable, forward_reachable};
 use crate::holes::candidate::Candidate;
 use crate::holes::inst::{self, Instantiate, LowerBoundCounterexample};
-use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Hole, State};
+use crate::holes::nk_with_holes::{EdgeLabel, Hole, State};
 use crate::holes::problem::Constraint;
 use crate::holes::smt::{AbstractClause, Literal, SmtLearner};
 use crate::sp;
@@ -78,7 +78,8 @@ impl Constraint {
     /// `learner` — a [`Candidate::reject_literal`] disjunction for an
     /// upper-bound violation, or a [`Candidate::accept_literal`] disjunction
     /// for a lower-bound one — and returns `false`. Lower-bound violations
-    /// learn both frontier and min-cut clauses when [`flags::lb_mincut`] is on.
+    /// learn the forward frontier, plus the backward frontier and min-cut
+    /// clauses when [`flags::lb_backward`] and [`flags::lb_mincut`] are enabled.
     /// An [`Constraint::Equality`] that fails its upper-bound check stops
     /// before checking the lower bound.
     fn check<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
@@ -141,6 +142,7 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     store: &mut spp::SPPstore,
     max_iters: Option<usize>,
 ) -> Result<HashMap<Hole, C>, CegisError> {
+    let mut metrics = super::metrics::Metrics::new("cegis");
     let mut learner = L::new(store.num_vars());
 
     let mut hole_to_var: HashMap<Hole, C::Var> = HashMap::new();
@@ -170,6 +172,8 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
             return Err(CegisError::IterationLimit);
         }
         iters += 1;
+        metrics.add("iterations", 1);
+        let started = metrics.start();
 
         // Visit constraints in order; the first failure adds its clauses and
         // ends the pass so we re-extract before re-checking.
@@ -180,15 +184,22 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
                 break;
             }
         }
+        metrics.elapsed("check_and_learn_ns", started);
         if satisfied {
             // println!("CEGIS: finished in {iters} iterations");
             return Ok(candidates);
         }
 
+        let started = metrics.start();
         let sol = match learner.extract(store) {
             Ok(sol) => sol,
-            Err(_) => return Err(CegisError::Infeasible),
+            Err(_) => {
+                metrics.elapsed("extract_ns", started);
+                return Err(CegisError::Infeasible);
+            }
         };
+        metrics.elapsed("extract_ns", started);
+        let started = metrics.start();
         candidates = hole_to_var
             .iter()
             .map(|(&h, &v)| (h, C::from_solution(&sol, v)))
@@ -198,6 +209,7 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
                 inst.set_hole(h, C::from_solution(&sol, v));
             }
         }
+        metrics.elapsed("install_candidates_ns", started);
     }
 }
 
@@ -251,7 +263,7 @@ enum Region {
 }
 
 /// Drop every non-`Outer` `(state, position)` key, projecting an
-/// [`Instantiate`] reachability map onto the underlying [`AutWithHoles`] states.
+/// [`Instantiate`] reachability map onto the underlying [`crate::holes::nk_with_holes::AutWithHoles`] states.
 fn outer_only<S>(map: HashMap<(inst::State<S>, usize), sp::SP>) -> HashMap<(State, usize), sp::SP> {
     map.into_iter()
         .filter_map(|((q, n), sp)| match q {
@@ -344,10 +356,11 @@ fn min_cut_edges(graph: &DiGraph<(), u32>, source: NodeIndex, sink: NodeIndex) -
         .collect()
 }
 
-/// Learn the frontier clause from every lower-bound counterexample, plus the
-/// min-cut clause when [`flags::lb_mincut`] is on. Both are necessary conditions
-/// for repairing the same counterexample, so they can be asserted together.
-/// Matching clauses are asserted only once, before membership existentialization.
+/// Learn a forward-frontier clause from each lower-bound counterexample, plus
+/// a backward frontier when [`flags::lb_backward`] is on and a min-cut clause
+/// when [`flags::lb_mincut`] is on.
+/// All three are necessary conditions for repairing that counterexample.
+/// Deduplicate within this batch before membership existentialization.
 fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     cex: LowerBoundCounterexample,
     inst: &mut Instantiate<C>,
@@ -358,20 +371,130 @@ fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
 ) where
     <C as ENFA>::State: Ord,
 {
+    let reach = lower_bound_reachability(
+        &cex,
+        inst,
+        hole_to_var,
+        store,
+        reference_dfa,
+        flags::lb_backward(),
+    );
+    let mut clauses = Vec::with_capacity(3);
     if flags::lb_mincut() {
-        let mincut =
-            lower_bound_clause_mincut(&cex, inst, hole_to_var, learner, store, reference_dfa);
-        let frontier =
-            lower_bound_clause_frontier(&cex, inst, hole_to_var, learner, store, reference_dfa);
-        let duplicate = mincut.same_literals(&frontier, &mut store.sp);
-        learner.add_clause(mincut, &mut store.sp);
-        if !duplicate {
-            learner.add_clause(frontier, &mut store.sp);
-        }
+        clauses.push(lower_bound_clause_mincut::<C, L>(
+            &cex,
+            hole_to_var,
+            learner,
+            store,
+            reference_dfa,
+            &reach,
+        ));
+    }
+    let directions: &[FrontierDirection] = if flags::lb_backward() {
+        &[FrontierDirection::Forward, FrontierDirection::Backward]
     } else {
-        let frontier =
-            lower_bound_clause_frontier(&cex, inst, hole_to_var, learner, store, reference_dfa);
-        learner.add_clause(frontier, &mut store.sp);
+        &[FrontierDirection::Forward]
+    };
+    for &direction in directions {
+        let clause = lower_bound_clause_frontier::<C, L>(
+            &cex,
+            hole_to_var,
+            learner,
+            store,
+            reference_dfa,
+            &reach,
+            direction,
+        );
+        if !clauses
+            .iter()
+            .any(|prior| prior.same_literals(&clause, &mut store.sp))
+        {
+            clauses.push(clause);
+        }
+    }
+    for clause in clauses {
+        learner.add_clause(clause, &mut store.sp);
+    }
+}
+
+/// All clause builders use the same current instantiation and counterexample.
+/// The two frontier directions also share the all-top reachability passes.
+struct LowerBoundReachability {
+    edges: Vec<(State, EdgeLabel, State)>,
+    forward: HashMap<(State, usize), sp::SP>,
+    backward: HashMap<(State, usize), sp::SP>,
+    forward_top: HashMap<(State, usize), sp::SP>,
+    backward_top: HashMap<(State, usize), sp::SP>,
+}
+
+fn lower_bound_reachability<'a, C: Candidate<'a>>(
+    cex: &LowerBoundCounterexample,
+    inst: &mut Instantiate<C>,
+    hole_to_var: &HashMap<Hole, C::Var>,
+    store: &mut spp::SPPstore,
+    reference_dfa: &'a ExplicitDFA,
+    backward_frontier: bool,
+) -> LowerBoundReachability {
+    // Enumerate raw outer states, including suffixes behind empty holes. A
+    // backward pass rooted only at the instantiated start would miss those.
+    let mut edges = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = vec![inst.start_state()];
+    {
+        let mut aut = inst.aut();
+        while let Some(q) = stack.pop() {
+            if !seen.insert(q) {
+                continue;
+            }
+            for (label, qp) in aut.transitions(store, q) {
+                if !seen.contains(&qp) {
+                    stack.push(qp);
+                }
+                edges.push((q, label, qp));
+            }
+        }
+    }
+    let roots: Vec<_> = seen.into_iter().map(inst::State::Outer).collect();
+    let forward = outer_only(forward_reachable(&*inst, store, &cex.trace));
+    let backward = if flags::lb_mincut() || backward_frontier {
+        outer_only(backward_reachable(
+            &*inst,
+            store,
+            &cex.trace,
+            &cex.output,
+            &roots,
+        ))
+    } else {
+        HashMap::new()
+    };
+
+    let saved = inst.holes().clone();
+    let top = C::top(store, reference_dfa);
+    for &hole in hole_to_var.keys() {
+        inst.set_hole(hole, top.clone());
+    }
+    let forward_top = if backward_frontier {
+        outer_only(forward_reachable(&*inst, store, &cex.trace))
+    } else {
+        HashMap::new()
+    };
+    let backward_top = outer_only(backward_reachable(
+        &*inst,
+        store,
+        &cex.trace,
+        &cex.output,
+        &roots,
+    ));
+    for (hole, candidate) in saved {
+        inst.set_hole(hole, candidate);
+    }
+
+    LowerBoundReachability {
+        edges,
+        forward,
+        backward,
+        forward_top,
+        backward_top,
     }
 }
 
@@ -406,54 +529,18 @@ fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
 /// empty clause → instant UNSAT (no extension can fix the counterexample).
 fn lower_bound_clause_mincut<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     cex: &LowerBoundCounterexample,
-    inst: &mut Instantiate<C>,
     hole_to_var: &HashMap<Hole, C::Var>,
     learner: &mut L,
     store: &mut spp::SPPstore,
     reference_dfa: &'a ExplicitDFA,
+    reach: &LowerBoundReachability,
 ) -> AbstractClause
 where
     <C as ENFA>::State: Ord,
 {
     let n = cex.trace.len();
-
-    // Enumerate every structurally-reachable outer state and its transitions in
-    // a single walk of the raw `AutWithHoles` (visibility is read off each
-    // target's `visible` flag, so we never need the automaton again).
-    let mut edges: Vec<(State, EdgeLabel, State)> = Vec::new();
-    let outer_states: Vec<State> = {
-        let start = inst.start_state();
-        let mut aut = inst.aut();
-        let mut seen: HashSet<State> = HashSet::new();
-        let mut stack = vec![start];
-        while let Some(q) = stack.pop() {
-            if !seen.insert(q) {
-                continue;
-            }
-            for (label, qp) in aut.transitions(store, q) {
-                if !seen.contains(&qp) {
-                    stack.push(qp);
-                }
-                edges.push((q, label, qp));
-            }
-        }
-        seen.into_iter().collect()
-    };
-
-    // Symmetric *actual* reachability under the current candidate.  `backward`
-    // is seeded with every outer state: the backward region lives off the
-    // forward-reachable path (behind the holes we still have to fill), so a
-    // start-only enumeration would miss it.
-    let roots: Vec<inst::State<<C as ENFA>::State>> =
-        outer_states.into_iter().map(inst::State::Outer).collect();
-    let forward = outer_only(forward_reachable(&*inst, store, &cex.trace));
-    let backward = outer_only(backward_reachable(
-        &*inst,
-        store,
-        &cex.trace,
-        &cex.output,
-        &roots,
-    ));
+    let forward = &reach.forward;
+    let backward = &reach.backward;
 
     // Backbone (concrete / connector) edges are uncuttable: larger than any
     // possible cut, which is bounded by the number of capacity-1 hole edges.
@@ -465,7 +552,7 @@ where
     let mut int_nodes: HashMap<(State, usize), NodeIndex> = HashMap::new();
     let mut edge_literals: HashMap<EdgeIndex, Literal> = HashMap::new();
 
-    for (q, label, qp) in &edges {
+    for (q, label, qp) in &reach.edges {
         let (q, qp) = (*q, *qp);
         let qp_visible = qp.visible;
         match label {
@@ -480,8 +567,8 @@ where
                     } else {
                         i
                     };
-                    let src = region_sp(store, &forward, &backward, q, i, Region::Int);
-                    let tgt = region_sp(store, &forward, &backward, qp, it, Region::Int);
+                    let src = region_sp(store, forward, backward, q, i, Region::Int);
+                    let tgt = region_sp(store, forward, backward, qp, it, Region::Int);
                     if store.sp.is_zero(src) || store.sp.is_zero(tgt) {
                         continue;
                     }
@@ -528,8 +615,8 @@ where
                             (Region::Int, Region::Int),
                             (Region::Int, Region::Bwd),
                         ] {
-                            let in_sp = region_sp(store, &forward, &backward, q, i, src_region);
-                            let out_sp = region_sp(store, &forward, &backward, qp, jt, tgt_region);
+                            let in_sp = region_sp(store, forward, backward, q, i, src_region);
+                            let out_sp = region_sp(store, forward, backward, qp, jt, tgt_region);
                             if store.sp.is_zero(in_sp) || store.sp.is_zero(out_sp) {
                                 continue;
                             }
@@ -583,71 +670,41 @@ where
     AbstractClause { literals }
 }
 
-/// Convert a lower-bound counterexample into an existential disjunctive
-/// clause for the learner — the **frontier** clause, learned alongside the
-/// min-cut clause by default and alone when [`flags::lb_mincut`] is off.
-///
-/// For each hole-bearing edge or output summand in the automaton, we compute
-/// three SPs: (1) packets that actually reach the in-side under the *current*
-/// candidate, (2) packets that actually reach the out-side under the same, and
-/// (3) packets that plausibly let the rest of the trace continue under the
-/// *all-top* instantiation.  The site is viable iff `(1)` and `(3) ∩ ¬(2)` are
-/// both non-empty; every viable site becomes a positive literal, all joined
-/// into one clause.  Empty sites → empty clause → instant UNSAT.
+#[derive(Clone, Copy)]
+enum FrontierDirection {
+    Forward,
+    Backward,
+}
+
+/// Forward frontier: `F_current(source) -> B_top(target) \ F_current(target)`.
+/// Backward frontier: `F_top(source) \ B_current(source) -> B_current(target)`.
+/// Any repaired accepting path must cross each frontier on a changed hole
+/// traversal; concrete transitions are closed under current reachability.
 fn lower_bound_clause_frontier<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     cex: &LowerBoundCounterexample,
-    inst: &mut Instantiate<C>,
     hole_to_var: &HashMap<Hole, C::Var>,
     learner: &mut L,
     store: &mut spp::SPPstore,
     reference_dfa: &'a ExplicitDFA,
+    reach: &LowerBoundReachability,
+    direction: FrontierDirection,
 ) -> AbstractClause
 where
     <C as ENFA>::State: Ord,
 {
-    // Forward reach under the *current* candidate.
-    let forward_candidate = forward_reachable(&*inst, store, &cex.trace);
-
-    // Backward reach under all-top: temporarily swap, compute, restore.
-    let saved: HashMap<Hole, C> = inst.holes().clone();
-    let top = C::top(store, reference_dfa);
-    for &h in hole_to_var.keys() {
-        inst.set_hole(h, top.clone());
-    }
-    let backward_top = backward_reachable(&*inst, store, &cex.trace, &cex.output, &[]);
-    for (h, candidate) in saved {
-        inst.set_hole(h, candidate);
-    }
-
-    // Ignore non-outer states.
-    let forward_candidate: HashMap<(State, usize), sp::SP> = forward_candidate
-        .into_iter()
-        .flat_map(|((q, n), sp)| match q {
-            inst::State::Outer(q) => Some(((q, n), sp)),
-            _ => None,
-        })
-        .collect();
-    let backward_top: HashMap<(State, usize), sp::SP> = backward_top
-        .into_iter()
-        .flat_map(|((q, n), sp)| match q {
-            inst::State::Outer(q) => Some(((q, n), sp)),
-            _ => None,
-        })
-        .collect();
-
-    // Walk the raw AutWithHoles to enumerate hole sites.
-    let start = inst.start_state();
-    let sites = {
-        let mut aut_ref = inst.aut();
-        collect_hole_sites(
-            &mut aut_ref,
-            start,
-            &cex.trace,
-            &forward_candidate,
-            &backward_top,
-            store,
-        )
+    let (forward, backward) = match direction {
+        FrontierDirection::Forward => (&reach.forward, &reach.backward_top),
+        FrontierDirection::Backward => (&reach.forward_top, &reach.backward),
     };
+
+    let sites = collect_hole_sites(
+        &reach.edges,
+        &cex.trace,
+        forward,
+        backward,
+        direction,
+        store,
+    );
 
     // For each site, ask the candidate to emit a positive literal constraining
     // it to accept some `(ap1 ∈ in_sp, ap2 ∈ out_sp)`.
@@ -672,75 +729,67 @@ where
 /// the counterexample trace (frontier clause; see [`add_lower_bound_clause`]).
 struct HoleSite<'a> {
     hole: Hole,
-    /// SP of carry-in packets that *are* forward-reachable under the current
-    /// candidate.
+    /// Carry-in packet set on the source side of the selected frontier.
     in_sp: sp::SP,
     /// Sub-trace the hole consumes internally.
     trace: &'a [Vec<bool>],
-    /// SP of carry-out packets that plausibly continue the trace under all-top
-    /// but are not already forward-reachable.
+    /// Carry-out packet set on the target side of the selected frontier.
     out_sp: sp::SP,
 }
 
-/// Walk every state reachable from `start` and collect a [`HoleSite`] for each
-/// hole edge whose `(in_sp, out_sp)` are both non-empty.
+/// Inspect the shared raw graph and collect a [`HoleSite`] for each hole edge
+/// crossing the selected frontier with non-empty packet sets.
 fn collect_hole_sites<'a>(
-    aut: &mut AutWithHoles,
-    start: State,
+    edges: &[(State, EdgeLabel, State)],
     trace: &'a [Vec<bool>],
     forward: &HashMap<(State, usize), sp::SP>,
     backward: &HashMap<(State, usize), sp::SP>,
+    direction: FrontierDirection,
     store: &mut spp::SPPstore,
 ) -> Vec<HoleSite<'a>> {
     let n = trace.len();
     let mut sites = Vec::new();
-    let mut seen: HashSet<State> = HashSet::new();
-    let mut stack = vec![start];
     let sp_zero = store.sp.zero;
 
-    while let Some(q) = stack.pop() {
-        if !seen.insert(q) {
-            continue;
-        }
-
-        let trans = aut.transitions(store, q);
-        for (label, qp) in &trans {
-            if !seen.contains(qp) {
-                stack.push(*qp);
-            }
-            if let EdgeLabel::Abstract(hole) = label {
-                let qp_visible = aut.is_visible(*qp);
-                for i in 0..n {
-                    for j in i..n {
-                        let j_target = if qp_visible {
-                            if j + 1 >= n {
-                                continue;
-                            }
-                            j + 1
-                        } else {
-                            j
-                        };
-                        let in_sp = forward.get(&(q, i)).copied().unwrap_or(sp_zero);
-                        if store.sp.is_zero(in_sp) {
+    for &(q, ref label, qp) in edges {
+        if let EdgeLabel::Abstract(hole) = label {
+            let qp_visible = qp.visible;
+            for i in 0..n {
+                for j in i..n {
+                    let j_target = if qp_visible {
+                        if j + 1 >= n {
                             continue;
                         }
-                        let already = forward.get(&(*qp, j_target)).copied().unwrap_or(sp_zero);
-                        let plausible = backward.get(&(*qp, j_target)).copied().unwrap_or(sp_zero);
-                        let not_already = store.sp.complement(already);
-                        let out_sp = store.sp.intersect(plausible, not_already);
-                        if store.sp.is_zero(out_sp) {
-                            continue;
+                        j + 1
+                    } else {
+                        j
+                    };
+                    let source = forward.get(&(q, i)).copied().unwrap_or(sp_zero);
+                    let target = backward.get(&(qp, j_target)).copied().unwrap_or(sp_zero);
+                    let (in_sp, out_sp) = match direction {
+                        FrontierDirection::Forward => {
+                            let already = forward.get(&(qp, j_target)).copied().unwrap_or(sp_zero);
+                            let not_already = store.sp.complement(already);
+                            (source, store.sp.intersect(target, not_already))
                         }
-                        sites.push(HoleSite {
-                            hole: *hole,
-                            in_sp,
-                            // The hole's internal sub-trace is its dup'd packets,
-                            // at positions `i+1 ..= j_target`; the carry-in packet
-                            // is at position `i`.
-                            trace: &trace[i + 1..j_target + 1],
-                            out_sp,
-                        });
+                        FrontierDirection::Backward => {
+                            let already = backward.get(&(q, i)).copied().unwrap_or(sp_zero);
+                            let not_already = store.sp.complement(already);
+                            (store.sp.intersect(source, not_already), target)
+                        }
+                    };
+                    if store.sp.is_zero(in_sp) || store.sp.is_zero(out_sp) {
+                        continue;
                     }
+                    sites.push(HoleSite {
+                        hole: *hole,
+                        in_sp,
+                        // The hole's internal sub-trace is its dup'd packets,
+                        // at positions `i+1 ..= j_target`; the carry-in packet
+                        // is at position `i`.
+                        trace: &trace[i + 1..j_target + 1],
+                        out_sp,
+                    });
                 }
             }
         }
@@ -1034,7 +1083,7 @@ mod tests {
             }
         }
 
-        for branching in [false, true] {
+        for shape in 0..4 {
             let mut store = spp::SPPstore::new(2);
             let input = vec![false, true];
             let output = vec![true, false];
@@ -1044,16 +1093,30 @@ mod tests {
                 transitions: vec![vec![]],
                 outputs: vec![singleton],
             };
-            let (expr, holes) = if branching {
-                (
+            let (expr, holes) = match shape {
+                0 => (Expr::hole(Hole(0)), vec![Hole(0)]),
+                1 => (
                     Expr::sequence(
                         Expr::union(Expr::hole(Hole(0)), Expr::hole(Hole(1))),
                         Expr::hole(Hole(2)),
                     ),
                     vec![Hole(0), Hole(1), Hole(2)],
-                )
-            } else {
-                (Expr::hole(Hole(0)), vec![Hole(0)])
+                ),
+                2 => (
+                    Expr::sequence(Expr::hole(Hole(0)), Expr::hole(Hole(1))),
+                    vec![Hole(0), Hole(1)],
+                ),
+                3 => (
+                    Expr::sequence(
+                        Expr::union(Expr::hole(Hole(0)), Expr::hole(Hole(1))),
+                        Expr::sequence(
+                            Expr::hole(Hole(2)),
+                            Expr::union(Expr::hole(Hole(3)), Expr::hole(Hole(4))),
+                        ),
+                    ),
+                    (0..5).map(Hole).collect(),
+                ),
+                _ => unreachable!(),
             };
             let constraint = Constraint::lower_bound(&mut store, &expr, lower.clone());
             let reference = top_dfa(&store);
@@ -1073,14 +1136,30 @@ mod tests {
                 &mut store,
                 &reference
             ));
-            let expected = if branching && flags::lb_mincut() {
-                2
-            } else {
-                1
+            let expected = match shape {
+                0 => 1,
+                1 => {
+                    if flags::lb_mincut() || flags::lb_backward() {
+                        2
+                    } else {
+                        1
+                    }
+                }
+                2 => {
+                    if flags::lb_backward() {
+                        2
+                    } else {
+                        1
+                    }
+                }
+                3 => 1 + flags::lb_backward() as usize + flags::lb_mincut() as usize,
+                _ => unreachable!(),
             };
-            assert_eq!(learner.clauses.len(), expected, "branching={branching}");
-            if expected == 2 {
-                assert!(!learner.clauses[0].same_literals(&learner.clauses[1], &mut store.sp));
+            assert_eq!(learner.clauses.len(), expected, "shape={shape}");
+            for (idx, clause) in learner.clauses.iter().enumerate() {
+                for other in &learner.clauses[..idx] {
+                    assert!(!clause.same_literals(other, &mut store.sp));
+                }
             }
             // The frontier's all-top pass restores the original candidates.
             assert!(inst.holes().values().all(|&spp| spp == store.zero));
@@ -1102,7 +1181,7 @@ mod tests {
                     })
                 }));
             }
-            if !branching {
+            if shape == 0 {
                 inst.set_hole(Hole(0), solution.spps[&hole_to_var[&Hole(0)]]);
                 assert!(inst.check_greater_than(&mut store, &lower).is_ok());
             }
@@ -1248,5 +1327,161 @@ mod tests {
         let isolated = g.add_node(());
         g.add_edge(s, isolated, 1);
         assert!(min_cut_edges(&g, s, t).is_empty());
+    }
+
+    #[test]
+    fn backward_frontier_is_sound_for_all_one_bit_hole_relations() {
+        use crate::holes::nk_with_holes::AutWithHoles;
+        let mut store = spp::SPPstore::new(1);
+        let reference = top_dfa(&store);
+        let mut learner = Native::new(1);
+        let slots = [learner.fresh_spp(), learner.fresh_spp()];
+        let hole_to_var = HashMap::from([(Hole(0), slots[0]), (Hole(1), slots[1])]);
+        let expr = Expr::sequence(Expr::hole(Hole(0)), Expr::hole(Hole(1)));
+        let mut aut = AutWithHoles::new();
+        let start = aut.expr_to_state(&mut store, &expr);
+        let relations: Vec<_> = (0..16u32)
+            .map(|mask| {
+                store.mk(
+                    spp::SPP::new(mask & 1),
+                    spp::SPP::new((mask >> 1) & 1),
+                    spp::SPP::new((mask >> 2) & 1),
+                    spp::SPP::new((mask >> 3) & 1),
+                )
+            })
+            .collect();
+        let accepts = |mask: u32, input: u32, output: u32| mask & (1 << (2 * input + output)) != 0;
+        let composed = |a, b, input, output| {
+            (0..2).any(|middle| accepts(a, input, middle) && accepts(b, middle, output))
+        };
+        for a in 0..16u32 {
+            for b in 0..16u32 {
+                for input in 0..2 {
+                    for output in 0..2 {
+                        if composed(a, b, input, output) {
+                            continue;
+                        }
+                        let mut inst = Instantiate::new(
+                            aut.clone(),
+                            start,
+                            HashMap::from([
+                                (Hole(0), relations[a as usize]),
+                                (Hole(1), relations[b as usize]),
+                            ]),
+                        );
+                        let cex = LowerBoundCounterexample {
+                            trace: vec![vec![input != 0]],
+                            output: vec![output != 0],
+                        };
+                        // The backward builder needs both maps even when the
+                        // process was configured to omit it from CEGIS.
+                        let reach = lower_bound_reachability(
+                            &cex,
+                            &mut inst,
+                            &hole_to_var,
+                            &mut store,
+                            &reference,
+                            true,
+                        );
+
+                        let clause = lower_bound_clause_frontier::<spp::SPP, Native>(
+                            &cex,
+                            &hole_to_var,
+                            &mut learner,
+                            &mut store,
+                            &reference,
+                            &reach,
+                            FrontierDirection::Backward,
+                        );
+                        let realizes = |masks: [u32; 2]| {
+                            clause.literals.iter().any(|literal| {
+                                let Literal::SppMember { spp, in_sp, out_sp } = literal else {
+                                    panic!("expected SPP membership");
+                                };
+                                let idx = if *spp == slots[0] {
+                                    0
+                                } else {
+                                    assert_eq!(*spp, slots[1]);
+                                    1
+                                };
+                                (0..2).any(|p| {
+                                    (0..2).any(|q| {
+                                        store.sp.accepts(*in_sp, &[p != 0])
+                                            && store.sp.accepts(*out_sp, &[q != 0])
+                                            && accepts(masks[idx], p, q)
+                                    })
+                                })
+                            })
+                        };
+                        assert!(
+                            !realizes([a, b]),
+                            "the clause must rule out the current candidate"
+                        );
+                        for new_a in 0..16u32 {
+                            for new_b in 0..16u32 {
+                                if composed(new_a, new_b, input, output) {
+                                    assert!(
+                                        realizes([new_a, new_b]),
+                                        "clause excludes a repair: current ({a}, {b}), repaired ({new_a}, {new_b}), witness ({input}, {output})"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn backward_frontier_preserves_visible_trace_positions() {
+        use crate::holes::nk_with_holes::AutWithHoles;
+        let mut store = spp::SPPstore::new(1);
+        let reference = top_dfa(&store);
+        let mut learner = Native::new(1);
+        let first = learner.fresh_spp();
+        let last = learner.fresh_spp();
+        let hole_to_var = HashMap::from([(Hole(0), first), (Hole(1), last)]);
+        let expr = Expr::sequence(
+            Expr::hole(Hole(0)),
+            Expr::sequence(Expr::dup(), Expr::hole(Hole(1))),
+        );
+        let mut aut = AutWithHoles::new();
+        let start = aut.expr_to_state(&mut store, &expr);
+        let mut inst = Instantiate::new(
+            aut,
+            start,
+            HashMap::from([(Hole(0), store.zero), (Hole(1), store.zero)]),
+        );
+        let cex = LowerBoundCounterexample {
+            trace: vec![vec![false], vec![true]],
+            output: vec![false],
+        };
+        // Request the shared maps even when this builder is disabled in CEGIS.
+        let reach =
+            lower_bound_reachability(&cex, &mut inst, &hole_to_var, &mut store, &reference, true);
+
+        let clause = lower_bound_clause_frontier::<spp::SPP, Native>(
+            &cex,
+            &hole_to_var,
+            &mut learner,
+            &mut store,
+            &reference,
+            &reach,
+            FrontierDirection::Backward,
+        );
+        assert_eq!(clause.literals.len(), 1);
+        let Literal::SppMember { spp, in_sp, out_sp } = clause.literals[0] else {
+            panic!("expected SPP membership");
+        };
+        assert_eq!(
+            spp, last,
+            "the backward frontier must find the suffix behind the empty first hole"
+        );
+        assert!(store.sp.accepts(in_sp, &[true]));
+        assert!(!store.sp.accepts(in_sp, &[false]));
+        assert!(store.sp.accepts(out_sp, &[false]));
+        assert!(!store.sp.accepts(out_sp, &[true]));
+        assert!(inst.holes().values().all(|&spp| spp == store.zero));
     }
 }

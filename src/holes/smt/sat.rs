@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use rustsat::{
-    solvers::{Solve, SolverResult},
+    solvers::{GetInternalStats, Solve, SolverResult},
     types::{Clause, Lit, TernaryVal},
 };
 use rustsat_cadical::CaDiCaL;
@@ -16,6 +16,7 @@ pub(super) struct Sat {
     solver: CaDiCaL<'static, 'static>,
     next_var: u32,
     gates: HashMap<(Lit, Lit, Lit), Lit>,
+    metrics: crate::holes::metrics::Metrics,
 }
 
 /// A completed SAT assignment, read once per solve. No FFI during extraction.
@@ -35,6 +36,7 @@ impl Sat {
             solver,
             next_var: 1,
             gates: HashMap::new(),
+            metrics: crate::holes::metrics::Metrics::new("sat"),
         }
     }
 
@@ -59,6 +61,7 @@ impl Sat {
         if clause.windows(2).any(|pair| pair[0] == !pair[1]) {
             return;
         }
+        self.metrics.add("clauses", 1);
         self.solver
             .add_clause(clause.into_iter().collect::<Clause>())
             .expect("add SAT clause");
@@ -106,21 +109,45 @@ impl Sat {
         self.solver
             .reserve(Lit::positive(self.next_var - 1).var())
             .expect("reserve SAT variables");
-        match self.solver.solve().expect("solve SAT instance") {
+        self.metrics.add("calls", 1);
+        let started = self.metrics.start();
+        let result = self.solver.solve().expect("solve SAT instance");
+        self.metrics.elapsed("solve_ns", started);
+        match result {
             SolverResult::Unsat => None,
             SolverResult::Interrupted => panic!("SAT solver unexpectedly interrupted"),
-            SolverResult::Sat => Some(Model(
-                (0..self.next_var)
-                    .map(|idx| {
-                        // Unused variables may be unassigned. A consistent false
-                        // completion is sufficient for unconstrained packet bits.
-                        self.solver
-                            .lit_val(Lit::positive(idx))
-                            .expect("read SAT model")
-                            == TernaryVal::True
-                    })
-                    .collect(),
-            )),
+            SolverResult::Sat => {
+                self.metrics.add("sat", 1);
+                let started = self.metrics.start();
+                let model = Model(
+                    (0..self.next_var)
+                        .map(|idx| {
+                            // Unused variables may be unassigned. A consistent false
+                            // completion is sufficient for unconstrained packet bits.
+                            self.solver
+                                .lit_val(Lit::positive(idx))
+                                .expect("read SAT model")
+                                == TernaryVal::True
+                        })
+                        .collect(),
+                );
+                self.metrics.elapsed("model_ns", started);
+                Some(model)
+            }
+        }
+    }
+}
+
+impl Drop for Sat {
+    fn drop(&mut self) {
+        if self.metrics.enabled() {
+            self.metrics.add("variables", self.next_var as u64);
+            self.metrics
+                .add("conflicts", self.solver.conflicts() as u64);
+            self.metrics
+                .add("decisions", self.solver.decisions() as u64);
+            self.metrics
+                .add("propagations", self.solver.propagations() as u64);
         }
     }
 }

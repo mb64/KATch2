@@ -1,10 +1,11 @@
 # Synthesis benchmarks
 
 `benches/synthesis.rs` times the end-to-end CEGIS loop
-(`ProblemInstance::solve` / `solve_full`). It exists to measure the three
+(`ProblemInstance::solve` / `solve_full`). It measures the clause builders and
 solver-shrinking optimizations:
 
-- the lower-bound **min-cut clause** builder (`src/holes/cegis.rs`),
+- the **forward frontier**, additional **backward frontier**, and additional
+  **min-cut clause** builders (`src/holes/cegis.rs`),
 - the **SMT clause simplification / merge** (`src/holes/smt.rs`), and
 - the **greedy example cover** before passive learning (`src/holes/smt.rs`).
 
@@ -38,7 +39,8 @@ one compiled tree — no rebuilds or branch-switching needed:
 
 | env var | optimization |
 | --- | --- |
-| `KATCH2_LB_MINCUT` | lower-bound clause via min cut (vs. the frontier clause) |
+| `KATCH2_LB_MINCUT` | add a min-cut clause alongside the enabled frontiers |
+| `KATCH2_LB_BACKWARD` | add a backward-frontier clause alongside the forward frontier |
 | `KATCH2_CLAUSE_MERGE` | collate SMT membership disjuncts before solving |
 | `KATCH2_EXAMPLE_COVER` | greedy set cover of examples before passive learning |
 
@@ -55,14 +57,124 @@ Or drive a single combo directly:
 
 ```sh
 cargo bench --bench synthesis                      # all on (default)
-KATCH2_LB_MINCUT=0 KATCH2_CLAUSE_MERGE=0 KATCH2_EXAMPLE_COVER=0 \
+KATCH2_LB_MINCUT=0 KATCH2_LB_BACKWARD=0 \
+  KATCH2_CLAUSE_MERGE=0 KATCH2_EXAMPLE_COVER=0 \
   cargo bench --bench synthesis                    # all off (baseline)
 KATCH2_CLAUSE_MERGE=0 KATCH2_EXAMPLE_COVER=0 \
-  cargo bench --bench synthesis                    # min cut only
+  cargo bench --bench synthesis                    # all three clauses, no merge or cover
 ```
 
 (The corpus is seeded, so it is identical across combos and the medians are
 directly comparable.)
+
+## Frontier comparison
+
+Release CLI wall-time medians from seven runs per configuration, alternating
+configuration order, with the same binary and a 1,000-round refinement cap.
+Clause merging, example cover, and per-counterexample clause deduplication are
+enabled throughout. Pigeonhole 3 proves UNSAT; pigeonhole 4 hits the cap.
+
+| Case | One frontier | One frontier + min cut | Both frontiers | Both frontiers + min cut |
+| --- | ---: | ---: | ---: | ---: |
+| Pigeonhole 3 (UNSAT) | 0.974 s | 0.959 s | 0.765 s | 0.837 s |
+| Pigeonhole 4 (UNKNOWN) | 1.070 s | 1.057 s | 0.620 s | 0.657 s |
+
+The forward frontier is always enabled. Select the other builders independently:
+
+| Configuration | `KATCH2_LB_BACKWARD` | `KATCH2_LB_MINCUT` | CLI flags |
+| --- | ---: | ---: | --- |
+| One frontier | 0 | 0 | `--no-lb-backward --no-lb-mincut` |
+| One frontier + min cut | 0 | 1 | `--no-lb-backward` |
+| Both frontiers | 1 | 0 | `--no-lb-mincut` |
+| Both frontiers + min cut (default) | 1 | 1 | none |
+
+The raw measurements are saved locally in
+`out/profiles/pigeonhole-frontier-benchmarks.json`.
+
+## Solver measurements
+
+Enable `KATCH2_METRICS=1` to emit counters and nanosecond timings to stderr.
+Measurements are opt-in; normal runs do not read clocks or query CaDiCaL's
+statistics. Reproduce the four-configuration comparison with:
+
+```sh
+CARGO_PROFILE_RELEASE_DEBUG=1 cargo build --release --bin nksynth
+python3 benches/measure_frontiers.py
+```
+
+The script runs seven alternating repetitions per configuration with a 1,000
+round cap. The results below were measured separately from builds and tests.
+Every non-time counter was identical across the seven repetitions. Wall times
+include instrumentation and are a separate series from the earlier timing table.
+`out/profiles/pigeonhole-frontier-metrics.json` contains the raw results.
+
+### Pigeonhole 3 (UNSAT)
+
+| Measurement | One frontier | One frontier + min cut | Both frontiers | Both frontiers + min cut |
+| --- | ---: | ---: | ---: | ---: |
+| Wall time | 1.185 s | 1.054 s | 0.915 s | 0.905 s |
+| CEGIS rounds | 780 | 763 | 531 | 529 |
+| SAT calls | 2,213 | 2,192 | 1,337 | 1,363 |
+| Ackermann refinement rounds | 1,432 | 1,428 | 805 | 833 |
+| Ackermann lemmas | 2,837 | 2,905 | 2,198 | 2,402 |
+| Abstract clauses | 780 | 791 | 683 | 709 |
+| CNF clauses submitted | 20,762 | 20,997 | 14,819 | 16,457 |
+| SAT variables allocated | 9,495 | 9,605 | 7,013 | 7,734 |
+| CaDiCaL conflicts | 25,349 | 25,086 | 44,671 | 44,786 |
+| CaDiCaL decisions | 616,979 | 645,967 | 317,335 | 376,164 |
+| CaDiCaL propagations | 2,873,056 | 3,059,595 | 2,265,400 | 2,554,123 |
+| SAT search time | 799.5 ms | 684.8 ms | 729.6 ms | 724.7 ms |
+| SAT model extraction time | 200.8 ms | 190.5 ms | 71.6 ms | 79.5 ms |
+| Congruence checking time | 65.4 ms | 66.8 ms | 31.6 ms | 34.1 ms |
+| Ackermann encoding time | 7.3 ms | 6.2 ms | 3.5 ms | 3.6 ms |
+| Candidate construction time | 43.4 ms | 40.7 ms | 24.0 ms | 23.5 ms |
+| Candidate checking + clause learning | 45.4 ms | 44.9 ms | 27.5 ms | 26.1 ms |
+
+### Pigeonhole 4 (UNKNOWN)
+
+| Measurement | One frontier | One frontier + min cut | Both frontiers | Both frontiers + min cut |
+| --- | ---: | ---: | ---: | ---: |
+| Wall time | 1.177 s | 1.158 s | 0.683 s | 0.702 s |
+| CEGIS rounds | 1,000 | 1,000 | 1,000 | 1,000 |
+| SAT calls | 2,344 | 2,269 | 1,935 | 2,169 |
+| Ackermann refinement rounds | 1,343 | 1,268 | 934 | 1,168 |
+| Ackermann lemmas | 3,236 | 3,175 | 2,353 | 3,286 |
+| Abstract clauses | 1,000 | 1,026 | 1,089 | 1,131 |
+| CNF clauses submitted | 29,446 | 28,114 | 16,242 | 22,078 |
+| SAT variables allocated | 10,466 | 10,109 | 6,459 | 8,814 |
+| CaDiCaL conflicts | 4,435 | 4,164 | 2,996 | 4,338 |
+| CaDiCaL decisions | 3,538,235 | 3,411,617 | 1,656,312 | 1,266,768 |
+| CaDiCaL propagations | 6,316,638 | 6,067,405 | 2,997,053 | 3,021,254 |
+| SAT search time | 709.8 ms | 708.7 ms | 350.6 ms | 321.7 ms |
+| SAT model extraction time | 178.9 ms | 165.9 ms | 83.3 ms | 107.1 ms |
+| Congruence checking time | 105.2 ms | 101.9 ms | 80.8 ms | 96.6 ms |
+| Ackermann encoding time | 12.5 ms | 11.5 ms | 5.7 ms | 6.9 ms |
+| Candidate construction time | 86.4 ms | 87.7 ms | 88.6 ms | 87.6 ms |
+| Candidate checking + clause learning | 60.7 ms | 67.2 ms | 55.8 ms | 57.3 ms |
+
+SAT model extraction includes CaDiCaL model reconstruction (`External::extend`)
+and copying all allocated variable values into Rust. Candidate construction
+includes example selection and learning the candidate BDDs. Checking + learning
+includes automaton checks, counterexample reachability, cut construction,
+deduplication, and asserting abstract clauses. Medians for individual phases
+need not sum to the median wall time. The initial empty extraction is included
+in native/SAT counters; SAT calls can exceed candidate extractions because of
+lazy Ackermann refinement. CNF counts include clauses submitted by our wrapper,
+excluding the initial constant unit and CaDiCaL's internally learned clauses.
+
+For pigeonhole 4, adding the backward frontier without min-cut reduces SAT calls
+by 17%, decisions by 53%, and CNF clauses by 45%, while retaining 1,000 CEGIS
+rounds. Mean search time per SAT call also falls, from about 303 to 181 µs.
+Model extraction more than halves, while candidate construction stays near
+87–89 ms. The extra abstract clauses change the candidate sequence and reduce
+refinement/encoding work; these measurements do not isolate propagation effects
+on an identical SAT instance.
+
+For pigeonhole 3, both frontiers reduce CEGIS rounds from 780 to 531 and SAT
+calls from 2,213 to 1,337. Conflicts increase from 25,349 to 44,671, even though
+decisions and total runtime fall: fewer calls and less model/extraction work
+matter as well as SAT search. Min-cut with both frontiers lowers pigeonhole 4's
+SAT search time further, but increases model and congruence overhead.
 
 ## Notes
 

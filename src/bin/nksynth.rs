@@ -44,10 +44,13 @@ struct Cli {
     #[arg(long, value_name = "N")]
     iteration_limit: Option<usize>,
 
-    /// Disable the additional lower-bound min-cut clause (learn only the
-    /// frontier clause).
+    /// Disable the additional lower-bound min-cut clause.
     #[arg(long)]
     no_lb_mincut: bool,
+
+    /// Disable the additional backward-frontier clause (keep the forward frontier).
+    #[arg(long)]
+    no_lb_backward: bool,
 
     /// Disable collating SMT membership disjuncts by shared input/output set.
     #[arg(long)]
@@ -77,6 +80,9 @@ fn main() -> ExitCode {
 
     if cli.no_lb_mincut {
         katch2::flags::set_lb_mincut(false);
+    }
+    if cli.no_lb_backward {
+        katch2::flags::set_lb_backward(false);
     }
     if cli.no_clause_merge {
         katch2::flags::set_clause_merge(false);

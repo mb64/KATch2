@@ -255,6 +255,7 @@ pub struct Native<'a> {
     atoms: Vec<Atom>,
     applications: HashMap<(SlotRef, Vec<Arg>), usize>,
     clauses: Vec<Vec<TrackedLit>>,
+    metrics: crate::holes::metrics::Metrics,
 }
 
 /// Compatibility name for callers of the former Z3 backend.
@@ -272,6 +273,7 @@ impl<'a> SmtLearner<'a> for Native<'a> {
             cands: Vec::new(),
             existentials: Vec::new(),
             clauses: Vec::new(),
+            metrics: crate::holes::metrics::Metrics::new("native"),
         }
     }
 
@@ -325,6 +327,7 @@ impl<'a> SmtLearner<'a> for Native<'a> {
     /// factors out of the union), so it shrinks the disjunction without
     /// changing its meaning.
     fn add_clause(&mut self, clause: AbstractClause, sp_store: &mut SPstore) {
+        self.metrics.add("abstract_clauses", 1);
         let n = self.num_vars as usize;
 
         let (members, others) = clause.collate(sp_store);
@@ -394,7 +397,9 @@ impl<'a> SmtLearner<'a> for Native<'a> {
     /// satisfied while leaving more room for the BDD-style inductive bias of
     /// those learners.
     fn extract(&mut self, spp_store: &mut SPPstore) -> Result<Solution<'a>, InconsistentError> {
+        self.metrics.add("extractions", 1);
         let model = self.solve()?;
+        let started = self.metrics.start();
         let mut examples = self.select_examples(&model, flags::example_cover());
 
         // SPP slots.  A slot with no selected literals gets no examples and
@@ -415,6 +420,7 @@ impl<'a> SmtLearner<'a> for Native<'a> {
             cands.insert(CandVar(idx as u32), cand);
         }
 
+        self.metrics.elapsed("candidate_build_ns", started);
         Ok(Solution { spps, cands })
     }
 }
@@ -521,6 +527,7 @@ impl<'a> Native<'a> {
     fn solve(&mut self) -> Result<Model, InconsistentError> {
         loop {
             let model = self.solver.solve().ok_or(InconsistentError)?;
+            let started = self.metrics.start();
             let mut groups: HashMap<(SlotRef, Vec<u64>), usize> = HashMap::new();
             let mut conflicts = Vec::new();
             for (idx, atom) in self.atoms.iter().enumerate() {
@@ -536,12 +543,17 @@ impl<'a> Native<'a> {
                     groups.insert(key, idx);
                 }
             }
+            self.metrics.elapsed("congruence_check_ns", started);
             if conflicts.is_empty() {
                 return Ok(model);
             }
+            self.metrics.add("refinement_rounds", 1);
+            self.metrics.add("ackermann_lemmas", conflicts.len() as u64);
+            let started = self.metrics.start();
             for (a, b) in conflicts {
                 self.ackermannize(a, b);
             }
+            self.metrics.elapsed("ackermann_build_ns", started);
         }
     }
 

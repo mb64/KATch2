@@ -133,6 +133,7 @@ pub mod cand;
 pub mod candidate;
 pub mod cegis;
 pub mod inst;
+mod metrics;
 pub mod minimize;
 pub mod nk_with_holes;
 pub mod parser;
