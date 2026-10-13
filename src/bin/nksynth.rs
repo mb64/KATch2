@@ -44,8 +44,8 @@ struct Cli {
     #[arg(long, value_name = "N")]
     iteration_limit: Option<usize>,
 
-    /// Disable the lower-bound min-cut optimization (emit the frontier clause
-    /// instead of a min cut).
+    /// Disable the additional lower-bound min-cut clause (learn only the
+    /// frontier clause).
     #[arg(long)]
     no_lb_mincut: bool,
 

@@ -52,9 +52,8 @@ fn parse_flag(name: &str, raw: &str) -> bool {
     }
 }
 
-/// Lower-bound refinement clauses shrink via a min cut over the abstract
-/// reachability graph instead of emitting every crossing hole edge
-/// (`holes::cegis`).
+/// Add a min-cut lower-bound refinement clause alongside the frontier clause
+/// (`holes::cegis`). When disabled, only the frontier clause is learned.
 pub fn lb_mincut() -> bool {
     env_init();
     LB_MINCUT.load(Ordering::Relaxed)

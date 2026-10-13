@@ -30,7 +30,7 @@
 //!      [`Instantiate::check_greater_than`]; on failure each viable hole site
 //!      becomes a positive literal ([`Candidate::accept_literal`]).
 //!
-//!    The first failing constraint adds its clause and stops the pass.
+//!    The first failing constraint adds its refining clauses and stops the pass.
 //! 4. If every constraint is satisfied, return the candidates.
 //! 5. Otherwise, ask the learner for refined candidates and loop.  If the
 //!    learner returns an inconsistency, the original problem is infeasible.
@@ -74,12 +74,13 @@ impl Constraint {
     /// Check whether `inst` (the constraint's automaton instantiated with the
     /// current candidates) satisfies this constraint.
     ///
-    /// Returns `true` if satisfied.  Otherwise records a refining clause on
+    /// Returns `true` if satisfied. Otherwise records refining clauses on
     /// `learner` — a [`Candidate::reject_literal`] disjunction for an
     /// upper-bound violation, or a [`Candidate::accept_literal`] disjunction
-    /// for a lower-bound one — and returns `false`.  At most one clause is
-    /// added per call: an [`Constraint::Equality`] that fails its upper-bound
-    /// check stops before checking the lower bound.
+    /// for a lower-bound one — and returns `false`. Lower-bound violations
+    /// learn both frontier and min-cut clauses when [`flags::lb_mincut`] is on.
+    /// An [`Constraint::Equality`] that fails its upper-bound check stops
+    /// before checking the lower bound.
     fn check<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
         &self,
         inst: &mut Instantiate<C>,
@@ -170,7 +171,7 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
         }
         iters += 1;
 
-        // Visit constraints in order; the first failure adds its clause and
+        // Visit constraints in order; the first failure adds its clauses and
         // ends the pass so we re-extract before re-checking.
         let mut satisfied = true;
         for (c, inst) in constraints.iter().zip(insts.iter_mut()) {
@@ -343,10 +344,10 @@ fn min_cut_edges(graph: &DiGraph<(), u32>, source: NodeIndex, sink: NodeIndex) -
         .collect()
 }
 
-/// Convert a lower-bound counterexample into an existential disjunctive clause
-/// for the learner, dispatching on [`flags::lb_mincut`]: the min-cut clause
-/// ([`add_lower_bound_clause_mincut`]) when on, the frontier clause
-/// ([`add_lower_bound_clause_frontier`]) when off.
+/// Learn the frontier clause from every lower-bound counterexample, plus the
+/// min-cut clause when [`flags::lb_mincut`] is on. Both are necessary conditions
+/// for repairing the same counterexample, so they can be asserted together.
+/// Matching clauses are asserted only once, before membership existentialization.
 fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     cex: LowerBoundCounterexample,
     inst: &mut Instantiate<C>,
@@ -358,9 +359,19 @@ fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     <C as ENFA>::State: Ord,
 {
     if flags::lb_mincut() {
-        add_lower_bound_clause_mincut(cex, inst, hole_to_var, learner, store, reference_dfa)
+        let mincut =
+            lower_bound_clause_mincut(&cex, inst, hole_to_var, learner, store, reference_dfa);
+        let frontier =
+            lower_bound_clause_frontier(&cex, inst, hole_to_var, learner, store, reference_dfa);
+        let duplicate = mincut.same_literals(&frontier, &mut store.sp);
+        learner.add_clause(mincut, &mut store.sp);
+        if !duplicate {
+            learner.add_clause(frontier, &mut store.sp);
+        }
     } else {
-        add_lower_bound_clause_frontier(cex, inst, hole_to_var, learner, store, reference_dfa)
+        let frontier =
+            lower_bound_clause_frontier(&cex, inst, hole_to_var, learner, store, reference_dfa);
+        learner.add_clause(frontier, &mut store.sp);
     }
 }
 
@@ -393,14 +404,15 @@ fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
 /// is a set of hole edges separating "reachable now" from "co-reaches the
 /// output"; the disjunction of their literals is the clause.  An empty cut →
 /// empty clause → instant UNSAT (no extension can fix the counterexample).
-fn add_lower_bound_clause_mincut<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
-    cex: LowerBoundCounterexample,
+fn lower_bound_clause_mincut<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
+    cex: &LowerBoundCounterexample,
     inst: &mut Instantiate<C>,
     hole_to_var: &HashMap<Hole, C::Var>,
     learner: &mut L,
     store: &mut spp::SPPstore,
     reference_dfa: &'a ExplicitDFA,
-) where
+) -> AbstractClause
+where
     <C as ENFA>::State: Ord,
 {
     let n = cex.trace.len();
@@ -568,12 +580,12 @@ fn add_lower_bound_clause_mincut<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
         .into_iter()
         .filter_map(|e| edge_literals.remove(&e))
         .collect();
-    learner.add_clause(AbstractClause { literals }, &mut store.sp);
+    AbstractClause { literals }
 }
 
 /// Convert a lower-bound counterexample into an existential disjunctive
-/// clause for the learner — the **frontier** clause used when
-/// [`flags::lb_mincut`] is off.
+/// clause for the learner — the **frontier** clause, learned alongside the
+/// min-cut clause by default and alone when [`flags::lb_mincut`] is off.
 ///
 /// For each hole-bearing edge or output summand in the automaton, we compute
 /// three SPs: (1) packets that actually reach the in-side under the *current*
@@ -582,14 +594,15 @@ fn add_lower_bound_clause_mincut<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
 /// *all-top* instantiation.  The site is viable iff `(1)` and `(3) ∩ ¬(2)` are
 /// both non-empty; every viable site becomes a positive literal, all joined
 /// into one clause.  Empty sites → empty clause → instant UNSAT.
-fn add_lower_bound_clause_frontier<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
-    cex: LowerBoundCounterexample,
+fn lower_bound_clause_frontier<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
+    cex: &LowerBoundCounterexample,
     inst: &mut Instantiate<C>,
     hole_to_var: &HashMap<Hole, C::Var>,
     learner: &mut L,
     store: &mut spp::SPPstore,
     reference_dfa: &'a ExplicitDFA,
-) where
+) -> AbstractClause
+where
     <C as ENFA>::State: Ord,
 {
     // Forward reach under the *current* candidate.
@@ -652,7 +665,7 @@ fn add_lower_bound_clause_frontier<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
             )
         })
         .collect();
-    learner.add_clause(AbstractClause { literals }, &mut store.sp);
+    AbstractClause { literals }
 }
 
 /// A single hole site discovered while walking the hole-bearing automaton along
@@ -980,6 +993,120 @@ mod tests {
             store.accepts(h0, &trace0, &output_pkt),
             "refined hole SPP must accept the lower-bound's witness pair"
         );
+    }
+
+    #[test]
+    fn lower_bound_deduplicates_matching_clauses_before_reextracting() {
+        use crate::holes::smt::{CandVar, Existential, InconsistentError, Solution, SppVar};
+
+        struct RecordingLearner<'a> {
+            inner: Native<'a>,
+            clauses: Vec<AbstractClause>,
+        }
+        impl<'a> SmtLearner<'a> for RecordingLearner<'a> {
+            fn new(num_vars: spp::Var) -> Self {
+                Self {
+                    inner: Native::new(num_vars),
+                    clauses: Vec::new(),
+                }
+            }
+            fn fresh_spp(&mut self) -> SppVar {
+                self.inner.fresh_spp()
+            }
+            fn fresh_cand(&mut self, dfa: &'a ExplicitDFA) -> CandVar {
+                self.inner.fresh_cand(dfa)
+            }
+            fn fresh_existential(&mut self) -> Existential {
+                self.inner.fresh_existential()
+            }
+            fn add_sp_membership(&mut self, sp: sp::SP, vars: &[Existential], store: &sp::SPstore) {
+                self.inner.add_sp_membership(sp, vars, store);
+            }
+            fn add_clause(&mut self, clause: AbstractClause, store: &mut sp::SPstore) {
+                self.clauses.push(clause.clone());
+                self.inner.add_clause(clause, store);
+            }
+            fn extract(
+                &mut self,
+                store: &mut spp::SPPstore,
+            ) -> Result<Solution<'a>, InconsistentError> {
+                self.inner.extract(store)
+            }
+        }
+
+        for branching in [false, true] {
+            let mut store = spp::SPPstore::new(2);
+            let input = vec![false, true];
+            let output = vec![true, false];
+            let singleton = singleton_pair_spp(&mut store, &input, &output);
+            let lower = ExplicitDFA {
+                start: 0,
+                transitions: vec![vec![]],
+                outputs: vec![singleton],
+            };
+            let (expr, holes) = if branching {
+                (
+                    Expr::sequence(
+                        Expr::union(Expr::hole(Hole(0)), Expr::hole(Hole(1))),
+                        Expr::hole(Hole(2)),
+                    ),
+                    vec![Hole(0), Hole(1), Hole(2)],
+                )
+            } else {
+                (Expr::hole(Hole(0)), vec![Hole(0)])
+            };
+            let constraint = Constraint::lower_bound(&mut store, &expr, lower.clone());
+            let reference = top_dfa(&store);
+            let mut learner = RecordingLearner::new(2);
+            let hole_to_var: HashMap<_, _> =
+                holes.iter().map(|&h| (h, learner.fresh_spp())).collect();
+            let mut inst = Instantiate::new(
+                constraint.aut().clone(),
+                constraint.start(),
+                holes.iter().map(|&h| (h, store.zero)).collect(),
+            );
+
+            assert!(!constraint.check(
+                &mut inst,
+                &hole_to_var,
+                &mut learner,
+                &mut store,
+                &reference
+            ));
+            let expected = if branching && flags::lb_mincut() {
+                2
+            } else {
+                1
+            };
+            assert_eq!(learner.clauses.len(), expected, "branching={branching}");
+            if expected == 2 {
+                assert!(!learner.clauses[0].same_literals(&learner.clauses[1], &mut store.sp));
+            }
+            // The frontier's all-top pass restores the original candidates.
+            assert!(inst.holes().values().all(|&spp| spp == store.zero));
+            let solution = learner.extract(&mut store).unwrap();
+            // Every retained clause is realized by the trained diagrams.
+            for clause in &learner.clauses {
+                assert!(clause.literals.iter().any(|literal| {
+                    let Literal::SppMember { spp, in_sp, out_sp } = literal else {
+                        panic!("expected membership");
+                    };
+                    (0..4).any(|p| {
+                        (0..4).any(|q| {
+                            let input = [p & 1 != 0, p & 2 != 0];
+                            let output = [q & 1 != 0, q & 2 != 0];
+                            store.sp.accepts(*in_sp, &input)
+                                && store.sp.accepts(*out_sp, &output)
+                                && store.accepts(solution.spps[spp], &input, &output)
+                        })
+                    })
+                }));
+            }
+            if !branching {
+                inst.set_hole(Hole(0), solution.spps[&hole_to_var[&Hole(0)]]);
+                assert!(inst.check_greater_than(&mut store, &lower).is_ok());
+            }
+        }
     }
 
     /// `0 ⊆ Hole ⊆ top` with `Cand` candidates: converges on the first

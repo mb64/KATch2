@@ -47,7 +47,7 @@ pub struct SppVar(u32);
 pub struct CandVar(u32);
 
 /// One bit of an abstract packet.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AbstractBit {
     /// A fixed value (`false` or `true`).
     Concrete(bool),
@@ -62,7 +62,7 @@ pub type AbstractPacket = Vec<AbstractBit>;
 ///
 /// `polarity = true` means "the input is a member"; `false` means "not a
 /// member".
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Literal {
     /// A membership literal over an [`SppVar`]: is the pair `(ap1, ap2)` in the
     /// SPP?
@@ -93,6 +93,56 @@ pub enum Literal {
 #[derive(Clone, Debug)]
 pub struct AbstractClause {
     pub literals: Vec<Literal>,
+}
+
+impl AbstractClause {
+    /// Compare only a pair of clauses, modulo disjunct order, repetition, and
+    /// the same membership-set merging used when asserting them.
+    pub(crate) fn same_literals(&self, other: &Self, sp_store: &mut SPstore) -> bool {
+        let key = |clause: Self, sp_store: &mut SPstore| {
+            let (members, others) = clause.collate(sp_store);
+            members
+                .into_iter()
+                .map(|(spp, in_sp, out_sp)| Literal::SppMember { spp, in_sp, out_sp })
+                .chain(others)
+                .collect::<HashSet<_>>()
+        };
+        key(self.clone(), sp_store) == key(other.clone(), sp_store)
+    }
+
+    fn collate(self, sp_store: &mut SPstore) -> (Vec<(SppVar, SP, SP)>, Vec<Literal>) {
+        // Split set-stated membership disjuncts from the rest so they can be
+        // collated before existentialization.
+        let mut members: Vec<(SppVar, SP, SP)> = Vec::new();
+        let mut others: Vec<Literal> = Vec::new();
+        for lit in self.literals {
+            match lit {
+                Literal::SppMember { spp, in_sp, out_sp } => members.push((spp, in_sp, out_sp)),
+                other => others.push(other),
+            }
+        }
+
+        // Collate the membership disjuncts (the [`flags::clause_merge`]
+        // optimization): rule 1 unions output sets sharing a (hole, input
+        // set); rule 2 unions input sets sharing a (hole, output set).
+        // Disabled → each triple is existentialized on its own.
+        let members = if flags::clause_merge() {
+            let members = merge_by(
+                members,
+                |&(h, s, _)| (h.0, s.0),
+                |a, b| (a.0, a.1, sp_store.union(a.2, b.2)),
+            );
+            merge_by(
+                members,
+                |&(h, _, t)| (h.0, t.0),
+                |a, b| (a.0, sp_store.union(a.1, b.1), a.2),
+            )
+        } else {
+            members
+        };
+
+        (members, others)
+    }
 }
 
 /// The result of a successful [`SmtLearner::extract`]: one learned diagram per
@@ -277,35 +327,7 @@ impl<'a> SmtLearner<'a> for Native<'a> {
     fn add_clause(&mut self, clause: AbstractClause, sp_store: &mut SPstore) {
         let n = self.num_vars as usize;
 
-        // Split set-stated membership disjuncts from the rest so they can be
-        // collated before existentialization.
-        let mut members: Vec<(SppVar, SP, SP)> = Vec::new();
-        let mut others: Vec<Literal> = Vec::new();
-        for lit in clause.literals {
-            match lit {
-                Literal::SppMember { spp, in_sp, out_sp } => members.push((spp, in_sp, out_sp)),
-                other => others.push(other),
-            }
-        }
-
-        // Collate the membership disjuncts (the [`flags::clause_merge`]
-        // optimization): rule 1 unions output sets sharing a (hole, input
-        // set); rule 2 unions input sets sharing a (hole, output set).
-        // Disabled → each triple is existentialized on its own.
-        let members = if flags::clause_merge() {
-            let members = merge_by(
-                members,
-                |&(h, s, _)| (h.0, s.0),
-                |a, b| (a.0, a.1, sp_store.union(a.2, b.2)),
-            );
-            merge_by(
-                members,
-                |&(h, _, t)| (h.0, t.0),
-                |a, b| (a.0, sp_store.union(a.1, b.1), a.2),
-            )
-        } else {
-            members
-        };
+        let (members, others) = clause.collate(sp_store);
 
         let mut sat_lits: Vec<Lit> = Vec::with_capacity(members.len() + others.len());
         let mut tracked: Vec<TrackedLit> = Vec::with_capacity(members.len() + others.len());
@@ -1559,5 +1581,82 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn clause_pair_comparison_ignores_order_and_repeated_literals() {
+        let mut store = SPPstore::new(1);
+        let mut learner = Native::new(1);
+        let s = learner.fresh_spp();
+        let t = learner.fresh_spp();
+        let member = Literal::SppMember {
+            spp: s,
+            in_sp: store.sp.one,
+            out_sp: store.sp.one,
+        };
+        let negative = spp_lit(t, ap_concrete(&[true]), ap_concrete(&[false]), false);
+        let first = AbstractClause {
+            literals: vec![member.clone(), negative.clone()],
+        };
+        let reordered = AbstractClause {
+            literals: vec![negative, member.clone(), member.clone()],
+        };
+        assert!(first.same_literals(&reordered, &mut store.sp));
+        let different = AbstractClause {
+            literals: vec![member],
+        };
+        assert!(!first.same_literals(&different, &mut store.sp));
+        let x = learner.fresh_existential();
+        let y = learner.fresh_existential();
+        let existential = |e, polarity| AbstractClause {
+            literals: vec![spp_lit(
+                s,
+                vec![AbstractBit::Exist(e)],
+                ap_concrete(&[false]),
+                polarity,
+            )],
+        };
+        assert!(!existential(x, true).same_literals(&existential(x, false), &mut store.sp));
+        assert!(!existential(x, true).same_literals(&existential(y, true), &mut store.sp));
+        assert!(
+            learner.clauses.is_empty(),
+            "comparison does not assert clauses"
+        );
+    }
+
+    #[test]
+    fn clause_pair_comparison_uses_membership_merging_before_allocation() {
+        let mut store = SPPstore::new(1);
+        let mut learner = Native::new(1);
+        let s = learner.fresh_spp();
+        let input = store.sp.singleton(&[false]);
+        let out0 = store.sp.singleton(&[false]);
+        let out1 = store.sp.singleton(&[true]);
+        let split = AbstractClause {
+            literals: vec![
+                Literal::SppMember {
+                    spp: s,
+                    in_sp: input,
+                    out_sp: out0,
+                },
+                Literal::SppMember {
+                    spp: s,
+                    in_sp: input,
+                    out_sp: out1,
+                },
+            ],
+        };
+        let merged = AbstractClause {
+            literals: vec![Literal::SppMember {
+                spp: s,
+                in_sp: input,
+                out_sp: store.sp.one,
+            }],
+        };
+        assert_eq!(
+            split.same_literals(&merged, &mut store.sp),
+            flags::clause_merge()
+        );
+        assert!(learner.existentials.is_empty());
+        assert!(learner.atoms.is_empty());
     }
 }
