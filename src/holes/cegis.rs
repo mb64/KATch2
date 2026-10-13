@@ -742,7 +742,7 @@ mod tests {
     use crate::holes::aut::ExplicitDFA;
     use crate::holes::cand::{Cand, Input};
     use crate::holes::nk_with_holes::Expr;
-    use crate::holes::smt::Z3;
+    use crate::holes::smt::Native;
 
     /// Iteration cap for these unit tests.  Every case here converges (or
     /// proves infeasible) in a couple of rounds, so this is purely a guard
@@ -808,7 +808,7 @@ mod tests {
         max_iters: Option<usize>,
     ) -> Result<HashMap<Hole, C>, CegisError> {
         let constraints = bounds_constraints(store, expr, lb, ub);
-        run::<C, Z3>(&constraints, holes, reference_dfa, store, max_iters)
+        run::<C, Native>(&constraints, holes, reference_dfa, store, max_iters)
     }
 
     /// 0 ⊆ Hole ⊆ top: trivially solvable.  The learner returns the empty

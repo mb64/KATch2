@@ -4,7 +4,7 @@ A solver for Existential NetKAT, based on [KATch2](https://github.com/julesjacob
 
 ## Quick start
 
-1. Install Rust (using `rustup`) and Z3
+1. Install Rust (using `rustup`), a C++ compiler, and libclang (for the bundled CaDiCaL build)
 2. `cargo build --release`
 3. `./target/release/nksynth example.nksynth`
 

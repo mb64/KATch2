@@ -1,72 +1,22 @@
-//! Learner for SPPs and [`Cand`]s.
+//! Learner for SPPs and [`Cand`]s, using native bitblasting and lazy
+//! Ackermannization over an incremental RustSAT/CaDiCaL solver.
 //!
-//! [`SmtLearner`] is the interface CEGIS drives; [`Z3`] is the current
-//! implementation, backed by Z3's quantifier-free UF solver.  Only that
-//! quantifier-free fragment is used (congruence closure over the slot
-//! membership functions), so the trait could equally be implemented by
-//! congruence closure atop a plain SAT solver — hence the abstraction.
+//! Packet bitvectors are represented directly by SAT literals. SP membership
+//! BDDs become shared Tseitin ITE gates. Each distinct symbolic predicate
+//! application gets a SAT variable. After solving, applications are grouped by
+//! their slot and evaluated arguments; conflicting results trigger congruence
+//! lemmas `(args_a = args_b) => (result_a = result_b)` and another solve.
+//! No quadratic eager expansion is needed, and the lemmas survive CEGIS rounds.
 //!
-//! The learner accumulates abstract clauses and extracts, for each allocated
-//! slot, a concrete decision diagram consistent with all of them.  Slots come
-//! in two flavours:
-//!
-//! * **SPP slots** ([`SmtLearner::fresh_spp`]) — learned via
-//!   [`crate::spp::learner::learn_spp`].
-//! * **Cand slots** ([`SmtLearner::fresh_cand`]) — learned via
-//!   [`Cand::from_examples`]; each is tied to the [`ExplicitDFA`] it predicates
-//!   over.
-//!
-//! Abstract packet bits may be:
-//!
-//! * [`AbstractBit::Concrete`] — a fixed `false`/`true`, or
-//! * [`AbstractBit::Exist`] — a globally scoped existential boolean variable
-//!   (same `id` shares the same Z3 const across all clauses).
-//!
-//! DFA state values in a [`Literal::Cand`] are always concrete (`usize`).
-//!
-//! Positive SPP membership disjuncts are stated over packet *sets*
-//! ([`Literal::SppMember`], a triple `(spp, in_sp, out_sp)` meaning
-//! "∃ i ∈ in_sp, o ∈ out_sp. (i,o) ∈ spp").  [`SmtLearner::add_clause`] first
-//! collates these triples with [`merge_by`] (the [`flags::clause_merge`]
-//! optimization) — unioning output sets that share an `(spp, in_sp)`, then
-//! input sets that share an `(spp, out_sp)` — and only
-//! then allocates the existentials and SP-membership constraints that encode
-//! each surviving disjunct.  Deferring existentialization this way is what lets
-//! the set-merge fire; the merge is equivalence-preserving because the shared
-//! `∃` factors out of the union.
-//!
-//! There are **no universally quantified bits**.  Universal quantifiers cause
-//! Z3 to choose interpretations where the uninterpreted function collapses to a
-//! constant via the `else` value of its function interpretation; that hands the
-//! inductive bias to Z3 rather than to the BDD-style learners, which is the
-//! wrong shape.  Adding universals back is a future MBQI-style outer CEGIS loop.
-//!
-//! Internally:
-//! 1. Declare one uninterpreted function per slot meaning "this concrete input
-//!    is a member".  SPP slots have signature `Bool^{2n} -> Bool`; Cand slots
-//!    have `Bool^{n} (pkt_in) x Bool^{n} (pkt_start) x Int^{N} (states) x
-//!    Bool^{n} (pkt_end) x Bool^{n} (pkt_out) -> Bool`, where `N` is the DFA's
-//!    state count.
-//! 2. Each clause becomes a disjunction of literals, each an application of the
-//!    slot's function (or its negation when polarity is false); each asserted
-//!    literal is also recorded so the clause structure survives to extraction.
-//! 3. After Z3 solves, a greedy set-cover pass (the [`flags::example_cover`]
-//!    optimization; flag off → every constrained atom is kept) walks the
-//!    clauses in assertion order and selects, for each clause not already
-//!    covered, one literal that is true under the model.  Atoms are keyed by
-//!    (slot, concrete evaluated arguments), so one selected atom covers every
-//!    clause it appears in.
-//! 4. Only the selected literals become training examples for the BDD-style
-//!    learners: the argument bits evaluated under the model, labelled with the
-//!    literal's polarity.  This is sound — every clause keeps a true literal,
-//!    and the learners agree with every example fed to them — and dropping the
-//!    unselected atoms frees the learners to generalize, producing smaller
-//!    diagrams than replaying Z3's full function interpretations would.
+//! A consistent SAT assignment is copied into a native array once per solve.
+//! The existing greedy example cover then selects training examples for the
+//! BDD learners, preserving the clause merge and example cover optimizations.
+//! There are no universal quantifiers, and DFA state arguments are concrete.
 
-use z3::{
-    FuncDecl, Model, SatResult, Solver, Sort,
-    ast::{Ast, Bool, Dynamic, Int},
-};
+mod sat;
+
+use rustsat::types::Lit;
+use sat::{FALSE, Model, Sat, TRUE};
 
 use crate::flags;
 use crate::holes::aut::ExplicitDFA;
@@ -153,7 +103,7 @@ pub struct Solution<'a> {
 }
 
 /// Returned by [`SmtLearner::extract`] when the clauses are mutually
-/// inconsistent (Z3 returned UNSAT).
+/// inconsistent (the native solver returned UNSAT).
 #[derive(Debug, Clone)]
 pub struct InconsistentError;
 
@@ -171,11 +121,9 @@ impl std::fmt::Display for InconsistentError {
 /// [`Cand`] / existential), assert SP-membership and refining clauses, and
 /// extract a concrete [`Solution`].
 ///
-/// [`Z3`] is the current implementation.  The problem is quantifier-free UF
-/// (`QF_UF`): congruence closure over the slot membership functions plus the
-/// SP-membership BDDs.  Nothing here uses richer Z3 theories, so this same trait
-/// could be backed by congruence closure atop a SAT solver such as CaDiCaL — the
-/// reason for the abstraction.
+/// [`Native`] implements this with Boolean bitblasting and lazy predicate
+/// congruence constraints. Packet fields are individual bits; DFA states are
+/// concrete values, so no arithmetic theory is required.
 ///
 /// `'a` is the lifetime of the [`ExplicitDFA`]s that [`Cand`] slots predicate
 /// over.
@@ -208,52 +156,69 @@ pub trait SmtLearner<'a> {
     fn extract(&mut self, spp_store: &mut SPPstore) -> Result<Solution<'a>, InconsistentError>;
 }
 
-/// Which learnable slot a [`TrackedLit`] applies, by slot index.
+/// Predicate identity. SPP and Cand slots occupy separate namespaces.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 enum SlotRef {
     Spp(u32),
     Cand(u32),
 }
 
-/// One asserted literal, mirrored from its Z3 assertion for extraction: the
-/// slot whose membership function is applied, the exact argument ASTs it was
-/// applied to (these may contain existential Bool consts), and the polarity.
-struct TrackedLit {
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+enum Arg {
+    Bit(Lit),
+    State(usize),
+}
+
+impl Arg {
+    fn value(self, model: &Model) -> u64 {
+        match self {
+            Self::Bit(lit) => model.value(lit) as u64,
+            Self::State(state) => state as u64,
+        }
+    }
+}
+
+struct Atom {
     slot: SlotRef,
-    args: Vec<Dynamic>,
+    args: Vec<Arg>,
+    result: Lit,
+}
+
+struct TrackedLit {
+    atom: usize,
     polarity: bool,
 }
 
-/// The examples chosen by [`Z3::select_examples`], grouped by slot index.
-/// Slots absent from a map had no literal selected for them.
 struct SelectedExamples {
     spps: HashMap<u32, Vec<Example>>,
     cands: HashMap<u32, Vec<(Input, bool)>>,
 }
 
-/// [`SmtLearner`] backed by Z3, driving its `QF_UF` solver.
-pub struct Z3<'a> {
+/// Native bitvector and uninterpreted predicate learner using RustSAT/CaDiCaL.
+/// Clauses, gates, and learned congruence lemmas persist across extractions.
+pub struct Native<'a> {
     num_vars: Var,
-    solver: Solver,
-    /// One uninterpreted function `Bool^{2n} -> Bool` per learnable SPP,
-    /// indexed by [`SppVar::0`].
-    spps: Vec<FuncDecl>,
-    /// One uninterpreted function per learnable [`Cand`], paired with the DFA
-    /// it predicates over, indexed by [`CandVar::0`].
-    cands: Vec<(FuncDecl, &'a ExplicitDFA)>,
-    existentials: Vec<Bool>,
-    /// One entry per asserted clause, in assertion order: the literals of the
-    /// disjunction, mirroring the Z3 assertion literal-for-literal.  Consumed
-    /// by the example selection in [`SmtLearner::extract`].
+    solver: Sat,
+    num_spps: u32,
+    cands: Vec<&'a ExplicitDFA>,
+    existentials: Vec<Lit>,
+    atoms: Vec<Atom>,
+    applications: HashMap<(SlotRef, Vec<Arg>), usize>,
     clauses: Vec<Vec<TrackedLit>>,
 }
 
-impl<'a> SmtLearner<'a> for Z3<'a> {
+/// Compatibility name for callers of the former Z3 backend.
+/// This alias uses the native solver and does not link to Z3.
+pub type Z3<'a> = Native<'a>;
+
+impl<'a> SmtLearner<'a> for Native<'a> {
     fn new(num_vars: Var) -> Self {
         Self {
             num_vars,
-            solver: Solver::new(),
-            spps: Vec::new(),
+            solver: Sat::new(),
+            atoms: Vec::new(),
+            applications: HashMap::new(),
+            num_spps: 0,
             cands: Vec::new(),
             existentials: Vec::new(),
             clauses: Vec::new(),
@@ -263,11 +228,8 @@ impl<'a> SmtLearner<'a> for Z3<'a> {
     /// Allocate a fresh learnable SPP slot.  The returned [`SppVar`] can be
     /// referenced in [`Literal::Spp`].
     fn fresh_spp(&mut self) -> SppVar {
-        let id = self.spps.len() as u32;
-        let bool_sort = Sort::bool();
-        let domain_refs: Vec<&Sort> = (0..2 * self.num_vars).map(|_| &bool_sort).collect();
-        let f = FuncDecl::new(format!("spp_mem_{}", id), &domain_refs, &Sort::bool());
-        self.spps.push(f);
+        let id = self.num_spps;
+        self.num_spps += 1;
         SppVar(id)
     }
 
@@ -275,43 +237,34 @@ impl<'a> SmtLearner<'a> for Z3<'a> {
     /// returned [`CandVar`] can be referenced in [`Literal::Cand`].
     fn fresh_cand(&mut self, dfa: &'a ExplicitDFA) -> CandVar {
         let id = self.cands.len() as u32;
-        let n = self.num_vars;
-        let ns = dfa.num_states() as u32;
-        let bool_sort = Sort::bool();
-        let int_sort = Sort::int();
-        // pkt_in, pkt_start (bools), states (ints), pkt_end, pkt_out (bools).
-        let mut domain_refs: Vec<&Sort> = Vec::with_capacity((4 * n + ns) as usize);
-        domain_refs.extend((0..2 * n).map(|_| &bool_sort));
-        domain_refs.extend((0..ns).map(|_| &int_sort));
-        domain_refs.extend((0..2 * n).map(|_| &bool_sort));
-        let f = FuncDecl::new(format!("cand_mem_{}", id), &domain_refs, &Sort::bool());
-        self.cands.push((f, dfa));
+        self.cands.push(dfa);
         CandVar(id)
     }
 
     fn fresh_existential(&mut self) -> Existential {
         let id = self.existentials.len() as u32;
-        self.existentials.push(Bool::new_const(format!("e_{}", id)));
+        let bit = self.solver.fresh();
+        self.existentials.push(bit);
         Existential(id)
     }
 
     /// Constrain the bit-vector formed by `vars[0..n]` (where `n` matches the
     /// SP's depth) to represent a packet that lies in `sp`.
     ///
-    /// Implemented by recursively walking the SP BDD, building one Z3 Bool
-    /// AST per node (`ite(vars[depth], rec(x1), rec(x0))`), and asserting the
+    /// Implemented by recursively walking the SP BDD, building one SAT literal
+    /// per node (`ite(vars[depth], rec(x1), rec(x0))`), and asserting the
     /// result.  Hash-consing on the SP plus a memo table over the recursion
     /// keep the work proportional to the BDD size, not exponential.
     ///
     /// Asserting membership in an empty SP makes the solver immediately UNSAT;
     /// membership in the full SP is a no-op.
     fn add_sp_membership(&mut self, sp: SP, vars: &[Existential], sp_store: &SPstore) {
-        let mut memo: HashMap<SP, Bool> = HashMap::new();
+        let mut memo: HashMap<(SP, usize), Lit> = HashMap::new();
         let body = self.build_sp_bool(sp, vars, 0, sp_store, &mut memo);
-        self.solver.assert(&body);
+        self.solver.clause([body]);
     }
 
-    /// Add an abstract clause.  The corresponding Z3 assertion is added
+    /// Add an abstract clause. The corresponding CNF clause is added
     /// immediately.
     ///
     /// When [`flags::clause_merge`] is on, [`Literal::SppMember`] disjuncts
@@ -323,8 +276,6 @@ impl<'a> SmtLearner<'a> for Z3<'a> {
     /// changing its meaning.
     fn add_clause(&mut self, clause: AbstractClause, sp_store: &mut SPstore) {
         let n = self.num_vars as usize;
-
-        // println!("Adding clause: {clause:?}");
 
         // Split set-stated membership disjuncts from the rest so they can be
         // collated before existentialization.
@@ -356,7 +307,7 @@ impl<'a> SmtLearner<'a> for Z3<'a> {
             members
         };
 
-        let mut lit_asts: Vec<Bool> = Vec::with_capacity(members.len() + others.len());
+        let mut sat_lits: Vec<Lit> = Vec::with_capacity(members.len() + others.len());
         let mut tracked: Vec<TrackedLit> = Vec::with_capacity(members.len() + others.len());
 
         // Each merged membership triple becomes a fresh existential pair pinned
@@ -370,10 +321,10 @@ impl<'a> SmtLearner<'a> for Z3<'a> {
             let ap2: AbstractPacket = out_vars.into_iter().map(AbstractBit::Exist).collect();
             let slot = SlotRef::Spp(spp.0);
             let args = self.spp_args(&ap1, &ap2);
-            lit_asts.push(self.apply_slot(slot, &args, true));
+            let atom = self.apply_slot(slot, args);
+            sat_lits.push(self.atoms[atom].result);
             tracked.push(TrackedLit {
-                slot,
-                args,
+                atom,
                 polarity: true,
             });
         }
@@ -401,56 +352,44 @@ impl<'a> SmtLearner<'a> for Z3<'a> {
                     *polarity,
                 ),
             };
-            lit_asts.push(self.apply_slot(slot, &args, polarity));
-            tracked.push(TrackedLit {
-                slot,
-                args,
-                polarity,
-            });
+            let atom = self.apply_slot(slot, args);
+            let result = self.atoms[atom].result;
+            sat_lits.push(if polarity { result } else { !result });
+            tracked.push(TrackedLit { atom, polarity });
         }
 
-        let body = match lit_asts.len() {
-            0 => Bool::from_bool(false),
-            1 => lit_asts.into_iter().next().unwrap(),
-            _ => Bool::or(&lit_asts),
-        };
-        self.solver.assert(&body);
+        self.solver.clause(sat_lits);
         self.clauses.push(tracked);
     }
 
     /// Solve once and extract a concrete diagram for each allocated slot.
     ///
-    /// After Z3 finds a model, [`Z3::select_examples`] picks the training
-    /// examples for [`crate::spp::learner::learn_spp`] (SPP slots) and
+    /// After a congruence-consistent model is found, `select_examples` picks
+    /// the training examples for [`crate::spp::learner::learn_spp`] (SPP slots) and
     /// [`Cand::from_examples`] (Cand slots).  Under [`flags::example_cover`]
     /// (the default) it greedily picks one literal true under the model per
     /// not-yet-covered clause; feeding fewer examples keeps every clause
     /// satisfied while leaving more room for the BDD-style inductive bias of
     /// those learners.
     fn extract(&mut self, spp_store: &mut SPPstore) -> Result<Solution<'a>, InconsistentError> {
-        match self.solver.check() {
-            SatResult::Unsat => return Err(InconsistentError),
-            SatResult::Unknown => panic!("Z3 returned unknown"),
-            SatResult::Sat => {}
-        }
-        let model = self.solver.get_model().expect("model after Sat");
+        let model = self.solve()?;
         let mut examples = self.select_examples(&model, flags::example_cover());
 
         // SPP slots.  A slot with no selected literals gets no examples and
         // learns the empty SPP.
-        let mut spps = HashMap::with_capacity(self.spps.len());
-        for idx in 0..self.spps.len() as u32 {
+        let mut spps = HashMap::with_capacity(self.num_spps as usize);
+        for idx in 0..self.num_spps {
             let exs = examples.spps.remove(&idx).unwrap_or_default();
-            let spp = learn_spp(exs, spp_store).expect("Z3 model is internally consistent");
+            let spp = learn_spp(exs, spp_store).expect("native model is internally consistent");
             spps.insert(SppVar(idx), spp);
         }
 
         // Cand slots.
         let mut cands = HashMap::with_capacity(self.cands.len());
-        for (idx, (_, dfa)) in self.cands.iter().enumerate() {
+        for (idx, dfa) in self.cands.iter().enumerate() {
             let exs = examples.cands.remove(&(idx as u32)).unwrap_or_default();
             let cand = Cand::from_examples(spp_store, dfa, &exs)
-                .expect("Z3 model is internally consistent");
+                .expect("native model is internally consistent");
             cands.insert(CandVar(idx as u32), cand);
         }
 
@@ -458,65 +397,50 @@ impl<'a> SmtLearner<'a> for Z3<'a> {
     }
 }
 
-impl<'a> Z3<'a> {
-    fn exist(&self, e: Existential) -> Bool {
-        self.existentials[e.0 as usize].clone()
+impl<'a> Native<'a> {
+    fn bit_arg(&self, b: &AbstractBit) -> Arg {
+        Arg::Bit(match b {
+            AbstractBit::Concrete(true) => TRUE,
+            AbstractBit::Concrete(false) => FALSE,
+            AbstractBit::Exist(e) => self.existentials[e.0 as usize],
+        })
     }
 
-    /// Z3 argument for one abstract bit.
-    fn bit_arg(&self, b: &AbstractBit) -> Dynamic {
-        match b {
-            AbstractBit::Concrete(v) => Dynamic::from_ast(&Bool::from_bool(*v)),
-            AbstractBit::Exist(e) => Dynamic::from_ast(&self.exist(*e)),
-        }
-    }
-
-    /// Recursively walk the SP BDD into a Z3 Bool
-    /// (`ite(vars[depth], rec(x1), rec(x0))`), memoized over the BDD so the work
-    /// stays proportional to its size.
+    /// Shared ITE encoding of an SP BDD, with depth in the memo key because
+    /// the variable tested at a node depends on its position in the packet.
     fn build_sp_bool(
-        &self,
+        &mut self,
         sp: SP,
         vars: &[Existential],
         depth: usize,
         sp_store: &SPstore,
-        memo: &mut HashMap<SP, Bool>,
-    ) -> Bool {
+        memo: &mut HashMap<(SP, usize), Lit>,
+    ) -> Lit {
         if sp == SP::new(0) {
-            return Bool::from_bool(false);
+            return FALSE;
         }
         if sp == SP::new(1) {
-            return Bool::from_bool(true);
+            return TRUE;
         }
-        if let Some(b) = memo.get(&sp) {
-            return b.clone();
+        if let Some(&bit) = memo.get(&(sp, depth)) {
+            return bit;
         }
         let node = sp_store.get(sp);
-        let x0_b = self.build_sp_bool(node.x0, vars, depth + 1, sp_store, memo);
-        let x1_b = self.build_sp_bool(node.x1, vars, depth + 1, sp_store, memo);
-        let var_b = self.exist(vars[depth]);
-        let result = var_b.ite(&x1_b, &x0_b);
-        memo.insert(sp, result.clone());
+        let x0 = self.build_sp_bool(node.x0, vars, depth + 1, sp_store, memo);
+        let x1 = self.build_sp_bool(node.x1, vars, depth + 1, sp_store, memo);
+        let cond = self.existentials[vars[depth].0 as usize];
+        let result = self.solver.ite(cond, x1, x0);
+        memo.insert((sp, depth), result);
         result
     }
 
-    /// Z3 arguments for an SPP-membership application: the bits of `ap1`
-    /// followed by the bits of `ap2`.
-    fn spp_args(&self, ap1: &[AbstractBit], ap2: &[AbstractBit]) -> Vec<Dynamic> {
+    fn spp_args(&self, ap1: &[AbstractBit], ap2: &[AbstractBit]) -> Vec<Arg> {
         let n = self.num_vars as usize;
         assert_eq!(ap1.len(), n, "ap1 length mismatch");
         assert_eq!(ap2.len(), n, "ap2 length mismatch");
-        let mut args: Vec<Dynamic> = Vec::with_capacity(2 * n);
-        for side in [ap1, ap2] {
-            for b in side {
-                args.push(self.bit_arg(b));
-            }
-        }
-        args
+        ap1.iter().chain(ap2).map(|b| self.bit_arg(b)).collect()
     }
 
-    /// Z3 arguments for a Cand-membership application:
-    /// `pkt_in ++ pkt_start ++ states ++ pkt_end ++ pkt_out`.
     fn cand_args(
         &self,
         cand: CandVar,
@@ -525,55 +449,111 @@ impl<'a> Z3<'a> {
         states: &[usize],
         pkt_end: &[AbstractBit],
         pkt_out: &[AbstractBit],
-    ) -> Vec<Dynamic> {
+    ) -> Vec<Arg> {
         let n = self.num_vars as usize;
-        let (_, dfa) = &self.cands[cand.0 as usize];
-        let ns = dfa.num_states();
+        let ns = self.cands[cand.0 as usize].num_states();
         assert_eq!(pkt_in.len(), n, "pkt_in length mismatch");
         assert_eq!(pkt_start.len(), n, "pkt_start length mismatch");
         assert_eq!(pkt_end.len(), n, "pkt_end length mismatch");
         assert_eq!(pkt_out.len(), n, "pkt_out length mismatch");
         assert_eq!(states.len(), ns, "states length mismatch");
-        let mut args: Vec<Dynamic> = Vec::with_capacity(4 * n + ns);
-        for b in pkt_in {
-            args.push(self.bit_arg(b));
-        }
-        for b in pkt_start {
-            args.push(self.bit_arg(b));
-        }
-        for &s in states {
-            // The DFA is complete (any sink is a real state), so every
-            // state value lies in `0..ns`.
+        let mut args = Vec::with_capacity(4 * n + ns);
+        args.extend(pkt_in.iter().chain(pkt_start).map(|b| self.bit_arg(b)));
+        args.extend(states.iter().map(|&s| {
             assert!(s < ns, "state value out of range");
-            args.push(Dynamic::from_ast(&Int::from_u64(s as u64)));
-        }
-        for b in pkt_end {
-            args.push(self.bit_arg(b));
-        }
-        for b in pkt_out {
-            args.push(self.bit_arg(b));
-        }
+            Arg::State(s)
+        }));
+        args.extend(pkt_end.iter().chain(pkt_out).map(|b| self.bit_arg(b)));
         args
     }
 
-    /// The uninterpreted membership function declared for `slot`.
-    fn slot_fn(&self, slot: SlotRef) -> &FuncDecl {
+    /// Identical symbolic applications share a result variable immediately.
+    /// Applications whose arguments only coincide in a model are handled lazily.
+    fn apply_slot(&mut self, slot: SlotRef, args: Vec<Arg>) -> usize {
         match slot {
-            SlotRef::Spp(i) => &self.spps[i as usize],
-            SlotRef::Cand(i) => &self.cands[i as usize].0,
+            SlotRef::Spp(i) => {
+                assert!(i < self.num_spps, "SPP slot out of range");
+            }
+            SlotRef::Cand(i) => {
+                let _ = self.cands[i as usize];
+            }
+        }
+        let key = (slot, args);
+        if let Some(&atom) = self.applications.get(&key) {
+            return atom;
+        }
+        let atom = self.atoms.len();
+        self.atoms.push(Atom {
+            slot,
+            args: key.1.clone(),
+            result: self.solver.fresh(),
+        });
+        self.applications.insert(key, atom);
+        atom
+    }
+
+    /// Solve the Boolean abstraction, then check predicate congruence with a
+    /// hash table. Each violating pair adds a globally valid Ackermann lemma.
+    /// A pair cannot violate again, so refinement terminates after at most
+    /// quadratically many lemmas, without eagerly allocating them all.
+    fn solve(&mut self) -> Result<Model, InconsistentError> {
+        loop {
+            let model = self.solver.solve().ok_or(InconsistentError)?;
+            let mut groups: HashMap<(SlotRef, Vec<u64>), usize> = HashMap::new();
+            let mut conflicts = Vec::new();
+            for (idx, atom) in self.atoms.iter().enumerate() {
+                let key = (
+                    atom.slot,
+                    atom.args.iter().map(|a| a.value(&model)).collect(),
+                );
+                if let Some(&other) = groups.get(&key) {
+                    if model.value(atom.result) != model.value(self.atoms[other].result) {
+                        conflicts.push((other, idx));
+                    }
+                } else {
+                    groups.insert(key, idx);
+                }
+            }
+            if conflicts.is_empty() {
+                return Ok(model);
+            }
+            for (a, b) in conflicts {
+                self.ackermannize(a, b);
+            }
         }
     }
 
-    /// Build the Z3 Bool for a membership literal: apply `slot`'s
-    /// uninterpreted function to `args`, negating when `!polarity`.
-    fn apply_slot(&self, slot: SlotRef, args: &[Dynamic], polarity: bool) -> Bool {
-        let arg_refs: Vec<&dyn Ast> = args.iter().map(|a| a as &dyn Ast).collect();
-        let a = self
-            .slot_fn(slot)
-            .apply(&arg_refs)
-            .as_bool()
-            .expect("slot fn has Bool range");
-        if polarity { a } else { a.not() }
+    fn ackermannize(&mut self, a: usize, b: usize) {
+        let a = &self.atoms[a];
+        let b = &self.atoms[b];
+        assert_eq!(a.slot, b.slot);
+        assert_eq!(a.args.len(), b.args.len());
+        let mut guard = Vec::new();
+        for (&x, &y) in a.args.iter().zip(&b.args) {
+            match (x, y) {
+                (Arg::Bit(x), Arg::Bit(y)) => {
+                    let eq = self.solver.equal(x, y);
+                    if eq == FALSE {
+                        return;
+                    }
+                    if eq != TRUE {
+                        guard.push(!eq);
+                    }
+                }
+                (Arg::State(x), Arg::State(y)) => {
+                    if x != y {
+                        return;
+                    }
+                }
+                _ => unreachable!("predicate argument sorts are fixed"),
+            }
+        }
+        // If all arguments are equal, the result variables must agree.
+        let mut forward = guard.clone();
+        forward.extend([!a.result, b.result]);
+        self.solver.clause(forward);
+        guard.extend([a.result, !b.result]);
+        self.solver.clause(guard);
     }
 
     /// Choose the training examples for the passive learners from `model`.
@@ -589,7 +569,7 @@ impl<'a> Z3<'a> {
     /// the slot function's value at those arguments *is* the polarity).
     /// Linear in the total number of literals; no attempt at an optimal
     /// cover.  Panics if some clause has no true literal — impossible after
-    /// `Sat`.
+    /// a consistent SAT assignment.
     ///
     /// Without `minimize`, every atom appearing in any clause becomes an
     /// example (deduplicated), labelled with the slot function's value under
@@ -602,55 +582,35 @@ impl<'a> Z3<'a> {
         };
 
         for clause in &self.clauses {
-            // First true literal of the clause, kept in case no already-selected
-            // atom covers it.
-            let mut fallback: Option<(Vec<u64>, Vec<Dynamic>, &TrackedLit)> = None;
+            let mut fallback = None;
             let mut covered = false;
             for lit in clause {
-                // Evaluate the arguments (existentials included) to concrete
-                // values, with model completion for anything left unpinned.
-                let concrete: Vec<Dynamic> = lit
-                    .args
-                    .iter()
-                    .map(|a| {
-                        model
-                            .eval(a, true)
-                            .expect("model completion yields a value")
-                    })
-                    .collect();
-                // The literal is true iff the slot function's value at those
-                // arguments matches the polarity.
-                let value = model
-                    .eval(&self.apply_slot(lit.slot, &concrete, true), true)
-                    .and_then(|b| b.as_bool())
-                    .expect("model completion yields a concrete Bool");
-                let key = encode_args(&concrete);
+                let atom = &self.atoms[lit.atom];
+                let value = model.value(atom.result);
+                if minimize && value != lit.polarity {
+                    continue;
+                }
+                let concrete: Vec<u64> = atom.args.iter().map(|a| a.value(model)).collect();
                 if !minimize {
-                    // Keep every atom, labelled with its value under the model.
-                    if selected.insert((lit.slot, key)) {
-                        self.push_example(&mut out, lit.slot, &concrete, value);
+                    if selected.insert((atom.slot, concrete.clone())) {
+                        self.push_example(&mut out, atom.slot, &concrete, value);
                     }
                     continue;
                 }
-                if value != lit.polarity {
-                    continue;
-                }
-                if selected.contains(&(lit.slot, key.clone())) {
+                if selected.contains(&(atom.slot, concrete.clone())) {
                     covered = true;
                     break;
                 }
                 if fallback.is_none() {
-                    fallback = Some((key, concrete, lit));
+                    fallback = Some((concrete, atom.slot, lit.polarity));
                 }
             }
             if !minimize || covered {
                 continue;
             }
-            let Some((key, concrete, lit)) = fallback else {
-                unreachable!("Z3 said Sat but a clause has no true literal")
-            };
-            selected.insert((lit.slot, key));
-            self.push_example(&mut out, lit.slot, &concrete, lit.polarity);
+            let (concrete, slot, polarity) = fallback.expect("SAT model must satisfy every clause");
+            selected.insert((slot, concrete.clone()));
+            self.push_example(&mut out, slot, &concrete, polarity);
         }
 
         out
@@ -662,13 +622,13 @@ impl<'a> Z3<'a> {
         &self,
         out: &mut SelectedExamples,
         slot: SlotRef,
-        concrete: &[Dynamic],
+        concrete: &[u64],
         label: bool,
     ) {
         let n = self.num_vars as usize;
         match slot {
             SlotRef::Spp(i) => {
-                let bits: Vec<bool> = concrete.iter().map(read_bit).collect();
+                let bits: Vec<bool> = concrete.iter().map(|&b| b != 0).collect();
                 assert_eq!(bits.len(), 2 * n);
                 out.spps.entry(i).or_default().push(Example {
                     input: bits[..n].to_vec(),
@@ -677,19 +637,21 @@ impl<'a> Z3<'a> {
                 });
             }
             SlotRef::Cand(i) => {
-                let ns = self.cands[i as usize].1.num_states();
+                let ns = self.cands[i as usize].num_states();
                 assert_eq!(concrete.len(), 4 * n + ns);
-                let pkt_in = concrete[..n].iter().map(read_bit).collect();
-                let pkt_start = concrete[n..2 * n].iter().map(read_bit).collect();
-                let states: Vec<usize> =
-                    concrete[2 * n..2 * n + ns].iter().map(read_state).collect();
+                let pkt_in = concrete[..n].iter().map(|&b| b != 0).collect();
+                let pkt_start = concrete[n..2 * n].iter().map(|&b| b != 0).collect();
+                let states: Vec<usize> = concrete[2 * n..2 * n + ns]
+                    .iter()
+                    .map(|&s| s as usize)
+                    .collect();
                 let pkt_end = concrete[2 * n + ns..3 * n + ns]
                     .iter()
-                    .map(read_bit)
+                    .map(|&b| b != 0)
                     .collect();
                 let pkt_out = concrete[3 * n + ns..4 * n + ns]
                     .iter()
-                    .map(read_bit)
+                    .map(|&b| b != 0)
                     .collect();
                 out.cands.entry(i).or_default().push((
                     Input {
@@ -730,32 +692,6 @@ fn merge_by<T, K: Ord>(
         }
     }
     out
-}
-
-/// Read a concrete `bool` out of a model-evaluated argument.
-fn read_bit(d: &Dynamic) -> bool {
-    d.as_bool()
-        .and_then(|b| b.as_bool())
-        .expect("evaluated arg is a concrete Bool")
-}
-
-/// Read a concrete state index out of a model-evaluated argument.
-fn read_state(d: &Dynamic) -> usize {
-    d.as_int()
-        .and_then(|i| i.as_u64())
-        .expect("evaluated arg is a concrete Int") as usize
-}
-
-/// Canonical hashable encoding of concrete (model-evaluated) arguments: Bools
-/// become 0/1, Ints their value.  Argument sorts are fixed per slot, so the
-/// encoding is injective within a slot — good enough for the atom dedup key.
-fn encode_args(args: &[Dynamic]) -> Vec<u64> {
-    args.iter()
-        .map(|a| match a.as_bool().and_then(|b| b.as_bool()) {
-            Some(b) => b as u64,
-            None => read_state(a) as u64,
-        })
-        .collect()
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -808,7 +744,7 @@ mod tests {
     #[test]
     fn test_empty() {
         let mut store = SPPstore::new(N);
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let s = learner.fresh_spp();
         let result = learner.extract(&mut store).unwrap();
         assert_eq!(result.spps[&s], store.zero);
@@ -818,7 +754,7 @@ mod tests {
     fn test_empty_no_spps() {
         // No SPP slots allocated: extract returns an empty map.
         let mut store = SPPstore::new(N);
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let result = learner.extract(&mut store).unwrap();
         assert!(result.spps.is_empty());
     }
@@ -826,7 +762,7 @@ mod tests {
     #[test]
     fn test_single_positive_unit_clause() {
         let mut store = SPPstore::new(N);
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let s = learner.fresh_spp();
         learner.add_clause(
             AbstractClause {
@@ -851,7 +787,7 @@ mod tests {
     #[test]
     fn test_single_negative_unit_clause() {
         let mut store = SPPstore::new(N);
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let s = learner.fresh_spp();
         learner.add_clause(
             AbstractClause {
@@ -876,7 +812,7 @@ mod tests {
     #[test]
     fn test_conflicting_unit_clauses() {
         let mut store = SPPstore::new(N);
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let s = learner.fresh_spp();
         let ap1 = ap_concrete(&[false, false, false]);
         let ap2 = ap_concrete(&[true, false, false]);
@@ -898,7 +834,7 @@ mod tests {
     #[test]
     fn test_disjunctive_clause() {
         let mut store = SPPstore::new(N);
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let s = learner.fresh_spp();
         // (0,0,0)->(0,0,0) is in SPP  OR  (1,1,1)->(1,1,1) is not in SPP
         learner.add_clause(
@@ -932,7 +868,7 @@ mod tests {
         // s2 must NOT accept (0,0,0)→(0,0,0).  Both constraints satisfiable
         // in isolation; extract returns one SPP per slot.
         let mut store = SPPstore::new(N);
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let s1 = learner.fresh_spp();
         let s2 = learner.fresh_spp();
         learner.add_clause(
@@ -992,7 +928,7 @@ mod tests {
     fn test_sp_membership_full_set_is_noop() {
         // sp = full set; adding membership shouldn't change satisfiability.
         let mut store = SPPstore::new(N);
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let _s = learner.fresh_spp();
         let e: Vec<Existential> = (0..N).map(|_| learner.fresh_existential()).collect();
         learner.add_sp_membership(store.sp.one, &e, &store.sp);
@@ -1002,7 +938,7 @@ mod tests {
     #[test]
     fn test_sp_membership_empty_set_is_unsat() {
         let mut store = SPPstore::new(N);
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let _s = learner.fresh_spp();
         let e: Vec<Existential> = (0..N).map(|_| learner.fresh_existential()).collect();
         learner.add_sp_membership(store.sp.zero, &e, &store.sp);
@@ -1014,7 +950,7 @@ mod tests {
         // Constrain existentials to be a specific packet, then assert a
         // literal that uses them; the resulting SPP must accept that pair.
         let mut store = SPPstore::new(N);
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let s = learner.fresh_spp();
         let target = vec![true, false, true];
         let e: Vec<Existential> = (0..N).map(|_| learner.fresh_existential()).collect();
@@ -1045,7 +981,7 @@ mod tests {
         // s1 accepts (0,0,0)→(0,0,0)  OR  s2 does NOT accept (1,1,1)→(1,1,1).
         // A disjunction across distinct SPPs.  The learner must satisfy *one*.
         let mut store = SPPstore::new(N);
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let s1 = learner.fresh_spp();
         let s2 = learner.fresh_spp();
         learner.add_clause(
@@ -1092,7 +1028,7 @@ mod tests {
             transitions: vec![vec![]],
             outputs: vec![store.zero],
         };
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let cv = learner.fresh_cand(&dfa);
         learner.add_clause(
             AbstractClause {
@@ -1151,7 +1087,7 @@ mod tests {
         // disjunct over the unioned output set, so the learned SPP must accept
         // at least one of the two in→out pairs.
         let mut store = SPPstore::new(N);
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let s = learner.fresh_spp();
 
         let in_pkt = vec![true, false, true];
@@ -1189,12 +1125,12 @@ mod tests {
     /// disjunction with a second, unforced atom.  The greedy cover selects the
     /// shared atom once, covers the second clause with it, and feeds exactly
     /// one example.
-    fn shared_atom_learner(store: &mut SPPstore, positive: bool) -> (Z3<'static>, SppVar) {
+    fn shared_atom_learner(store: &mut SPPstore, positive: bool) -> (Native<'static>, SppVar) {
         let p = [false, false, false];
         let q = [true, true, true];
         let r = [true, false, true];
         let t = [false, true, false];
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let s = learner.fresh_spp();
         learner.add_clause(
             AbstractClause {
@@ -1217,9 +1153,8 @@ mod tests {
     #[test]
     fn test_greedy_cover_selects_shared_atom_once() {
         let mut store = SPPstore::new(N);
-        let (learner, s) = shared_atom_learner(&mut store, true);
-        assert_eq!(learner.solver.check(), SatResult::Sat);
-        let model = learner.solver.get_model().unwrap();
+        let (mut learner, s) = shared_atom_learner(&mut store, true);
+        let model = learner.solve().unwrap();
         let selected = learner.select_examples(&model, true);
         let examples = &selected.spps[&s.0];
         assert_eq!(examples.len(), 1, "shared atom must be selected only once");
@@ -1235,9 +1170,8 @@ mod tests {
         // clause forces (p,q) ∉ s, so the second clause is covered by the
         // negative atom and the single example is labelled `false`.
         let mut store = SPPstore::new(N);
-        let (learner, s) = shared_atom_learner(&mut store, false);
-        assert_eq!(learner.solver.check(), SatResult::Sat);
-        let model = learner.solver.get_model().unwrap();
+        let (mut learner, s) = shared_atom_learner(&mut store, false);
+        let model = learner.solve().unwrap();
         let selected = learner.select_examples(&model, true);
         let examples = &selected.spps[&s.0];
         assert_eq!(examples.len(), 1, "shared atom must be selected only once");
@@ -1252,9 +1186,8 @@ mod tests {
         // (p,q) and the unforced (r,t) — become examples, deduplicated, each
         // labelled with its value under the model.
         let mut store = SPPstore::new(N);
-        let (learner, s) = shared_atom_learner(&mut store, true);
-        assert_eq!(learner.solver.check(), SatResult::Sat);
-        let model = learner.solver.get_model().unwrap();
+        let (mut learner, s) = shared_atom_learner(&mut store, true);
+        let model = learner.solve().unwrap();
         let selected = learner.select_examples(&model, false);
         let examples = &selected.spps[&s.0];
         assert_eq!(examples.len(), 2, "both atoms kept, each exactly once");
@@ -1288,7 +1221,7 @@ mod tests {
             transitions: vec![vec![]],
             outputs: vec![store.zero],
         };
-        let mut learner = Z3::new(N);
+        let mut learner = Native::new(N);
         let s = learner.fresh_spp();
         let cv = learner.fresh_cand(&dfa);
         let input = Input {
@@ -1329,5 +1262,302 @@ mod tests {
         );
         let b = solution.cands[&cv].accepts_input(&mut store, &input);
         assert!(a || b, "no disjunct satisfied across SPP and Cand");
+    }
+    #[test]
+    fn lazy_congruence_rejects_equal_existential_arguments() {
+        let mut store = SPPstore::new(1);
+        let mut learner = Native::new(1);
+        let s = learner.fresh_spp();
+        let x = learner.fresh_existential();
+        let y = learner.fresh_existential();
+        let singleton = store.sp.singleton(&[true]);
+        learner.add_sp_membership(singleton, &[x], &store.sp);
+        learner.add_sp_membership(singleton, &[y], &store.sp);
+        for (e, polarity) in [(x, true), (y, false)] {
+            learner.add_clause(
+                AbstractClause {
+                    literals: vec![spp_lit(
+                        s,
+                        vec![AbstractBit::Exist(e)],
+                        ap_concrete(&[false]),
+                        polarity,
+                    )],
+                },
+                &mut store.sp,
+            );
+        }
+        // The Boolean abstraction is satisfiable until predicate congruence
+        // notices that distinct symbolic applications have equal arguments.
+        assert!(learner.solver.solve().is_some());
+        assert!(learner.extract(&mut store).is_err());
+    }
+
+    #[test]
+    fn congruence_can_separate_arguments_and_survives_refinement() {
+        let mut store = SPPstore::new(1);
+        let mut learner = Native::new(1);
+        let s = learner.fresh_spp();
+        let x = learner.fresh_existential();
+        let y = learner.fresh_existential();
+        for (e, polarity) in [(x, true), (y, false)] {
+            learner.add_clause(
+                AbstractClause {
+                    literals: vec![spp_lit(
+                        s,
+                        vec![AbstractBit::Exist(e)],
+                        ap_concrete(&[false]),
+                        polarity,
+                    )],
+                },
+                &mut store.sp,
+            );
+        }
+        let model = learner.solve().unwrap();
+        assert_ne!(
+            model.value(learner.existentials[x.0 as usize]),
+            model.value(learner.existentials[y.0 as usize])
+        );
+        assert!(learner.extract(&mut store).is_ok());
+        // Allocate and constrain a new application after earlier solves.
+        let z = learner.fresh_existential();
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![spp_lit(
+                    s,
+                    vec![AbstractBit::Exist(z)],
+                    ap_concrete(&[false]),
+                    true,
+                )],
+            },
+            &mut store.sp,
+        );
+        assert!(learner.extract(&mut store).is_ok());
+        let singleton = store.sp.singleton(&[true]);
+        for e in [x, y, z] {
+            learner.add_sp_membership(singleton, &[e], &store.sp);
+        }
+        assert!(learner.extract(&mut store).is_err());
+    }
+
+    #[test]
+    fn zero_width_packets_and_empty_clause() {
+        let mut store = SPPstore::new(0);
+        let mut learner = Native::new(0);
+        let s = learner.fresh_spp();
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![spp_lit(s, vec![], vec![], true)],
+            },
+            &mut store.sp,
+        );
+        assert_eq!(learner.extract(&mut store).unwrap().spps[&s], store.one);
+        learner.add_clause(AbstractClause { literals: vec![] }, &mut store.sp);
+        assert!(learner.extract(&mut store).is_err());
+    }
+
+    #[test]
+    fn cand_congruence_includes_all_concrete_states() {
+        let mut store = SPPstore::new(1);
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![], vec![], vec![]],
+            outputs: vec![store.zero; 3],
+        };
+        let mut learner = Native::new(1);
+        let cv = learner.fresh_cand(&dfa);
+        let x = learner.fresh_existential();
+        let y = learner.fresh_existential();
+        let singleton = store.sp.singleton(&[true]);
+        for e in [x, y] {
+            learner.add_sp_membership(singleton, &[e], &store.sp);
+        }
+        let make_lit = |e, states, polarity| Literal::Cand {
+            cand: cv,
+            pkt_in: vec![AbstractBit::Exist(e)],
+            pkt_start: ap_concrete(&[false]),
+            states,
+            pkt_end: ap_concrete(&[false]),
+            pkt_out: ap_concrete(&[false]),
+            polarity,
+        };
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![make_lit(x, vec![2, 0, 1], true)],
+            },
+            &mut store.sp,
+        );
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![make_lit(y, vec![2, 1, 1], false)],
+            },
+            &mut store.sp,
+        );
+        let solution = learner.extract(&mut store).unwrap();
+        let mut input = Input {
+            pkt_in: vec![true],
+            pkt_start: vec![false],
+            states: vec![2, 0, 1],
+            pkt_end: vec![false],
+            pkt_out: vec![false],
+        };
+        assert!(solution.cands[&cv].accepts_input(&mut store, &input));
+        input.states[1] = 1;
+        assert!(!solution.cands[&cv].accepts_input(&mut store, &input));
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![make_lit(y, vec![2, 0, 1], false)],
+            },
+            &mut store.sp,
+        );
+        assert!(learner.solver.solve().is_some());
+        assert!(learner.extract(&mut store).is_err());
+    }
+
+    #[test]
+    fn sp_bitblasting_matches_every_two_bit_set() {
+        for mask in 0..16 {
+            for packet in 0..4 {
+                let mut store = SPPstore::new(2);
+                let mut sp = store.sp.zero;
+                for p in 0..4 {
+                    if mask & (1 << p) != 0 {
+                        let singleton = store.sp.singleton(&[p & 1 != 0, p & 2 != 0]);
+                        sp = store.sp.union(sp, singleton);
+                    }
+                }
+                let mut learner = Native::new(2);
+                let vars = [learner.fresh_existential(), learner.fresh_existential()];
+                learner.add_sp_membership(sp, &vars, &store.sp);
+                let pin = store.sp.singleton(&[packet & 1 != 0, packet & 2 != 0]);
+                learner.add_sp_membership(pin, &vars, &store.sp);
+                assert_eq!(learner.solve().is_ok(), mask & (1 << packet) != 0);
+            }
+        }
+    }
+
+    #[test]
+    fn randomized_incremental_uf_matches_exhaustive_oracle() {
+        use rand::{RngExt, SeedableRng, rngs::StdRng};
+        let mut rng = StdRng::seed_from_u64(0xACCE_1234);
+        // Two one-bit packet predicates have four truth-table entries each.
+        // Enumerate all existential assignments and predicate interpretations
+        // independently of both the SAT encoding and its congruence checker.
+        for trial in 0..400 {
+            let mut store = SPPstore::new(1);
+            let mut learner = Native::new(1);
+            let slots = [learner.fresh_spp(), learner.fresh_spp()];
+            let exists = [learner.fresh_existential(), learner.fresh_existential()];
+            let masks: [u32; 2] = [rng.random_range(1..4), rng.random_range(1..4)];
+            for (e, mask) in exists.into_iter().zip(masks) {
+                let sp = match mask {
+                    1 => store.sp.singleton(&[false]),
+                    2 => store.sp.singleton(&[true]),
+                    3 => store.sp.one,
+                    _ => unreachable!(),
+                };
+                learner.add_sp_membership(sp, &[e], &store.sp);
+            }
+            let mut clauses: Vec<Vec<(usize, usize, usize, bool)>> = Vec::new();
+            let eval = |arg: usize, assignment: usize| match arg {
+                0 => false,
+                1 => true,
+                2 => assignment & 1 != 0,
+                3 => assignment & 2 != 0,
+                _ => unreachable!(),
+            };
+            for round in 0..10 {
+                let clause: Vec<_> = (0..rng.random_range(1..4))
+                    .map(|_| {
+                        (
+                            rng.random_range(0..2),
+                            rng.random_range(0..4),
+                            rng.random_range(0..4),
+                            rng.random::<bool>(),
+                        )
+                    })
+                    .collect();
+                let arg = |a| match a {
+                    0 => c(false),
+                    1 => c(true),
+                    2 => AbstractBit::Exist(exists[0]),
+                    3 => AbstractBit::Exist(exists[1]),
+                    _ => unreachable!(),
+                };
+                learner.add_clause(
+                    AbstractClause {
+                        literals: clause
+                            .iter()
+                            .map(|&(slot, p, q, polarity)| {
+                                spp_lit(slots[slot], vec![arg(p)], vec![arg(q)], polarity)
+                            })
+                            .collect(),
+                    },
+                    &mut store.sp,
+                );
+                clauses.push(clause);
+                let expected = (0..4).any(|assignment| {
+                    if masks
+                        .iter()
+                        .enumerate()
+                        .any(|(idx, mask)| mask & (1 << ((assignment >> idx) & 1)) == 0)
+                    {
+                        return false;
+                    }
+                    (0..256).any(|table| {
+                        clauses.iter().all(|clause| {
+                            clause.iter().any(|&(slot, p, q, polarity)| {
+                                let bit = 4 * slot
+                                    + 2 * eval(p, assignment) as usize
+                                    + eval(q, assignment) as usize;
+                                (table & (1 << bit) != 0) == polarity
+                            })
+                        })
+                    })
+                });
+                let result = learner.solve();
+                assert_eq!(
+                    result.is_ok(),
+                    expected,
+                    "trial {trial}, round {round}, clauses {clauses:?}"
+                );
+                let Ok(model) = result else {
+                    break;
+                };
+                let assignment = exists.iter().enumerate().fold(0, |acc, (idx, e)| {
+                    acc | ((model.value(learner.existentials[e.0 as usize]) as usize) << idx)
+                });
+                assert!(
+                    masks
+                        .iter()
+                        .enumerate()
+                        .all(|(idx, mask)| mask & (1 << ((assignment >> idx) & 1)) != 0)
+                );
+                // Both extraction modes must train diagrams satisfying the
+                // original clauses under the returned existential assignment.
+                for minimize in [true, false] {
+                    let mut examples = learner.select_examples(&model, minimize);
+                    let spps: Vec<_> = slots
+                        .iter()
+                        .map(|s| {
+                            learn_spp(examples.spps.remove(&s.0).unwrap_or_default(), &mut store)
+                                .unwrap()
+                        })
+                        .collect();
+                    assert!(
+                        clauses.iter().all(|clause| clause.iter().any(
+                            |&(slot, p, q, polarity)| {
+                                spp_accepts(
+                                    &store,
+                                    spps[slot],
+                                    &[eval(p, assignment)],
+                                    &[eval(q, assignment)],
+                                ) == polarity
+                            }
+                        )),
+                        "extraction trial {trial}, round {round}, minimize {minimize}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -147,7 +147,7 @@ use candidate::Candidate;
 use cegis::{CegisError, run};
 use nk_with_holes::{Expr, Hole};
 use problem::Constraint;
-use smt::Z3;
+use smt::Native;
 
 /// Solve `lower_bound ⊆ expr[holes] ⊆ upper_bound` for the holes appearing
 /// in `expr`, filling each hole with a candidate of kind `C`.
@@ -178,7 +178,7 @@ pub fn solve_holes_general<'a, C: Candidate<'a>>(
     // caller-owned `reference_dfa` (see [`bounds_reference_dfa`]), which they
     // may borrow, so it must outlive the returned candidates.
     let constraints = bounds_constraints(store, expr, lower_bound, upper_bound);
-    run::<C, Z3>(&constraints, holes, reference_dfa, store, max_iters)
+    run::<C, Native>(&constraints, holes, reference_dfa, store, max_iters)
 }
 
 /// The upper/lower bound constraint pair for `lower ⊆ expr[holes] ⊆ upper`.
@@ -338,7 +338,7 @@ mod test {
             &target_dfa,
             &target_dfa,
             &mut store,
-            Some(FUZZ_MAX_ITERS),
+            Some(1000),
         );
         assert!(result.is_err());
     }
@@ -355,7 +355,7 @@ mod test {
         slow(3);
     }
 
-    /// 16 pigeons: impossibly long
+    /// 16 pigeons: may hit the 1000-round refinement cap.
     #[test]
     #[ignore]
     fn slower_test() {

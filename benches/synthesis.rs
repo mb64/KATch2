@@ -4,8 +4,8 @@
 //! [`ProblemInstance::solve_full`]), so they measure the cost of everything the
 //! optimizations touch: the lower-bound min-cut clause builder (`holes::cegis`)
 //! and the SMT clause simplification and greedy example cover (`holes::smt`).
-//! All shrink the formulas handed to Z3 or the examples handed to the passive
-//! learners, so the signal shows up as reduced wall-clock solve time.
+//! All shrink the formulas handed to the SAT solver or the examples handed to
+//! the passive learners, so the signal shows up as reduced wall-clock solve time.
 //!
 //! The headline workload is a **synthetic corpus**: a seeded, deterministic set
 //! of randomly-generated *satisfiable-by-construction* instances (same
@@ -16,7 +16,7 @@
 //! directly comparable while still being a broad, representative sample rather
 //! than two hand-picked cases.
 //!
-//! Two targeted pigeonhole instances (`pigeon*`) round out the suite with a
+//! Three targeted pigeonhole instances (`pigeon*`) round out the suite with a
 //! deterministic, refinement-heavy UNSAT workload — the case that most stresses
 //! the lower-bound clause machinery.
 //!
@@ -40,7 +40,7 @@ use katch2::holes::problem::{Constraint, ProblemInstance};
 use katch2::spp::SPPstore;
 
 /// Refinement-round cap, so a diverging instance can't hang the benchmark.
-const CAP: Option<usize> = Some(64);
+const CAP: Option<usize> = Some(1000);
 /// Packet width for the corpus. Small keeps the SPPs and DFAs tiny.
 const FIELDS: u32 = 2;
 /// Fixed seed → identical corpus every run and on every branch.
@@ -256,21 +256,15 @@ fn bench_pigeon(c: &mut Criterion) {
         .warm_up_time(Duration::from_millis(500))
         .measurement_time(Duration::from_secs(15));
 
-    g.bench_function("pigeon2_unsat", |b| {
-        b.iter_batched(
-            || pigeon(2),
-            |mut pi| black_box(pi.solve(CAP).err()),
-            BatchSize::SmallInput,
-        )
-    });
-
-    g.bench_function("pigeon3_unsat", |b| {
-        b.iter_batched(
-            || pigeon(3),
-            |mut pi| black_box(pi.solve(CAP).err()),
-            BatchSize::SmallInput,
-        )
-    });
+    for n in [2, 3, 4] {
+        g.bench_function(format!("pigeon{n}"), |b| {
+            b.iter_batched(
+                || pigeon(n),
+                |mut pi| black_box(pi.solve(CAP).err()),
+                BatchSize::SmallInput,
+            )
+        });
+    }
 
     g.finish();
 }

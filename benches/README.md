@@ -17,9 +17,11 @@ solver-shrinking optimizations:
   `rand`'s reproducible `StdRng` make the corpus byte-identical run-to-run and
   branch-to-branch, so it is a broad sample that is still directly comparable.
   `spp_dup_free` uses the dup-free `solve`; `full_dupful` uses `solve_full`.
-- **`pigeon/pigeon2_unsat`**, **`pigeon/pigeon3_unsat`** — a deterministic,
-  refinement-heavy UNSAT workload (pigeonhole). This most directly stresses the
-  lower-bound clause machinery.
+- **`pigeon/pigeon2`**, **`pigeon/pigeon3`**, **`pigeon/pigeon4`** — deterministic
+  pigeonhole workloads with 4, 8, and 16 pigeons respectively. These instances
+  are unsatisfiable, but a measured run can hit the refinement cap before
+  proving infeasibility. Timings include both proven UNSAT and cap-hit UNKNOWN
+  outcomes. This most directly stresses the lower-bound clause machinery.
 
 ## Running
 
@@ -64,11 +66,11 @@ directly comparable.)
 
 ## Notes
 
-- Solve time is dominated by Z3. Criterion's confidence intervals capture
-  within-run variance; for cross-run drift, take a second run — these benchmarks
+- The native learner uses incremental CaDiCaL through RustSAT. Criterion's
+  confidence intervals capture within-run variance; for cross-run drift, take a second run — these benchmarks
   are low-variance (CIs typically <2%) and reproduce closely.
-- `corpus` uses 20 samples; `pigeon` uses 10 (each solve is ~ms).
-- All solves run under a 64-round refinement cap (`CAP`), so a divergent
+- `corpus` uses 20 samples; `pigeon` uses 10.
+- All benchmark solves run under a 1000-round refinement cap (`CAP`), so a divergent
   instance reports `IterationLimit` instead of hanging.
 - Tunables at the top of `synthesis.rs`: `FIELDS`, `CORPUS_SEED`, `CORPUS_SIZE`,
   `CAP`.
