@@ -11,7 +11,8 @@
 //! Every flag defaults to **on**.  Two ways to turn one off:
 //!
 //! * [`set_lb_mincut`] & co. — used by `nksynth`'s `--no-*` CLI flags.
-//! * Environment variables `KATCH2_LB_MINCUT`, `KATCH2_CLAUSE_MERGE`,
+//! * Environment variables `KATCH2_LB_MINCUT`, `KATCH2_LB_BACKWARD`,
+//!   `KATCH2_CLAUSE_MERGE`,
 //!   `KATCH2_EXAMPLE_COVER` (values `0`/`1`, `false`/`true`, `off`/`on`),
 //!   read once at first access — how the `Makefile` runs the test and bench
 //!   suites under each on/off combination.  Setters override the environment.
@@ -20,6 +21,7 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static LB_MINCUT: AtomicBool = AtomicBool::new(true);
+static LB_BACKWARD: AtomicBool = AtomicBool::new(true);
 static CLAUSE_MERGE: AtomicBool = AtomicBool::new(true);
 static EXAMPLE_COVER: AtomicBool = AtomicBool::new(true);
 
@@ -31,6 +33,7 @@ fn env_init() {
     ENV_INIT.call_once(|| {
         for (name, flag) in [
             ("KATCH2_LB_MINCUT", &LB_MINCUT),
+            ("KATCH2_LB_BACKWARD", &LB_BACKWARD),
             ("KATCH2_CLAUSE_MERGE", &CLAUSE_MERGE),
             ("KATCH2_EXAMPLE_COVER", &EXAMPLE_COVER),
         ] {
@@ -52,9 +55,8 @@ fn parse_flag(name: &str, raw: &str) -> bool {
     }
 }
 
-/// Lower-bound refinement clauses shrink via a min cut over the abstract
-/// reachability graph instead of emitting every crossing hole edge
-/// (`holes::cegis`).
+/// Add a min-cut lower-bound refinement clause alongside the frontier clauses
+/// (`holes::cegis`). The backward frontier is controlled by [`lb_backward`].
 pub fn lb_mincut() -> bool {
     env_init();
     LB_MINCUT.load(Ordering::Relaxed)
@@ -64,6 +66,19 @@ pub fn lb_mincut() -> bool {
 pub fn set_lb_mincut(value: bool) {
     env_init();
     LB_MINCUT.store(value, Ordering::Relaxed);
+}
+
+/// Learn a backward-frontier clause alongside the forward frontier. The
+/// min-cut clause is independently controlled by [`lb_mincut`].
+pub fn lb_backward() -> bool {
+    env_init();
+    LB_BACKWARD.load(Ordering::Relaxed)
+}
+
+/// Override [`lb_backward`] (wins over the default and the environment).
+pub fn set_lb_backward(value: bool) {
+    env_init();
+    LB_BACKWARD.store(value, Ordering::Relaxed);
 }
 
 /// Collate SMT membership disjuncts by shared input/output set before

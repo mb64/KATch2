@@ -334,6 +334,46 @@ fn build_constraint(
     Ok(constraint)
 }
 
+// --- Plugging a solution into a Program ---------------------------------------
+
+/// Fill in the holes of `program` with the definitions in `solution`, giving a hole-free program.
+///
+/// `solution` must consist only of `def NAME = expr` statements, one per hole of `program` (this is
+/// the format `nksynth --output` writes). Each `hole NAME` statement is replaced, in place, by the
+/// solution's `def NAME = expr`, so the rest of the program sees the solution wherever it used the
+/// hole.
+pub fn fill_holes(program: &Program, solution: &Program) -> Result<Program, String> {
+    let mut defs: std::collections::HashMap<&str, &Exp> = std::collections::HashMap::new();
+    for stmt in &solution.statements {
+        match stmt {
+            Stmt::Def(name, expr) => {
+                if defs.insert(name, expr).is_some() {
+                    return Err(format!("solution defines `{name}` more than once"));
+                }
+            }
+            _ => return Err("solution may only contain `def` statements".to_string()),
+        }
+    }
+
+    let mut statements = Vec::with_capacity(program.statements.len());
+    for stmt in &program.statements {
+        statements.push(match stmt {
+            Stmt::Hole(name) => {
+                let expr = defs
+                    .remove(name.as_str())
+                    .ok_or_else(|| format!("solution has no definition for hole `{name}`"))?;
+                Stmt::Def(name.clone(), expr.clone())
+            }
+            other => other.clone(),
+        });
+    }
+
+    if let Some(name) = defs.keys().next() {
+        return Err(format!("solution defines `{name}`, which is not a hole"));
+    }
+    Ok(Program { statements })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,5 +506,24 @@ mod tests {
     fn desugar_errors_when_both_sides_have_holes() {
         let prog = parse_program("hole h\nhole g\nassert h <= g\n").unwrap();
         assert!(desugar(&prog).is_err());
+    }
+
+    #[test]
+    fn fill_holes_checks_solutions() {
+        let prog = parse_program("hole h\nhole g\nassert h; g == (x0 := 1; x1 := 0)\n").unwrap();
+        let check = |solution: &str| {
+            let filled = fill_holes(&prog, &parse_program(solution).unwrap())?;
+            let mut instance = desugar(&filled).map_err(|e| e.to_string())?;
+            assert!(instance.holes.is_empty());
+            Ok::<bool, String>(instance.solve(None).is_ok())
+        };
+
+        assert_eq!(check("def h = x0 := 1\ndef g = x1 := 0\n"), Ok(true));
+        assert_eq!(check("def g = x1 := 0\ndef h = x0 := 1\n"), Ok(true));
+        assert_eq!(check("def h = x0 := 0\ndef g = x1 := 0\n"), Ok(false));
+        assert!(check("def h = x0 := 1\n").is_err());
+        assert!(check("def h = x0 := 1\ndef g = 1\ndef k = 1\n").is_err());
+        assert!(check("def h = 1\ndef h = 1\ndef g = 1\n").is_err());
+        assert!(check("hole h\ndef g = 1\n").is_err());
     }
 }

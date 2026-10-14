@@ -135,6 +135,30 @@ impl Expr {
     pub fn star(e: Exp) -> Exp {
         Box::new(Expr::Star(e))
     }
+    /// `e1 + e2`, but simplifying away `0`.
+    pub fn union_simp(e1: Exp, e2: Exp) -> Exp {
+        match (&*e1, &*e2) {
+            (Expr::Zero, _) => e2,
+            (_, Expr::Zero) => e1,
+            _ => Expr::union(e1, e2),
+        }
+    }
+    /// `e1; e2`, but simplifying away `0` and `1`.
+    pub fn sequence_simp(e1: Exp, e2: Exp) -> Exp {
+        match (&*e1, &*e2) {
+            (Expr::Zero, _) | (_, Expr::Zero) => Expr::zero(),
+            (Expr::One, _) => e2,
+            (_, Expr::One) => e1,
+            _ => Expr::sequence(e1, e2),
+        }
+    }
+    /// `e*`, but simplifying `0*` and `1*` to `1`.
+    pub fn star_simp(e: Exp) -> Exp {
+        match &*e {
+            Expr::Zero | Expr::One => Expr::one(),
+            _ => Expr::star(e),
+        }
+    }
     pub fn dup() -> Exp {
         Box::new(Expr::Dup)
     }

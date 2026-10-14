@@ -36,8 +36,15 @@
 //! fills only touch branches no example exercises, so an example's own path is
 //! never redirected: the result accepts every positive example and rejects every
 //! negative one, and the generalization only touches inputs no example pins down.
+//!
+//! [`learn_spp_with_forbidden`] also accepts a symbolic negative relation.
+//! [`learn_spp_from_relations`] performs the same level-by-level merging over
+//! paired positive/negative decision diagrams. Evidence unions are immutable
+//! and hash-consed; identical suffix cells are processed once per level, and
+//! compatibility uses memoized diagram intersection instead of unfolding paths.
 
 use super::{SPP, SPPstore};
+use std::collections::HashMap;
 
 /// A single concrete training example for [`learn_spp`].
 ///
@@ -135,6 +142,112 @@ pub fn learn_spp(
 
     // Step 3: fold the merged levels bottom-up into an SPP.
     Ok(build_spp(&trie, &levels, spp_store))
+}
+
+/// Learn from concrete examples and an entire symbolic region of negative
+/// examples. The forbidden relation is never expanded into packet pairs.
+pub fn learn_spp_with_forbidden(
+    examples: impl IntoIterator<Item = Example>,
+    forbidden: SPP,
+    store: &mut SPPstore,
+) -> Result<SPP, ConflictError> {
+    if store.is_zero(forbidden) {
+        return learn_spp(examples, store);
+    }
+    let mut positive = store.zero;
+    let mut negative = forbidden;
+    for ex in examples {
+        assert_eq!(ex.input.len(), store.num_vars() as usize);
+        assert_eq!(ex.output.len(), store.num_vars() as usize);
+        let input = store.sp.singleton(&ex.input);
+        let output = store.sp.singleton(&ex.output);
+        let input = store.ibwd(input);
+        let output = store.ifwd(output);
+        let pair = store.intersect(input, output);
+        if ex.in_spp {
+            positive = store.union(positive, pair);
+        } else {
+            negative = store.union(negative, pair);
+        }
+    }
+    learn_spp_from_relations(positive, negative, store)
+}
+
+/// RPNI-style learning from shared positive and negative decision diagrams.
+/// Every positive pair is accepted and every negative pair is rejected.
+/// Diagram operations and duplicate suffix cells are memoized; we walk shared
+/// evidence nodes, rather than unfolding the exponentially many prefix paths.
+pub fn learn_spp_from_relations(
+    positive: SPP,
+    negative: SPP,
+    store: &mut SPPstore,
+) -> Result<SPP, ConflictError> {
+    let overlap = store.intersect(positive, negative);
+    if !store.is_zero(overlap) {
+        return Err(ConflictError);
+    }
+    if store.is_zero(positive) {
+        return Ok(store.zero);
+    }
+    let nv = store.num_vars() as usize;
+    if nv == 0 {
+        return Ok(positive);
+    }
+
+    // Evidence is immutable below the current level. Pooling a class uses
+    // hash-consed relation union; it never mutates a shared child's evidence.
+    let mut evidence = vec![(positive, negative)];
+    let mut trie = vec![TrieNode::Branch([None; 4])];
+    let mut levels = vec![vec![0u32]];
+    for depth in 0..nv {
+        let mut classes = Vec::<u32>::new();
+        let mut assigned = HashMap::<(SPP, SPP), u32>::new();
+        for &parent in &levels[depth] {
+            let (pos, neg) = evidence[parent as usize];
+            let p = store.get(pos);
+            let n = store.get(neg);
+            let children = [p.x00, p.x01, p.x10, p.x11]
+                .into_iter()
+                .zip([n.x00, n.x01, n.x10, n.x11]);
+            for (branch, (pos, neg)) in children.enumerate() {
+                if store.is_zero(pos) && store.is_zero(neg) {
+                    continue;
+                }
+                let child = if let Some(&id) = assigned.get(&(pos, neg)) {
+                    id
+                } else {
+                    let compatible = classes.iter().copied().find(|&id| {
+                        let (p, n) = evidence[id as usize];
+                        let pn = store.intersect(p, neg);
+                        let np = store.intersect(n, pos);
+                        store.is_zero(pn) && store.is_zero(np)
+                    });
+                    let id = if let Some(id) = compatible {
+                        let (p, n) = evidence[id as usize];
+                        evidence[id as usize] = (store.union(p, pos), store.union(n, neg));
+                        id
+                    } else {
+                        let id = trie.len() as u32;
+                        evidence.push((pos, neg));
+                        trie.push(if depth + 1 == nv {
+                            TrieNode::Leaf(pos == SPP::new(1))
+                        } else {
+                            TrieNode::Branch([None; 4])
+                        });
+                        classes.push(id);
+                        id
+                    };
+                    assigned.insert((pos, neg), id);
+                    id
+                };
+                if let TrieNode::Branch(children) = &mut trie[parent as usize] {
+                    children[branch] = Some(child);
+                }
+            }
+        }
+        levels.push(classes);
+    }
+    Ok(build_spp(&trie, &levels, store))
 }
 
 /// A node of the decision-path trie: an internal 4-way branch (indexed by
@@ -427,5 +540,83 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn generalized_evidence_matches_exhaustive_packet_oracle() {
+        let mut rng = StdRng::seed_from_u64(0xBDDAB);
+        for _ in 0..200 {
+            let mut store = SPPstore::new(2);
+            let mut positive = store.zero;
+            let mut negative = store.zero;
+            let mut labels = Vec::new();
+            for input in 0..4 {
+                for output in 0..4 {
+                    let i = [input & 1 != 0, input & 2 != 0];
+                    let o = [output & 1 != 0, output & 2 != 0];
+                    let in_sp = store.sp.singleton(&i);
+                    let out_sp = store.sp.singleton(&o);
+                    let in_rel = store.ibwd(in_sp);
+                    let out_rel = store.ifwd(out_sp);
+                    let pair = store.intersect(in_rel, out_rel);
+                    match rng.random_range(0..3) {
+                        0 => {}
+                        1 => {
+                            positive = store.union(positive, pair);
+                            labels.push((i, o, true));
+                        }
+                        _ => {
+                            negative = store.union(negative, pair);
+                            labels.push((i, o, false));
+                        }
+                    }
+                }
+            }
+            let learned = learn_spp_from_relations(positive, negative, &mut store).unwrap();
+            for (input, output, label) in labels {
+                assert_eq!(store.accepts(learned, &input, &output), label);
+            }
+        }
+    }
+
+    #[test]
+    fn generalized_evidence_keeps_wide_shared_diagrams_compact() {
+        // Each relation represents exponentially many pairs, with only O(n)
+        // shared diagram nodes. Unfolding a trie here cannot finish.
+        let mut store = SPPstore::new(96);
+        let positive = store.one;
+        let negative = store.complement(positive);
+        let learned = learn_spp_from_relations(positive, negative, &mut store).unwrap();
+        assert_eq!(learned, positive);
+
+        let zero_packet = vec![false; 96];
+        let learned =
+            learn_spp_with_forbidden([ex(&zero_packet, &zero_packet, true)], negative, &mut store)
+                .unwrap();
+        assert!(store.accepts(learned, &zero_packet, &zero_packet));
+        let overlap = store.intersect(learned, negative);
+        assert!(store.is_zero(overlap));
+    }
+
+    #[test]
+    fn generalized_conflicts_and_zero_width() {
+        let mut store = SPPstore::new(2);
+        let top = store.top;
+        assert!(
+            learn_spp_with_forbidden([ex(&[false, true], &[true, false], true)], top, &mut store,)
+                .is_err()
+        );
+        let mut store = SPPstore::new(0);
+        let one = store.one;
+        let zero = store.zero;
+        assert!(learn_spp_from_relations(one, one, &mut store).is_err());
+        assert_eq!(
+            learn_spp_from_relations(one, zero, &mut store).unwrap(),
+            one
+        );
+        assert_eq!(
+            learn_spp_from_relations(zero, one, &mut store).unwrap(),
+            zero
+        );
     }
 }

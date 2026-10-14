@@ -13,6 +13,7 @@ pub mod fuzz;
 pub mod holes;
 pub mod parser;
 pub mod pre;
+pub mod printer;
 pub mod sp;
 pub mod spp;
 

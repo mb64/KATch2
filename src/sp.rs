@@ -53,6 +53,7 @@ pub struct SPstore {
     complement_memo: HashMap<SP, SP>,
     ifelse_memo: HashMap<(Var, SP, SP), SP>,
     is_zero_memo: HashMap<SP, bool>,
+    count_memo: HashMap<SP, f32>,
 }
 
 /// A node in the SP store. Has two children, one for this variable being 0 and one for it being 1.
@@ -88,6 +89,7 @@ impl SPstore {
             complement_memo: HashMap::from([(SP::new(0), SP::new(1)), (SP::new(1), SP::new(0))]),
             ifelse_memo: HashMap::new(),
             is_zero_memo: HashMap::from([(SP::new(0), true), (SP::new(1), false)]),
+            count_memo: HashMap::from([(SP::new(0), 0.0), (SP::new(1), 1.0)]),
         };
         store.zero = store.zero();
         store.one = store.one();
@@ -252,6 +254,23 @@ impl SPstore {
         result
     }
 
+    /// Counts the total number of packets accepted by this SP.
+    /// Returns an f32 so that large counts saturate to infinity instead of overflowing.
+    pub fn count(&mut self, sp: SP) -> f32 {
+        // First, check the memo table
+        if let Some(&result) = self.count_memo.get(&sp) {
+            return result;
+        }
+        // Because we prefilled the memo with base cases,
+        // we now know that we've got a real node, so we don't need to handle 0 or 1 cases here.
+        let node = self.get(sp);
+        let x0_count = self.count(node.x0);
+        let x1_count = self.count(node.x1);
+        let result = x0_count + x1_count;
+        self.count_memo.insert(sp, result);
+        result
+    }
+
     pub fn ifelse(&mut self, var: Var, then_branch: SP, else_branch: SP) -> SP {
         assert!(var < self.num_vars);
         self.ifelse_helper(var, then_branch, else_branch)
@@ -263,15 +282,14 @@ impl SPstore {
         }
         let then_node = self.get(then_branch);
         let else_node = self.get(else_branch);
-        let x0;
-        let x1;
-        if var == 0 {
-            x0 = then_node.x0;
-            x1 = else_node.x1;
+        let (x0, x1) = if var == 0 {
+            (then_node.x0, else_node.x1)
         } else {
-            x0 = self.ifelse_helper(var - 1, then_node.x0, else_node.x0);
-            x1 = self.ifelse_helper(var - 1, then_node.x1, else_node.x1);
-        }
+            (
+                self.ifelse_helper(var - 1, then_node.x0, else_node.x0),
+                self.ifelse_helper(var - 1, then_node.x1, else_node.x1),
+            )
+        };
         let res = self.mk(x0, x1);
         self.ifelse_memo
             .insert((var, then_branch, else_branch), res);
@@ -462,6 +480,27 @@ mod tests {
             let is_zero_result = s.is_zero(sp);
             // An SP is zero if it equals the zero SP
             assert_eq!(is_zero_result, sp == s.zero);
+        }
+    }
+
+    #[test]
+    fn test_count() {
+        let mut s = SPstore::new(N);
+
+        assert_eq!(s.count(s.zero), 0.0);
+        assert_eq!(s.count(s.one), (1u32 << N) as f32);
+
+        // Check against brute-force enumeration of all packets
+        let all = s.all();
+        for sp in all {
+            let mut expected = 0.0;
+            for bits in 0..(1u32 << N) {
+                let pkt: Vec<bool> = (0..N).map(|i| bits & (1 << i) != 0).collect();
+                if s.accepts(sp, &pkt) {
+                    expected += 1.0;
+                }
+            }
+            assert_eq!(s.count(sp), expected);
         }
     }
 

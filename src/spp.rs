@@ -4,9 +4,11 @@
 // each path down the BDD has precisely the same depth, namely the number of variables, i.e. the packet size in bits.
 
 pub mod learner;
+pub mod reduce;
 
 use rand::seq::SliceRandom;
 
+use crate::expr::Exp;
 use crate::sp::{SP, SPnode, SPstore};
 use std::collections::HashMap;
 
@@ -66,6 +68,9 @@ pub struct SPPstore {
     pub sp: SPstore,
     fwd_memo: HashMap<SPP, SP>,
     ifwd_memo: HashMap<SP, SPP>,
+
+    /// `zeros[d]` is the zero SPP on `d` fields (the empty relation at depth `d`)
+    zeros: Vec<SPP>,
 }
 
 /// A node in the SPP store. Has four children, one for each combination of the two variables.
@@ -133,6 +138,7 @@ impl SPPstore {
             // in the memo tables, we only want the base cases for 0 and 1
             fwd_memo: HashMap::from([(SPP::new(0), SP::new(0)), (SPP::new(1), SP::new(1))]),
             ifwd_memo: HashMap::from([(SP::new(0), SPP::new(0)), (SP::new(1), SPP::new(1))]),
+            zeros: vec![],
         };
         store.zero = store.zero();
         store.one = store.one();
@@ -192,7 +198,7 @@ impl SPPstore {
     }
 
     /// Computes the SPP corresponding to the `sp` returned by `fwd`.     
-    /// - `ifwd` is the right inverse of `fwd`, i.e. `fwd ∘ ifwd = id_SP`
+    /// - `ifwd` is a right inverse of `fwd`, i.e. `fwd ∘ ifwd = id_SP`
     pub fn ifwd(&mut self, sp: SP) -> SPP {
         // Check the memo table to see if ifwd(spp) already exists
         if let Some(&result) = self.ifwd_memo.get(&sp) {
@@ -210,7 +216,7 @@ impl SPPstore {
     }
 
     /// Computes the SPP corresponding to the `sp` returned by `bwd`.
-    /// - `ibwd` is the left inverse of `bwd`, i.e. `ibwd ∘ bwd = id`
+    /// - `ibwd` is a left inverse of `bwd`, i.e. `ibwd ∘ bwd = id`
     pub fn ibwd(&mut self, sp: SP) -> SPP {
         let spp = self.ifwd(sp);
         self.flip(spp)
@@ -258,12 +264,21 @@ impl SPPstore {
     }
 
     fn zero(&mut self) -> SPP {
-        // We must construct a zero SPP of the right depth
+        // We must construct a zero SPP of the right depth. Along the way, fill in `zeros` with the
+        // zero SPP of every depth.
         let mut spp = SPP::new(0);
+        self.zeros = vec![spp];
         for _ in 0..self.num_vars {
             spp = self.mk(spp, spp, spp, spp);
+            self.zeros.push(spp);
         }
         spp
+    }
+
+    /// The zero SPP (the empty relation) on `depth` fields, i.e. at the level of a node for field
+    /// `num_vars - depth`. `zero_at_depth(num_vars)` is `self.zero`.
+    pub fn zero_at_depth(&self, depth: Var) -> SPP {
+        self.zeros[depth as usize]
     }
     fn top(&mut self) -> SPP {
         // We must construct a top SPP of the right depth
@@ -518,6 +533,21 @@ impl SPPstore {
         res
     }
 
+    /// Converts an SPP to an equivalent (dup-free) NetKAT expression.
+    ///
+    /// Case-splits on one field at a time, choosing the field with
+    /// [`SplitHeuristic::LookaheadTop`](reduce::SplitHeuristic::LookaheadTop)
+    /// with depth 1 and width 5: complete trees for the five lowest-entropy
+    /// first splits, then keep the smallest expression. There is no sharing,
+    /// so the result may be exponentially larger than the SPP.
+    pub fn to_expr(&mut self, spp: SPP) -> Exp {
+        reduce::to_expr_tree(
+            self,
+            spp,
+            reduce::SplitHeuristic::LookaheadTop { depth: 1, width: 5 },
+        )
+    }
+
     /// Computes all packets that can be produced from this SPP.
     /// We give the answer as an SPP instead of an SP for convenience.
     /// **Note**: this method has been deprecated in favor of `fwd`
@@ -711,8 +741,55 @@ impl SPPstore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expr::Expr;
 
     const N: Var = 2;
+
+    /// Check that compiling `to_expr(spp)` gives back `spp`
+    fn check_to_expr_roundtrip(aut: &mut crate::aut::Aut, spp: SPP) {
+        let expr = aut.spp_store_mut().to_expr(spp);
+        let state = aut.expr_to_state(&expr);
+        assert_eq!(aut.epsilon(state), spp, "to_expr({spp}) = {expr}");
+    }
+
+    #[test]
+    fn test_to_expr_exhaustive() {
+        let mut aut = crate::aut::Aut::new(N);
+        let all = aut.spp_store_mut().all();
+        for spp in all {
+            check_to_expr_roundtrip(&mut aut, spp);
+        }
+    }
+
+    #[test]
+    fn test_to_expr_random() {
+        let mut aut = crate::aut::Aut::new(4);
+        for _ in 0..200 {
+            let spp = aut.spp_store_mut().rand();
+            check_to_expr_roundtrip(&mut aut, spp);
+        }
+    }
+
+    #[test]
+    fn test_to_expr_simple() {
+        let mut s = SPPstore::new(3);
+        assert_eq!(*s.to_expr(s.zero), Expr::Zero);
+        assert_eq!(*s.to_expr(s.one), Expr::One);
+        let t = s.test(1, true);
+        assert_eq!(s.to_expr(t), Expr::test(1, true));
+        let a = s.assign(2, false);
+        assert_eq!(s.to_expr(a), Expr::assign(2, false));
+        // A test that only lets one value through
+        let t0 = s.test(0, false);
+        let t0_a2 = s.sequence(t0, a);
+        let expected = Expr::sequence(Expr::test(0, false), Expr::assign(2, false));
+        assert_eq!(s.to_expr(t0_a2), expected);
+        // An assignment after a test on the same field
+        let a0 = s.assign(0, true);
+        let t0_a0 = s.sequence(t0, a0);
+        let expected = Expr::sequence(Expr::test(0, false), Expr::assign(0, true));
+        assert_eq!(s.to_expr(t0_a0), expected);
+    }
 
     /// Test that `naive_forward` and `fwd` behave the same
     #[test]

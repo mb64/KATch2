@@ -1263,6 +1263,55 @@ impl ENFA for ExplicitDFA {
 impl NFA for ExplicitDFA {}
 impl DFA for ExplicitDFA {}
 
+// ---- ExplicitNFA -----------------------------------------------------------
+
+/// Like [`ExplicitDFA`], but the transitions out of a state may overlap, so this is only an
+/// [`NFA`]: a packet may take several transitions at once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplicitNFA {
+    pub start: usize,
+    pub transitions: Vec<Vec<(spp::SPP, usize)>>,
+    pub outputs: Vec<spp::SPP>,
+}
+
+impl ExplicitNFA {
+    pub fn num_states(&self) -> usize {
+        self.transitions.len()
+    }
+}
+
+impl From<ExplicitDFA> for ExplicitNFA {
+    fn from(dfa: ExplicitDFA) -> Self {
+        ExplicitNFA {
+            start: dfa.start,
+            transitions: dfa.transitions,
+            outputs: dfa.outputs,
+        }
+    }
+}
+
+impl ENFA for ExplicitNFA {
+    type State = usize;
+
+    fn start(&self, _store: &mut spp::SPPstore) -> usize {
+        self.start
+    }
+
+    fn is_visible(&self, _store: &mut spp::SPPstore, _q: &usize) -> bool {
+        true
+    }
+
+    fn transitions(&self, _store: &mut spp::SPPstore, q: &usize) -> Vec<(spp::SPP, usize)> {
+        self.transitions[*q].clone()
+    }
+
+    fn output(&self, _store: &mut spp::SPPstore, q: &usize) -> spp::SPP {
+        self.outputs[*q]
+    }
+}
+
+impl NFA for ExplicitNFA {}
+
 // ---- Aut conversion --------------------------------------------------------
 
 /// Materializes the DFA reachable from `start` in `aut` as an `ExplicitDFA`
@@ -1334,6 +1383,71 @@ pub fn is_empty<A: ENFA>(aut: &A, store: &mut spp::SPPstore) -> bool {
     is_empty_with_reachable(aut, store, &mut HashMap::new())
 }
 
+/// Returns the set of reaching packets for each state.
+///
+/// Returns the map `reachable` where `reachable[q]` has a packet `pk` if there's a path that begins
+/// with some start packet at the start state and ends with `pk` at `q`
+pub fn compute_reachable<A: ENFA>(aut: &A, store: &mut spp::SPPstore) -> HashMap<A::State, sp::SP> {
+    let mut reachable = HashMap::new();
+    traverse_reachable(aut, store, &mut reachable, |_, _, _, _| false);
+    reachable
+}
+
+/// Returns the set of co-reaching packets for each state: the mirror image of
+/// [`compute_reachable`].
+///
+/// Returns the map `coreachable` where `coreachable[q]` has a packet `pk` if there's a path that
+/// begins with `pk` at `q` and ends at a state whose output accepts the packet there. Only states
+/// reachable (in the graph) from the start state appear, and only if they co-reach some packet.
+pub fn compute_coreachable<A: ENFA>(
+    aut: &A,
+    store: &mut spp::SPPstore,
+) -> HashMap<A::State, sp::SP> {
+    // Explore the graph from the start state, recording each state's predecessors
+    let start = aut.start(store);
+    let mut seen: HashSet<A::State> = HashSet::from([start.clone()]);
+    let mut order: Vec<A::State> = vec![start.clone()];
+    let mut stack = vec![start];
+    let mut preds: HashMap<A::State, Vec<(spp::SPP, A::State)>> = HashMap::new();
+    while let Some(q) = stack.pop() {
+        for (spp, next) in aut.transitions(store, &q) {
+            preds
+                .entry(next.clone())
+                .or_default()
+                .push((spp, q.clone()));
+            if seen.insert(next.clone()) {
+                order.push(next.clone());
+                stack.push(next);
+            }
+        }
+    }
+
+    // Backward fixed point: seeded with the packets each state's output accepts
+    let mut coreachable: HashMap<A::State, sp::SP> = HashMap::new();
+    let mut worklist: Vec<A::State> = Vec::new();
+    for q in order {
+        let output_spp = aut.output(store, &q);
+        let accepted = store.bwd(output_spp);
+        if accepted != store.sp.zero {
+            coreachable.insert(q.clone(), accepted);
+            worklist.push(q);
+        }
+    }
+    while let Some(r) = worklist.pop() {
+        let coreach_r = coreachable[&r];
+        for (spp, p) in preds.get(&r).cloned().unwrap_or_default() {
+            let pulled = store.pull(spp, coreach_r);
+            let prev = coreachable.get(&p).copied().unwrap_or(store.sp.zero);
+            let new_val = store.sp.union(prev, pulled);
+            if new_val != prev {
+                coreachable.insert(p.clone(), new_val);
+                worklist.push(p);
+            }
+        }
+    }
+    coreachable
+}
+
 /// Same as [`is_empty`], but also populates `reachable` with a map from each
 /// visited state to the SP of packets that have been verified to reach it.
 ///
@@ -1345,6 +1459,20 @@ pub fn is_empty_with_reachable<A: ENFA>(
     aut: &A,
     store: &mut spp::SPPstore,
     reachable: &mut HashMap<A::State, sp::SP>,
+) -> bool {
+    traverse_reachable(aut, store, reachable, |aut, store, q, diff| {
+        let output_spp = aut.output(store, q);
+        store.push(diff, output_spp) != store.sp.zero
+    })
+}
+
+/// Visit each newly reachable packet set, stopping when `should_stop` returns true.
+/// Returns true only when traversal reaches a fixed point.
+fn traverse_reachable<A: ENFA>(
+    aut: &A,
+    store: &mut spp::SPPstore,
+    reachable: &mut HashMap<A::State, sp::SP>,
+    mut should_stop: impl FnMut(&A, &mut spp::SPPstore, &A::State, sp::SP) -> bool,
 ) -> bool {
     let q_start = aut.start(store);
     let mut todo: HashMap<A::State, sp::SP> = HashMap::new();
@@ -1365,9 +1493,7 @@ pub fn is_empty_with_reachable<A: ENFA>(
             continue;
         }
 
-        let output_spp = aut.output(store, &q);
-        let output_sp = store.push(diff, output_spp);
-        if output_sp != store.sp.zero {
+        if should_stop(aut, store, &q, diff) {
             return false;
         }
 
@@ -2527,6 +2653,83 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn compute_reachable_continues_past_accepting_states() {
+        let mut store = spp::SPPstore::new(1);
+        let zero = store.zero;
+        let top = store.top;
+        let test_false = store.test(0, false);
+        let test_true = store.test(0, true);
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![
+                vec![(test_false, 1), (test_true, 2), (zero, 4)],
+                vec![(top, 3)],
+                vec![(top, 3)],
+                vec![(top, 3)],
+                vec![],
+            ],
+            outputs: vec![top, zero, zero, zero, zero],
+        };
+
+        let reachable = compute_reachable(&dfa, &mut store);
+        let false_packets = store.sp.singleton(&[false]);
+        let true_packets = store.sp.singleton(&[true]);
+        assert_eq!(reachable.len(), 4);
+        assert_eq!(reachable[&0], store.sp.one);
+        assert_eq!(reachable[&1], false_packets);
+        assert_eq!(reachable[&2], true_packets);
+        assert_eq!(reachable[&3], store.sp.one);
+        assert!(!reachable.contains_key(&4));
+
+        let mut partial = HashMap::new();
+        assert!(!is_empty_with_reachable(&dfa, &mut store, &mut partial));
+        assert!(partial.is_empty());
+
+        let empty_dfa = ExplicitDFA {
+            outputs: vec![zero; 5],
+            ..dfa
+        };
+        assert!(is_empty_with_reachable(
+            &empty_dfa,
+            &mut store,
+            &mut partial
+        ));
+        assert_eq!(partial, reachable);
+    }
+
+    #[test]
+    fn compute_coreachable_small() {
+        let mut store = spp::SPPstore::new(1);
+        let zero = store.zero;
+        let top = store.top;
+        let one = store.one;
+        let test_true = store.test(0, true);
+        let assign_false = store.assign(0, false);
+        // 0 --top--> 1 --1--> 3 (accepts x0 = 1)
+        // 0 --top--> 2 --x0 := 0--> 3
+        // 4 is unreachable
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![
+                vec![(top, 1), (top, 2)],
+                vec![(one, 3)],
+                vec![(assign_false, 3)],
+                vec![],
+                vec![(one, 3)],
+            ],
+            outputs: vec![zero, zero, zero, test_true, top],
+        };
+
+        let coreachable = compute_coreachable(&dfa, &mut store);
+        let true_packets = store.sp.singleton(&[true]);
+        assert_eq!(coreachable[&3], true_packets);
+        assert_eq!(coreachable[&1], true_packets);
+        assert!(!coreachable.contains_key(&2));
+        assert_eq!(coreachable[&0], store.sp.one);
+        assert!(!coreachable.contains_key(&4));
     }
 
     // ── backward_reachable ────────────────────────────────────────────────
