@@ -11,7 +11,9 @@
 //! A consistent SAT assignment is copied into a native array once per solve.
 //! The existing greedy example cover then selects training examples for the
 //! BDD learners, preserving the clause merge and example cover optimizations.
-//! There are no universal quantifiers, and DFA state arguments are concrete.
+//! Universal negative SPP regions are instantiated lazily when a model
+//! violates them, and passed as shared diagrams to the SPP learner. DFA state
+//! arguments are concrete.
 
 mod sat;
 
@@ -22,7 +24,7 @@ use crate::flags;
 use crate::holes::aut::ExplicitDFA;
 use crate::holes::cand::{Cand, Input};
 use crate::sp::{SP, SPstore};
-use crate::spp::learner::{Example, learn_spp};
+use crate::spp::learner::{Example, learn_spp_with_forbidden};
 use crate::spp::{SPP, SPPstore, Var};
 
 use std::collections::{HashMap, HashSet};
@@ -201,6 +203,11 @@ pub trait SmtLearner<'a> {
     /// Assert one refining [`AbstractClause`] (a disjunction of literals).
     fn add_clause(&mut self, clause: AbstractClause, sp_store: &mut SPstore);
 
+    /// Universally forbid every packet pair in `relation` for an SPP slot.
+    /// Instances are asserted lazily; the whole diagram also supplies negative
+    /// evidence to candidate learning, including pairs absent from SAT atoms.
+    fn forbid_spp(&mut self, spp: SppVar, relation: SPP, store: &mut SPPstore);
+
     /// Solve once and read back one concrete diagram per allocated slot, or
     /// [`InconsistentError`] if the accumulated clauses are unsatisfiable.
     fn extract(&mut self, spp_store: &mut SPPstore) -> Result<Solution<'a>, InconsistentError>;
@@ -255,6 +262,7 @@ pub struct Native<'a> {
     atoms: Vec<Atom>,
     applications: HashMap<(SlotRef, Vec<Arg>), usize>,
     clauses: Vec<Vec<TrackedLit>>,
+    forbidden: Vec<Option<SPP>>,
     metrics: crate::holes::metrics::Metrics,
 }
 
@@ -273,6 +281,7 @@ impl<'a> SmtLearner<'a> for Native<'a> {
             cands: Vec::new(),
             existentials: Vec::new(),
             clauses: Vec::new(),
+            forbidden: Vec::new(),
             metrics: crate::holes::metrics::Metrics::new("native"),
         }
     }
@@ -282,6 +291,7 @@ impl<'a> SmtLearner<'a> for Native<'a> {
     fn fresh_spp(&mut self) -> SppVar {
         let id = self.num_spps;
         self.num_spps += 1;
+        self.forbidden.push(None);
         SppVar(id)
     }
 
@@ -387,6 +397,12 @@ impl<'a> SmtLearner<'a> for Native<'a> {
         self.clauses.push(tracked);
     }
 
+    fn forbid_spp(&mut self, spp: SppVar, relation: SPP, store: &mut SPPstore) {
+        let old = self.forbidden[spp.0 as usize].unwrap_or(store.zero);
+        self.forbidden[spp.0 as usize] = Some(store.union(old, relation));
+        self.metrics.add("forbidden_regions", 1);
+    }
+
     /// Solve once and extract a concrete diagram for each allocated slot.
     ///
     /// After a congruence-consistent model is found, `select_examples` picks
@@ -398,7 +414,7 @@ impl<'a> SmtLearner<'a> for Native<'a> {
     /// those learners.
     fn extract(&mut self, spp_store: &mut SPPstore) -> Result<Solution<'a>, InconsistentError> {
         self.metrics.add("extractions", 1);
-        let model = self.solve()?;
+        let model = self.solve(spp_store)?;
         let started = self.metrics.start();
         let mut examples = self.select_examples(&model, flags::example_cover());
 
@@ -407,7 +423,9 @@ impl<'a> SmtLearner<'a> for Native<'a> {
         let mut spps = HashMap::with_capacity(self.num_spps as usize);
         for idx in 0..self.num_spps {
             let exs = examples.spps.remove(&idx).unwrap_or_default();
-            let spp = learn_spp(exs, spp_store).expect("native model is internally consistent");
+            let forbidden = self.forbidden[idx as usize].unwrap_or(spp_store.zero);
+            let spp = learn_spp_with_forbidden(exs, forbidden, spp_store)
+                .expect("native model is internally consistent");
             spps.insert(SppVar(idx), spp);
         }
 
@@ -426,6 +444,82 @@ impl<'a> SmtLearner<'a> for Native<'a> {
 }
 
 impl<'a> Native<'a> {
+    /// Instantiate `P(args) => !forbidden(args)` only when a SAT model
+    /// violates it. The instance constrains the symbolic arguments, so it also
+    /// excludes future forbidden values of this application, not just one pair.
+    fn refine_forbidden(&mut self, model: &Model, store: &SPPstore) -> bool {
+        if self.forbidden.iter().all(Option::is_none) {
+            return false;
+        }
+        let started = self.metrics.start();
+        let mut violations = Vec::new();
+        let n = self.num_vars as usize;
+        for (idx, atom) in self.atoms.iter().enumerate() {
+            let SlotRef::Spp(slot) = atom.slot else {
+                continue;
+            };
+            let Some(forbidden) = self.forbidden[slot as usize] else {
+                continue;
+            };
+            if !model.value(atom.result) {
+                continue;
+            }
+            let values: Vec<bool> = atom.args.iter().map(|a| a.value(model) != 0).collect();
+            if store.accepts(forbidden, &values[..n], &values[n..]) {
+                violations.push((idx, forbidden));
+            }
+        }
+        for &(idx, forbidden) in &violations {
+            let atom = &self.atoms[idx];
+            let args: Vec<Lit> = atom
+                .args
+                .iter()
+                .map(|a| match a {
+                    Arg::Bit(lit) => *lit,
+                    Arg::State(_) => unreachable!("SPP arguments are packet bits"),
+                })
+                .collect();
+            let result = atom.result;
+            let member = self.build_spp_bool(forbidden, &args, 0, store, &mut HashMap::new());
+            self.solver.clause([!result, !member]);
+        }
+        if !violations.is_empty() {
+            self.metrics.add("forbidden_refinement_rounds", 1);
+            self.metrics
+                .add("forbidden_instances", violations.len() as u64);
+        }
+        self.metrics.elapsed("forbidden_refinement_ns", started);
+        !violations.is_empty()
+    }
+
+    fn build_spp_bool(
+        &mut self,
+        relation: SPP,
+        args: &[Lit],
+        depth: usize,
+        store: &SPPstore,
+        memo: &mut HashMap<SPP, Lit>,
+    ) -> Lit {
+        if relation == SPP::new(0) {
+            return FALSE;
+        }
+        if relation == SPP::new(1) {
+            return TRUE;
+        }
+        if let Some(&lit) = memo.get(&relation) {
+            return lit;
+        }
+        let node = store.get(relation);
+        let [x00, x01, x10, x11] = [node.x00, node.x01, node.x10, node.x11]
+            .map(|child| self.build_spp_bool(child, args, depth + 1, store, memo));
+        let n = self.num_vars as usize;
+        let low = self.solver.ite(args[n + depth], x01, x00);
+        let high = self.solver.ite(args[n + depth], x11, x10);
+        let result = self.solver.ite(args[depth], high, low);
+        memo.insert(relation, result);
+        result
+    }
+
     fn bit_arg(&self, b: &AbstractBit) -> Arg {
         Arg::Bit(match b {
             AbstractBit::Concrete(true) => TRUE,
@@ -522,9 +616,10 @@ impl<'a> Native<'a> {
 
     /// Solve the Boolean abstraction, then check predicate congruence with a
     /// hash table. Each violating pair adds a globally valid Ackermann lemma.
-    /// A pair cannot violate again, so refinement terminates after at most
-    /// quadratically many lemmas, without eagerly allocating them all.
-    fn solve(&mut self) -> Result<Model, InconsistentError> {
+    /// A pair cannot violate again, so congruence refinement needs at most
+    /// quadratically many lemmas. Universal negative SPP regions are checked
+    /// against the same model and instantiated alongside congruence lemmas.
+    fn solve(&mut self, store: &SPPstore) -> Result<Model, InconsistentError> {
         loop {
             let model = self.solver.solve().ok_or(InconsistentError)?;
             let started = self.metrics.start();
@@ -544,10 +639,13 @@ impl<'a> Native<'a> {
                 }
             }
             self.metrics.elapsed("congruence_check_ns", started);
-            if conflicts.is_empty() {
+            let forbidden_refined = self.refine_forbidden(&model, store);
+            if conflicts.is_empty() && !forbidden_refined {
                 return Ok(model);
             }
-            self.metrics.add("refinement_rounds", 1);
+            if !conflicts.is_empty() {
+                self.metrics.add("refinement_rounds", 1);
+            }
             self.metrics.add("ackermann_lemmas", conflicts.len() as u64);
             let started = self.metrics.start();
             for (a, b) in conflicts {
@@ -735,6 +833,7 @@ fn merge_by<T, K: Ord>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spp::learner::learn_spp;
 
     const N: Var = 3;
 
@@ -1188,7 +1287,7 @@ mod tests {
     fn test_greedy_cover_selects_shared_atom_once() {
         let mut store = SPPstore::new(N);
         let (mut learner, s) = shared_atom_learner(&mut store, true);
-        let model = learner.solve().unwrap();
+        let model = learner.solve(&store).unwrap();
         let selected = learner.select_examples(&model, true);
         let examples = &selected.spps[&s.0];
         assert_eq!(examples.len(), 1, "shared atom must be selected only once");
@@ -1205,7 +1304,7 @@ mod tests {
         // negative atom and the single example is labelled `false`.
         let mut store = SPPstore::new(N);
         let (mut learner, s) = shared_atom_learner(&mut store, false);
-        let model = learner.solve().unwrap();
+        let model = learner.solve(&store).unwrap();
         let selected = learner.select_examples(&model, true);
         let examples = &selected.spps[&s.0];
         assert_eq!(examples.len(), 1, "shared atom must be selected only once");
@@ -1221,7 +1320,7 @@ mod tests {
         // labelled with its value under the model.
         let mut store = SPPstore::new(N);
         let (mut learner, s) = shared_atom_learner(&mut store, true);
-        let model = learner.solve().unwrap();
+        let model = learner.solve(&store).unwrap();
         let selected = learner.select_examples(&model, false);
         let examples = &selected.spps[&s.0];
         assert_eq!(examples.len(), 2, "both atoms kept, each exactly once");
@@ -1346,7 +1445,7 @@ mod tests {
                 &mut store.sp,
             );
         }
-        let model = learner.solve().unwrap();
+        let model = learner.solve(&store).unwrap();
         assert_ne!(
             model.value(learner.existentials[x.0 as usize]),
             model.value(learner.existentials[y.0 as usize])
@@ -1464,9 +1563,85 @@ mod tests {
                 learner.add_sp_membership(sp, &vars, &store.sp);
                 let pin = store.sp.singleton(&[packet & 1 != 0, packet & 2 != 0]);
                 learner.add_sp_membership(pin, &vars, &store.sp);
-                assert_eq!(learner.solve().is_ok(), mask & (1 << packet) != 0);
+                assert_eq!(learner.solve(&store).is_ok(), mask & (1 << packet) != 0);
             }
         }
+    }
+
+    #[test]
+    fn lazy_forbidden_instances_match_every_one_bit_relation() {
+        for forbidden_mask in 0..16u32 {
+            for allowed_mask in 0..16u32 {
+                let mut store = SPPstore::new(1);
+                let mut relation = |mask: u32| {
+                    let b = |idx: u32| SPP::new((mask >> idx) & 1u32);
+                    store.mk(b(0), b(1), b(2), b(3))
+                };
+                let forbidden = relation(forbidden_mask);
+                let allowed = relation(allowed_mask);
+                let mut learner = Native::new(1);
+                let spp = learner.fresh_spp();
+                let input = learner.fresh_existential();
+                let output = learner.fresh_existential();
+                let args = [
+                    learner.existentials[input.0 as usize],
+                    learner.existentials[output.0 as usize],
+                ];
+                let guard = learner.build_spp_bool(allowed, &args, 0, &store, &mut HashMap::new());
+                learner.solver.clause([guard]);
+                learner.add_clause(
+                    AbstractClause {
+                        literals: vec![spp_lit(
+                            spp,
+                            vec![AbstractBit::Exist(input)],
+                            vec![AbstractBit::Exist(output)],
+                            true,
+                        )],
+                    },
+                    &mut store.sp,
+                );
+                learner.forbid_spp(spp, forbidden, &mut store);
+                let result = learner.extract(&mut store);
+                assert_eq!(result.is_ok(), allowed_mask & !forbidden_mask != 0);
+                if let Ok(solution) = result {
+                    let overlap = store.intersect(solution.spps[&spp], forbidden);
+                    assert!(store.is_zero(overlap));
+                    let witness = store.intersect(solution.spps[&spp], allowed);
+                    assert!(!store.is_zero(witness));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forbidden_regions_survive_incremental_atoms_and_region_growth() {
+        let mut store = SPPstore::new(2);
+        let mut learner = Native::new(2);
+        let spp = learner.fresh_spp();
+        let forbidden = store.complement(store.one);
+        learner.forbid_spp(spp, forbidden, &mut store);
+        assert_eq!(learner.extract(&mut store).unwrap().spps[&spp], store.zero);
+        let top = store.sp.one;
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![Literal::SppMember {
+                    spp,
+                    in_sp: top,
+                    out_sp: top,
+                }],
+            },
+            &mut store.sp,
+        );
+        let learned = learner.extract(&mut store).unwrap().spps[&spp];
+        let overlap = store.intersect(learned, forbidden);
+        assert!(store.is_zero(overlap));
+        assert!(!store.is_zero(learned));
+        let identity = store.one;
+        learner.forbid_spp(spp, identity, &mut store);
+        // Still satisfiable in the raw Boolean abstraction until lazy
+        // universal instantiation forbids its positive predicate application.
+        assert!(learner.solver.solve().is_some());
+        assert!(learner.extract(&mut store).is_err());
     }
 
     #[test]
@@ -1548,7 +1723,7 @@ mod tests {
                         })
                     })
                 });
-                let result = learner.solve();
+                let result = learner.solve(&store);
                 assert_eq!(
                     result.is_ok(),
                     expected,

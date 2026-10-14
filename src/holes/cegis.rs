@@ -25,7 +25,8 @@
 //!    * an upper-bound check (`aut[candidate] ⊆ dfa`) uses
 //!      [`Instantiate::check_less_than`]; on failure each hole's witness
 //!      becomes a negative literal ([`Candidate::reject_literal`]): "the hole
-//!      cannot accept all of these simultaneously".
+//!      cannot accept all of these simultaneously". A path with a single SPP
+//!      traversal instead supplies a symbolic forbidden relation.
 //!    * a lower-bound check (`dfa ⊆ aut[candidate]`) uses
 //!      [`Instantiate::check_greater_than`]; on failure each viable hole site
 //!      becomes a positive literal ([`Candidate::accept_literal`]).
@@ -37,8 +38,8 @@
 //!
 //! # Limitations
 //!
-//! * Lower-bound (`accept_literal`) is implemented for [`spp::SPP`] only;
-//!   [`crate::holes::cand::Cand`] panics if a lower-bound counterexample arises.
+//! * Symbolic upper-bound generalization requires a single SPP traversal.
+//!   Multiple traversals and [`crate::holes::cand::Cand`] use concrete clauses.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -76,7 +77,8 @@ impl Constraint {
     ///
     /// Returns `true` if satisfied. Otherwise records refining clauses on
     /// `learner` — a [`Candidate::reject_literal`] disjunction for an
-    /// upper-bound violation, or a [`Candidate::accept_literal`] disjunction
+    /// upper-bound violation (or a forbidden relation for a single SPP
+    /// traversal), or a [`Candidate::accept_literal`] disjunction
     /// for a lower-bound one — and returns `false`. Lower-bound violations
     /// learn the forward frontier, plus the backward frontier and min-cut
     /// clauses when [`flags::lb_backward`] and [`flags::lb_mincut`] are enabled.
@@ -96,10 +98,20 @@ impl Constraint {
         if matches!(
             self,
             Constraint::UpperBound { .. } | Constraint::Equality { .. }
-        ) && let Err(witnesses) = inst.check_less_than(store, dfa)
+        ) && let Err(cex) = inst.check_upper_bound(store, dfa)
         {
-            // println!("Upper bound cex: {witnesses:?}");
-            add_upper_bound_clause::<C, L>(witnesses, hole_to_var, learner, &mut store.sp);
+            if cex.witnesses.len() == 1 {
+                let (hole, (input, inner, output)) = &cex.witnesses[0];
+                if let Literal::Spp { spp, .. } =
+                    C::reject_literal(hole_to_var[hole], input, inner, output)
+                    && let Some(forbidden) = inst::upper_bound_forbidden(inst, &cex, dfa, store)
+                {
+                    debug_assert!(store.accepts(forbidden, input, output));
+                    learner.forbid_spp(spp, forbidden, store);
+                    return false;
+                }
+            }
+            add_upper_bound_clause::<C, L>(cex.witnesses, hole_to_var, learner, &mut store.sp);
             return false;
         }
 
@@ -873,6 +885,42 @@ mod tests {
         run::<C, Native>(&constraints, holes, reference_dfa, store, max_iters)
     }
 
+    #[test]
+    fn wide_upper_bound_generalizes_in_one_refinement() {
+        let mut store = spp::SPPstore::new(64);
+        let packet = vec![false; 64];
+        let singleton = singleton_pair_spp(&mut store, &packet, &packet);
+        let allowed = store.test(0, false);
+        let lower = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![]],
+            outputs: vec![singleton],
+        };
+        let upper = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![]],
+            outputs: vec![allowed],
+        };
+        let expr = Expr::hole(Hole(0));
+        let reference = bounds_reference_dfa::<spp::SPP>(&mut store, &expr, &lower, &upper);
+        // Empty candidate -> lower-bound example -> identity candidate ->
+        // symbolic upper-bound region -> candidate satisfying both bounds.
+        let solution = run_bounds::<spp::SPP>(
+            &mut store,
+            &expr,
+            &[Hole(0)],
+            &lower,
+            &upper,
+            &reference,
+            Some(3),
+        )
+        .unwrap();
+        let learned = solution[&Hole(0)];
+        assert!(store.accepts(learned, &packet, &packet));
+        let excess = store.difference(learned, allowed);
+        assert!(store.is_zero(excess));
+    }
+
     /// 0 ⊆ Hole ⊆ top: trivially solvable.  The learner returns the empty
     /// SPP (its default when unconstrained), the upper-bound check passes
     /// vacuously, the lower-bound check passes vacuously, done.
@@ -1074,6 +1122,9 @@ mod tests {
             fn add_clause(&mut self, clause: AbstractClause, store: &mut sp::SPstore) {
                 self.clauses.push(clause.clone());
                 self.inner.add_clause(clause, store);
+            }
+            fn forbid_spp(&mut self, spp: SppVar, relation: spp::SPP, store: &mut spp::SPPstore) {
+                self.inner.forbid_spp(spp, relation, store);
             }
             fn extract(
                 &mut self,

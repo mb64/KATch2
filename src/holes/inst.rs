@@ -13,6 +13,9 @@ use crate::spp;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+mod upper;
+pub(crate) use upper::upper_bound_forbidden;
+
 /// Witness produced by [`Instantiate::check_greater_than`] when the lower
 /// bound is not contained in the instantiated automaton.
 ///
@@ -27,6 +30,17 @@ pub struct LowerBoundCounterexample {
     pub trace: Vec<Vec<bool>>,
     /// Final output packet produced by the lower bound's output summand.
     pub output: Vec<bool>,
+}
+
+pub type HoleWitness<S> = (Hole, (Vec<bool>, Vec<(S, Vec<bool>)>, Vec<bool>));
+
+/// A violating path, including invisible states needed to recover the
+/// concrete context around a single SPP traversal.
+#[derive(Debug, Clone)]
+pub struct UpperBoundCounterexample<S> {
+    pub path: Vec<(State<S>, Vec<bool>)>,
+    pub output: Vec<bool>,
+    pub witnesses: Vec<HoleWitness<S>>,
 }
 
 /// An [`AutWithHoles`] plus a concrete NFA assignment for each hole that
@@ -96,6 +110,16 @@ impl<Inner: NFA> Instantiate<Inner> {
         store: &mut spp::SPPstore,
         upper_bound: &U,
     ) -> Result<(), Vec<(Hole, (Vec<bool>, Vec<(Inner::State, Vec<bool>)>, Vec<bool>))>> {
+        self.check_upper_bound(store, upper_bound)
+            .map_err(|cex| cex.witnesses)
+    }
+
+    /// Like [`Self::check_less_than`], retaining the concrete path context.
+    pub fn check_upper_bound<U: DFA>(
+        &self,
+        store: &mut spp::SPPstore,
+        upper_bound: &U,
+    ) -> Result<(), UpperBoundCounterexample<Inner::State>> {
         // Build the product NFA `self ∩ complement(upper_bound)`, extract a
         // visible trace from it, elaborate the trace through the underlying
         // `AutWithHoles` to recover invisible intermediates, then walk every
@@ -117,7 +141,12 @@ impl<Inner: NFA> Instantiate<Inner> {
         let full_path: Vec<(State<_>, Vec<bool>)> =
             self_nfa.elaborate_trace(store, &self_visible_path, &output_pkt);
 
-        Err(self.holes_used_in_trace(store, &full_path, &output_pkt))
+        let witnesses = self.holes_used_in_trace(store, &full_path, &output_pkt);
+        Err(UpperBoundCounterexample {
+            path: full_path,
+            output: output_pkt,
+            witnesses,
+        })
     }
 
     /// Collect the holes used by a single trace through the inner

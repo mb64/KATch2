@@ -536,12 +536,16 @@ impl SPPstore {
     /// Converts an SPP to an equivalent (dup-free) NetKAT expression.
     ///
     /// Case-splits on one field at a time, choosing the field with
-    /// [`SplitHeuristic::Lookahead(1)`](reduce::SplitHeuristic::Lookahead): in simple testing (the
-    /// `split_heuristics_compared` test), this gave most of the benefit of trying every split order,
-    /// for a small constant factor more time than the entropy heuristic alone. There is no sharing,
+    /// [`SplitHeuristic::LookaheadTop`](reduce::SplitHeuristic::LookaheadTop)
+    /// with depth 1 and width 5: complete trees for the five lowest-entropy
+    /// first splits, then keep the smallest expression. There is no sharing,
     /// so the result may be exponentially larger than the SPP.
     pub fn to_expr(&mut self, spp: SPP) -> Exp {
-        reduce::to_expr_tree(self, spp, reduce::SplitHeuristic::Lookahead(1))
+        reduce::to_expr_tree(
+            self,
+            spp,
+            reduce::SplitHeuristic::LookaheadTop { depth: 1, width: 5 },
+        )
     }
 
     /// Computes all packets that can be produced from this SPP.

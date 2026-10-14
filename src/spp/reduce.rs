@@ -171,6 +171,14 @@ pub enum SplitHeuristic {
     /// `Lookahead(0)` is the same as [`Entropy`](SplitHeuristic::Entropy), and `Lookahead(k)` for
     /// `k` at least the number of fields is the same as [`Exhaustive`](SplitHeuristic::Exhaustive).
     Lookahead(u32),
+    /// Look `depth` splits ahead, trying only the `width` fields with the
+    /// lowest entropy at each search node. Finish with entropy when the depth
+    /// budget runs out, and keep the smallest completed expression.
+    ///
+    /// `width` must be positive. Width 1 behaves like [`Entropy`](Self::Entropy);
+    /// width at least the number of fields explores the same split candidates
+    /// as [`Lookahead`](Self::Lookahead), with entropy-ranked tie breaking.
+    LookaheadTop { depth: u32, width: usize },
 }
 
 /// Instantiate `field` of `spp` to `input -> output`: the sub-SPP of the (input, output) pairs where
@@ -253,6 +261,9 @@ impl Instantiator {
 /// Convert `spp` to an equivalent expression, case-splitting on fields in the order chosen by
 /// `heuristic`. May be exponentially larger than the SPP.
 pub fn to_expr_tree(store: &mut spp::SPPstore, spp: SPP, heuristic: SplitHeuristic) -> Exp {
+    if let SplitHeuristic::LookaheadTop { width, .. } = heuristic {
+        assert!(width > 0, "lookahead width must be positive");
+    }
     let n = store.num_vars();
     let mut builder = TreeBuilder {
         zero: store.zero,
@@ -265,6 +276,7 @@ pub fn to_expr_tree(store: &mut spp::SPPstore, spp: SPP, heuristic: SplitHeurist
     let budget = match heuristic {
         SplitHeuristic::Exhaustive => u32::MAX,
         SplitHeuristic::Lookahead(k) => k,
+        SplitHeuristic::LookaheadTop { depth, .. } => depth,
         _ => 0,
     };
     builder.build(spp, (0..n).collect(), budget)
@@ -283,7 +295,7 @@ struct TreeBuilder<'a> {
 
 impl TreeBuilder<'_> {
     /// `spp` leaves every field not in `remaining` alone. For the lookahead heuristics, `budget` is
-    /// how many more splits try every field; it is ignored otherwise.
+    /// how many more splits explore alternative fields; it is ignored otherwise.
     fn build(&mut self, spp: SPP, remaining: Vec<spp::Var>, budget: u32) -> Exp {
         if spp == self.zero {
             return Expr::zero();
@@ -317,8 +329,30 @@ impl TreeBuilder<'_> {
             // `spp` leaves every field alone, and isn't zero, so it's the identity
             Expr::one()
         } else if budget > 0 {
-            // Lookahead: try every field, with one less split of lookahead below
-            candidates
+            // Rank all fields cheaply, then complete only the best few trees.
+            // Partial selection is O(n); sorting the shortlist is O(width log
+            // width). Field numbers break equal entropy scores deterministically.
+            let trials = if let SplitHeuristic::LookaheadTop { width, .. } = self.heuristic {
+                let mut ranked: Vec<_> = candidates
+                    .iter()
+                    .map(|&(field, subs)| (self.entropy_score(&subs), field, subs))
+                    .collect();
+                let compare = |a: &(f64, spp::Var, [SPP; 4]), b: &(f64, spp::Var, [SPP; 4])| {
+                    a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1))
+                };
+                if ranked.len() > width {
+                    ranked.select_nth_unstable_by(width - 1, compare);
+                    ranked.truncate(width);
+                }
+                ranked.sort_unstable_by(compare);
+                ranked
+                    .into_iter()
+                    .map(|(_, field, subs)| (field, subs))
+                    .collect::<Vec<_>>()
+            } else {
+                candidates.clone()
+            };
+            trials
                 .iter()
                 .map(|&(field, subs)| {
                     self.split_expr(field, subs, &rest_without(field), budget - 1)
@@ -344,7 +378,8 @@ impl TreeBuilder<'_> {
                 // Out of lookahead: fall back to entropy
                 SplitHeuristic::Entropy
                 | SplitHeuristic::Exhaustive
-                | SplitHeuristic::Lookahead(_) => self.entropy_score(&subs),
+                | SplitHeuristic::Lookahead(_)
+                | SplitHeuristic::LookaheadTop { .. } => self.entropy_score(&subs),
             };
             if best.as_ref().is_none_or(|&(b, _)| score < b) {
                 best = Some((score, (field, subs)));
@@ -520,13 +555,15 @@ mod tests {
         result
     }
 
-    const HEURISTICS: [SplitHeuristic; 7] = [
+    const HEURISTICS: [SplitHeuristic; 9] = [
         SplitHeuristic::FirstField,
         SplitHeuristic::Size,
         SplitHeuristic::Entropy,
         SplitHeuristic::Lookahead(1),
         SplitHeuristic::Lookahead(2),
         SplitHeuristic::Lookahead(3),
+        SplitHeuristic::LookaheadTop { depth: 1, width: 5 },
+        SplitHeuristic::LookaheadTop { depth: 3, width: 1 },
         SplitHeuristic::Exhaustive,
     ];
 
@@ -575,16 +612,47 @@ mod tests {
             let entropy = to_expr_tree(&mut store, spp, SplitHeuristic::Entropy);
             let zero = to_expr_tree(&mut store, spp, SplitHeuristic::Lookahead(0));
             assert_eq!(entropy, zero);
+            for depth in [0, 1, 3] {
+                let narrow = to_expr_tree(
+                    &mut store,
+                    spp,
+                    SplitHeuristic::LookaheadTop { depth, width: 1 },
+                );
+                assert_eq!(entropy, narrow);
+            }
             let exhaustive = to_expr_tree(&mut store, spp, SplitHeuristic::Exhaustive);
             for k in [4, 5, 100] {
                 let lookahead = to_expr_tree(&mut store, spp, SplitHeuristic::Lookahead(k));
                 assert_eq!(exhaustive, lookahead, "Lookahead({k})");
             }
+            let unpruned = to_expr_tree(
+                &mut store,
+                spp,
+                SplitHeuristic::LookaheadTop { depth: 4, width: 5 },
+            );
+            assert_eq!(expr_size(&exhaustive), expr_size(&unpruned));
             // More lookahead never hurts
             let sizes: Vec<usize> = (0..=4)
                 .map(|k| expr_size(&to_expr_tree(&mut store, spp, SplitHeuristic::Lookahead(k))))
                 .collect();
             assert!(sizes.windows(2).all(|w| w[1] <= w[0]), "{sizes:?}");
+        }
+    }
+
+    #[test]
+    fn entropy_shortlist_preserves_relation_when_fields_are_pruned() {
+        let mut aut = crate::aut::Aut::new(6);
+        for _ in 0..30 {
+            let spp = aut.spp_store_mut().rand();
+            for width in [1, 2, 5] {
+                let expr = to_expr_tree(
+                    aut.spp_store_mut(),
+                    spp,
+                    SplitHeuristic::LookaheadTop { depth: 1, width },
+                );
+                let state = aut.expr_to_state(&expr);
+                assert_eq!(aut.epsilon(state), spp, "width={width}: {expr}");
+            }
         }
     }
 
@@ -666,6 +734,9 @@ mod tests {
                 SplitHeuristic::Size,
                 SplitHeuristic::Entropy,
                 SplitHeuristic::Lookahead(1),
+                SplitHeuristic::LookaheadTop { depth: 1, width: 2 },
+                SplitHeuristic::LookaheadTop { depth: 1, width: 3 },
+                SplitHeuristic::LookaheadTop { depth: 1, width: 5 },
                 SplitHeuristic::Lookahead(2),
                 SplitHeuristic::Lookahead(3),
                 SplitHeuristic::Lookahead(4),

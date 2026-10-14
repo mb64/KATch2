@@ -176,6 +176,65 @@ decisions and total runtime fall: fewer calls and less model/extraction work
 matter as well as SAT search. Min-cut with both frontiers lowers pigeonhole 4's
 SAT search time further, but increases model and congruence overhead.
 
+## Symbolic upper-bound comparison
+
+A single SPP hole equal to the 64-field all-zero packet test (`x0 == 0; ...;
+x63 == 0`) illustrates the benefit of symbolic negative evidence. Seven
+alternating release CLI runs compared the previous binary with symbolic
+upper-bound learning, with instrumentation enabled and a 1,000-round cap.
+Every run reported SAT, and the new solution passed the separate checker.
+
+| Measurement | Previous | Symbolic upper bound |
+| --- | ---: | ---: |
+| CEGIS rounds / SAT calls | 66 / 66 | 3 / 3 |
+| Concrete abstract clauses | 65 | 1 |
+| Symbolic forbidden regions | 0 | 1 |
+| Checking, learning, extraction, and candidate installation | 25.4 ms | 1.4 ms |
+| CLI wall time | 1.156 s | 1.134 s |
+
+Timings are medians. The loop timing excludes its initial empty extraction;
+work outside the loop dominates the wall time for this case. A subsequent
+Samply profile attributes 99% of samples to `spp::reduce::to_expr_tree`, which
+converts the solved SPP into a printable expression. The CLI currently does
+this even when no output file is requested. This cost occurs after synthesis,
+not during setup. The profile is saved locally as
+`out/profiles/symbolic-upper64.samply.json.gz` with its `.syms.json` companion.
+The old binary
+needs a separate negative packet example for each field. The new binary learns
+the entire complement of the test as negative evidence in one upper-bound
+refinement. Its positive SAT example already lies outside the forbidden region,
+so this case does not require lazy universal SAT instantiation; the exhaustive
+solver tests cover that separately.
+
+Local artifacts: `out/profiles/symbolic-upper64.nksynth`,
+`out/profiles/symbolic-upper64.sol`, and
+`out/profiles/symbolic-upper64-benchmark.json`.
+
+## Entropy shortlist for expression conversion
+
+The default SPP expression converter now uses
+`SplitHeuristic::LookaheadTop { depth: 1, width: 5 }`: score every candidate
+field by entropy, complete trees for the best five, and retain the smallest.
+Partial selection keeps shortlist construction linear in the number of fields;
+equal entropy scores are ordered by field number. The original unrestricted
+`Lookahead(1)` remains available through `to_expr_tree` for comparisons.
+
+Seven alternating release CLI runs on the same 64-field example above, without
+instrumentation, measured:
+
+| Expression search | Median CLI wall time |
+| --- | ---: |
+| Every first field | 1.097 s |
+| Five lowest-entropy first fields | 0.048 s |
+
+The resulting expressions were identical (761 bytes), and the new solution
+passed the separate checker. This is about a 23x speedup for this case. Pruning
+can produce larger expressions on other inputs; it preserves their semantics.
+Round-trip tests exercise shortlist widths 1, 2, and 5 on six-field relations,
+and verify that width 1 agrees with entropy and an unpruned shortlist recovers
+exhaustive expression size. Raw times are saved locally in
+`out/profiles/top-five-lookahead-benchmark.json`.
+
 ## Notes
 
 - The native learner uses incremental CaDiCaL through RustSAT. Criterion's
