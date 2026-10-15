@@ -1,9 +1,10 @@
 //! Boolean bitblasting with an incremental RustSAT/CaDiCaL backend.
 
+use rand::{RngExt, rngs::StdRng};
 use std::collections::HashMap;
 
 use rustsat::{
-    solvers::{GetInternalStats, Solve, SolverResult},
+    solvers::{GetInternalStats, PhaseLit, Solve, SolverResult},
     types::{Clause, Lit, TernaryVal},
 };
 use rustsat_cadical::CaDiCaL;
@@ -14,6 +15,7 @@ pub(super) const FALSE: Lit = Lit::negative(0);
 
 pub(super) struct Sat {
     solver: CaDiCaL<'static, 'static>,
+    phase_rng: Option<StdRng>,
     next_var: u32,
     gates: HashMap<(Lit, Lit, Lit), Lit>,
     metrics: crate::holes::metrics::Metrics,
@@ -31,18 +33,42 @@ impl Model {
 impl Sat {
     pub(super) fn new() -> Self {
         let mut solver = CaDiCaL::default();
+        let phase_rng = crate::experiment::sat_parameters().map(|(seed, rng)| {
+            solver.set_option("seed", seed).expect("set CaDiCaL seed");
+            rng
+        });
         solver.add_unit(TRUE).expect("assert Boolean constant");
         Self {
             solver,
+            phase_rng,
             next_var: 1,
             gates: HashMap::new(),
             metrics: crate::holes::metrics::Metrics::new("sat"),
         }
     }
 
+    pub(super) fn checkpoint(&self) {
+        self.metrics.checkpoint();
+        if self.metrics.enabled() {
+            eprintln!(
+                "KATCH2_CHECKPOINT_SAT_STATS variables={} conflicts={} decisions={} propagations={}",
+                self.next_var,
+                self.solver.conflicts(),
+                self.solver.decisions(),
+                self.solver.propagations()
+            );
+        }
+    }
+
     pub(super) fn fresh(&mut self) -> Lit {
         let lit = Lit::positive(self.next_var);
         self.next_var += 1;
+        if let Some(rng) = &mut self.phase_rng {
+            let preferred = if rng.random::<bool>() { lit } else { !lit };
+            self.solver
+                .phase_lit(preferred)
+                .expect("set CaDiCaL phase preference");
+        }
         lit
     }
 
@@ -212,5 +238,30 @@ mod tests {
         sat.clause([!unused]);
         assert!(sat.solve().is_none());
         assert!(sat.solve().is_none());
+    }
+}
+
+#[cfg(test)]
+mod randomized_tests {
+    use super::*;
+    #[test]
+    fn preferred_phases_preserve_incremental_constraints() {
+        for seed in 0..32 {
+            crate::experiment::with_seed(seed, || {
+                let mut sat = Sat::new();
+                let x = sat.fresh();
+                let y = sat.fresh();
+                sat.clause([x, y]);
+                sat.clause([!x, !y]);
+                let model = sat.solve().unwrap();
+                assert_ne!(model.value(x), model.value(y));
+                sat.clause([x]);
+                let model = sat.solve().unwrap();
+                assert!(model.value(x));
+                assert!(!model.value(y));
+                sat.clause([!x]);
+                assert!(sat.solve().is_none());
+            });
+        }
     }
 }

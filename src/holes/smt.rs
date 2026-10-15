@@ -180,6 +180,9 @@ impl std::fmt::Display for InconsistentError {
 /// `'a` is the lifetime of the [`ExplicitDFA`]s that [`Cand`] slots predicate
 /// over.
 pub trait SmtLearner<'a> {
+    /// Emit a cumulative experiment snapshot, including the SAT backend.
+    fn checkpoint(&self) {}
+
     /// Create a learner for packets with `num_vars` fields.
     fn new(num_vars: Var) -> Self
     where
@@ -264,6 +267,7 @@ pub struct Native<'a> {
     clauses: Vec<Vec<TrackedLit>>,
     forbidden: Vec<Option<SPP>>,
     metrics: crate::holes::metrics::Metrics,
+    candidate_stats: crate::holes::candidate_stats::CandidateStats,
 }
 
 /// Compatibility name for callers of the former Z3 backend.
@@ -271,6 +275,11 @@ pub struct Native<'a> {
 pub type Z3<'a> = Native<'a>;
 
 impl<'a> SmtLearner<'a> for Native<'a> {
+    fn checkpoint(&self) {
+        self.metrics.checkpoint();
+        self.solver.checkpoint();
+    }
+
     fn new(num_vars: Var) -> Self {
         Self {
             num_vars,
@@ -283,6 +292,7 @@ impl<'a> SmtLearner<'a> for Native<'a> {
             clauses: Vec::new(),
             forbidden: Vec::new(),
             metrics: crate::holes::metrics::Metrics::new("native"),
+            candidate_stats: crate::holes::candidate_stats::CandidateStats::new(),
         }
     }
 
@@ -416,16 +426,41 @@ impl<'a> SmtLearner<'a> for Native<'a> {
         self.metrics.add("extractions", 1);
         let model = self.solve(spp_store)?;
         let started = self.metrics.start();
+        let selection_started = self.metrics.start();
         let mut examples = self.select_examples(&model, flags::example_cover());
+        let selection_ns = selection_started.map_or(0, |t| t.elapsed().as_nanos());
+        self.metrics
+            .add("example_selection_ns", selection_ns as u64);
 
         // SPP slots.  A slot with no selected literals gets no examples and
         // learns the empty SPP.
         let mut spps = HashMap::with_capacity(self.num_spps as usize);
         for idx in 0..self.num_spps {
             let exs = examples.spps.remove(&idx).unwrap_or_default();
+            let positive = if self.candidate_stats.enabled() {
+                exs.iter().filter(|e| e.in_spp).count()
+            } else {
+                0
+            };
+            let negative = exs.len() - positive;
+            let spp_started = self.metrics.start();
             let forbidden = self.forbidden[idx as usize].unwrap_or(spp_store.zero);
             let spp = learn_spp_with_forbidden(exs, forbidden, spp_store)
                 .expect("native model is internally consistent");
+            let learning_ns = spp_started.map_or(0, |t| t.elapsed().as_nanos());
+            self.metrics.add("spp_learning_ns", learning_ns as u64);
+            let size_started = self.metrics.start();
+            self.candidate_stats.record(
+                idx,
+                spp,
+                self.forbidden[idx as usize],
+                spp_store,
+                positive,
+                negative,
+                selection_ns,
+                learning_ns,
+            );
+            self.metrics.elapsed("candidate_size_ns", size_started);
             spps.insert(SppVar(idx), spp);
         }
 
@@ -439,6 +474,7 @@ impl<'a> SmtLearner<'a> for Native<'a> {
         }
 
         self.metrics.elapsed("candidate_build_ns", started);
+        self.candidate_stats.next();
         Ok(Solution { spps, cands })
     }
 }

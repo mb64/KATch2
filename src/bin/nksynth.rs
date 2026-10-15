@@ -23,6 +23,7 @@ use katch2::holes::cegis::CegisError;
 use katch2::holes::minimize;
 use katch2::holes::parser::{Program, Stmt, desugar, fill_holes, parse_program};
 use katch2::printer::pretty;
+use rand::RngExt;
 
 /// Large topologies can produce deeply recursive NetKAT expressions during
 /// automaton construction, which can overflow the default ~8MB main-thread
@@ -31,11 +32,29 @@ const STACK_SIZE: usize = 1 << 30; // 1 GiB
 
 /// Solve NetKAT synthesis (`.nksynth`) problems, reporting SAT or UNSAT.
 #[derive(Parser)]
-#[command(name = "nksynth", version, about)]
+#[command(name = "nksynth", version = env!("NKSYNTH_VERSION"), about)]
 struct Cli {
     /// `.nksynth` file(s) to solve.
     #[arg(required = true, value_name = "FILE")]
     files: Vec<PathBuf>,
+
+    /// Master seed for independent SAT, merge, and check-order random streams.
+    /// Omit to choose a fresh seed; the seed and substream seeds are logged.
+    #[arg(long, value_name = "SEED")]
+    seed: Option<u64>,
+
+    /// Learn only concrete upper-bound clauses; skip symbolic restrictions.
+    #[arg(long)]
+    no_symbolic_upper: bool,
+
+    /// Write one CSV row per candidate guess and SPP slot (single input only).
+    #[arg(long, value_name = "FILE")]
+    candidate_stats: Option<PathBuf>,
+
+    /// Emit cumulative KATCH2_METRICS snapshots every N rounds (0 disables).
+    /// Requires KATCH2_METRICS=1.
+    #[arg(long, default_value_t = 256, value_name = "N")]
+    stats_interval: usize,
 
     /// Use the full solver (holes may emit `dup`).
     #[arg(long)]
@@ -106,6 +125,10 @@ fn run() -> ExitCode {
         katch2::flags::set_example_cover(false);
     }
 
+    if cli.files.len() > 1 && cli.candidate_stats.is_some() {
+        eprintln!("error: --candidate-stats requires a single input file");
+        return ExitCode::FAILURE;
+    }
     if cli.files.len() > 1 {
         if cli.output.is_some() {
             eprintln!("error: --output can only be used with a single input file");
@@ -136,6 +159,21 @@ fn run() -> ExitCode {
 
     let mut exit = ExitCode::SUCCESS;
     for path in &cli.files {
+        let seed = cli.seed.unwrap_or_else(|| rand::rng().random());
+        let mut config = katch2::experiment::Config::new(seed);
+        config.symbolic_upper = !cli.no_symbolic_upper;
+        config.candidate_stats = cli.candidate_stats.clone();
+        config.stats_interval = cli.stats_interval;
+        let seeds = katch2::experiment::configure(config);
+        eprintln!(
+            "KATCH2_RANDOM seed={} sat_seed={} phase_seed={} merge_seed={} check_seed={} symbolic_upper={}",
+            seeds.master,
+            seeds.sat,
+            seeds.phases,
+            seeds.merges,
+            seeds.checks,
+            !cli.no_symbolic_upper
+        );
         match solve_file(path, full, cli.iteration_limit) {
             Ok((verdict, solution)) => {
                 println!("{verdict}");
@@ -234,4 +272,28 @@ fn check_file(
 fn read_program(path: &Path) -> Result<Program, String> {
     let src = fs::read_to_string(path).map_err(|e| format!("could not read file: {e}"))?;
     parse_program(&src).map_err(|e| format!("parse error: {}", e.message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parses_experiment_controls() {
+        let cli = Cli::try_parse_from([
+            "nksynth",
+            "--seed",
+            "18446744073709551615",
+            "--no-symbolic-upper",
+            "--candidate-stats",
+            "guesses.csv",
+            "--stats-interval",
+            "32",
+            "input.nksynth",
+        ])
+        .unwrap();
+        assert_eq!(cli.seed, Some(u64::MAX));
+        assert!(cli.no_symbolic_upper);
+        assert_eq!(cli.stats_interval, 32);
+        assert!(Cli::try_parse_from(["nksynth", "--seed", "-1", "input.nksynth"]).is_err());
+    }
 }

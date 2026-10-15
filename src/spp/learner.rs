@@ -5,43 +5,16 @@
 //! returns an [`SPP`] consistent with all of them, or [`ConflictError`] if two
 //! examples give the same pair opposite labels.
 //!
-//! # Method (trie + RPNI-style per-level merging)
+//! # Method
 //!
-//! An [`SPP`] over `n` fields is an order-`n` decision diagram: level `i` is a
-//! 4-way branch on the `(input[i], output[i])` bit pair, terminating in
-//! accept/reject.  We build it in three steps:
+//! Finite examples are compiled into shared positive and negative SPPs. Symbolic
+//! forbidden regions join the negative evidence. The same DAG learner handles
+//! both modes without expanding relations into a tree of packet pairs.
 //!
-//! 1. **Trie.** Insert every example's length-`n` *decision path* —
-//!    `2*input[i] + output[i]` at field `i` — into a 4-ary trie, leaves carrying
-//!    the accept/reject label.  This computes *all* the prefix partitions in one
-//!    pass: a node at depth `d` is exactly the set of examples sharing that
-//!    length-`d` prefix, and a shared prefix is walked only once.  A leaf reached
-//!    with two different labels is a [`ConflictError`].
-//! 2. **Per-level merging (RPNI-style).** Sweep the trie top-down, one level at
-//!    a time.  The nodes at depth `d` are the length-`d` prefix cells of the
-//!    examples; two cells are *compatible* when their suffix evidence never
-//!    conflicts, i.e. no decision path both exercise ends in different labels.
-//!    Each node is greedily merged into the first compatible class at its
-//!    level, unioning the two subtrees, so evidence pooled at one level narrows
-//!    the don't-cares at every level below.
-//! 3. **Bottom-up fold.** Walk the merged levels leaves-first: a leaf class
-//!    becomes its accept (`1`) / reject (`0`) terminal; a branch class becomes
-//!    [`SPPstore::mk`] of its four children, with don't-care branches (those no
-//!    example exercises) filled heuristically — the eager generalization.
-//!    Hash-consing in `mk` collapses any identical classes the greedy merge
-//!    missed.
-//!
-//! Building the trie first means each partition is computed once instead of being
-//! re-derived at every level.  Merging only unions non-conflicting evidence and
-//! fills only touch branches no example exercises, so an example's own path is
-//! never redirected: the result accepts every positive example and rejects every
-//! negative one, and the generalization only touches inputs no example pins down.
-//!
-//! [`learn_spp_with_forbidden`] also accepts a symbolic negative relation.
-//! [`learn_spp_from_relations`] performs the same level-by-level merging over
-//! paired positive/negative decision diagrams. Evidence unions are immutable
-//! and hash-consed; identical suffix cells are processed once per level, and
-//! compatibility uses memoized diagram intersection instead of unfolding paths.
+//! At each field level, greedily merge compatible evidence cells and fold the
+//! resulting graph bottom-up. Configured experiments shuffle incoming cells
+//! and merge-target order. Compatibility preserves all positive and negative
+//! requirements; final unspecified branches use the existing heuristic.
 
 use super::{SPP, SPPstore};
 use std::collections::HashMap;
@@ -75,73 +48,9 @@ impl std::fmt::Display for ConflictError {
 /// labels).  With no examples the result is the empty SPP.
 pub fn learn_spp(
     examples: impl IntoIterator<Item = Example>,
-    spp_store: &mut SPPstore,
+    store: &mut SPPstore,
 ) -> Result<SPP, ConflictError> {
-    let nv = spp_store.num_vars() as usize;
-    let examples: Vec<Example> = examples.into_iter().collect();
-
-    // No evidence anywhere → reject everything.
-    if examples.is_empty() {
-        return Ok(spp_store.zero);
-    }
-
-    // Zero-field packets: every example is the single empty pair, so they must
-    // all agree (there is no trie level to disambiguate them).
-    if nv == 0 {
-        let label = examples[0].in_spp;
-        if examples.iter().any(|ex| ex.in_spp != label) {
-            return Err(ConflictError);
-        }
-        return Ok(SPP::new(label as u32));
-    }
-
-    // Step 1: build the decision-path trie (node 0 is the root).  Each example's
-    // path is `2*input[i] + output[i]` at field `i`; this computes every prefix
-    // partition in one pass.  A leaf reached with two labels is a conflict.
-    let mut trie: Vec<TrieNode> = vec![TrieNode::Branch([None; 4])];
-    for ex in &examples {
-        assert_eq!(ex.input.len(), nv, "example input has wrong width");
-        assert_eq!(ex.output.len(), nv, "example output has wrong width");
-        let mut cur = 0usize;
-        for (d, (&inp, &outp)) in ex.input.iter().zip(&ex.output).enumerate() {
-            let b = 2 * inp as usize + outp as usize;
-            let is_last = d + 1 == nv;
-            let next = match trie[cur] {
-                TrieNode::Branch(children) => children[b],
-                TrieNode::Leaf(_) => unreachable!("path longer than trie depth"),
-            };
-            match next {
-                Some(nx) => {
-                    if is_last
-                        && let TrieNode::Leaf(prev) = trie[nx as usize]
-                        && prev != ex.in_spp
-                    {
-                        return Err(ConflictError);
-                    }
-                    cur = nx as usize;
-                }
-                None => {
-                    let id = trie.len() as u32;
-                    trie.push(if is_last {
-                        TrieNode::Leaf(ex.in_spp)
-                    } else {
-                        TrieNode::Branch([None; 4])
-                    });
-                    // Re-borrow after the push (which may have reallocated).
-                    if let TrieNode::Branch(children) = &mut trie[cur] {
-                        children[b] = Some(id);
-                    }
-                    cur = id as usize;
-                }
-            }
-        }
-    }
-
-    // Step 2: RPNI-style merging of compatible prefix cells, level by level.
-    let levels = merge_levels(&mut trie, nv);
-
-    // Step 3: fold the merged levels bottom-up into an SPP.
-    Ok(build_spp(&trie, &levels, spp_store))
+    learn_spp_with_forbidden(examples, store.zero, store)
 }
 
 /// Learn from concrete examples and an entire symbolic region of negative
@@ -151,9 +60,6 @@ pub fn learn_spp_with_forbidden(
     forbidden: SPP,
     store: &mut SPPstore,
 ) -> Result<SPP, ConflictError> {
-    if store.is_zero(forbidden) {
-        return learn_spp(examples, store);
-    }
     let mut positive = store.zero;
     let mut negative = forbidden;
     for ex in examples {
@@ -182,6 +88,7 @@ pub fn learn_spp_from_relations(
     negative: SPP,
     store: &mut SPPstore,
 ) -> Result<SPP, ConflictError> {
+    measure_relations(positive, negative, store);
     let overlap = store.intersect(positive, negative);
     if !store.is_zero(overlap) {
         return Err(ConflictError);
@@ -202,51 +109,64 @@ pub fn learn_spp_from_relations(
     for depth in 0..nv {
         let mut classes = Vec::<u32>::new();
         let mut assigned = HashMap::<(SPP, SPP), u32>::new();
+        let mut slots = Vec::new();
         for &parent in &levels[depth] {
             let (pos, neg) = evidence[parent as usize];
             let p = store.get(pos);
             let n = store.get(neg);
-            let children = [p.x00, p.x01, p.x10, p.x11]
+            for (branch, (pos, neg)) in [p.x00, p.x01, p.x10, p.x11]
                 .into_iter()
-                .zip([n.x00, n.x01, n.x10, n.x11]);
-            for (branch, (pos, neg)) in children.enumerate() {
+                .zip([n.x00, n.x01, n.x10, n.x11])
+                .enumerate()
+            {
                 if store.is_zero(pos) && store.is_zero(neg) {
                     continue;
                 }
-                let child = if let Some(&id) = assigned.get(&(pos, neg)) {
+                slots.push((parent, branch, pos, neg));
+            }
+        }
+        crate::experiment::shuffle(&mut slots);
+        for (parent, branch, pos, neg) in slots {
+            let child = if let Some(&id) = assigned.get(&(pos, neg)) {
+                id
+            } else {
+                let mut targets = classes.clone();
+                crate::experiment::shuffle(&mut targets);
+                let compatible = targets.into_iter().find(|&id| {
+                    let (p, n) = evidence[id as usize];
+                    let pn = store.intersect(p, neg);
+                    let np = store.intersect(n, pos);
+                    store.is_zero(pn) && store.is_zero(np)
+                });
+                let id = if let Some(id) = compatible {
+                    let (p, n) = evidence[id as usize];
+                    evidence[id as usize] = (store.union(p, pos), store.union(n, neg));
                     id
                 } else {
-                    let compatible = classes.iter().copied().find(|&id| {
-                        let (p, n) = evidence[id as usize];
-                        let pn = store.intersect(p, neg);
-                        let np = store.intersect(n, pos);
-                        store.is_zero(pn) && store.is_zero(np)
-                    });
-                    let id = if let Some(id) = compatible {
-                        let (p, n) = evidence[id as usize];
-                        evidence[id as usize] = (store.union(p, pos), store.union(n, neg));
-                        id
+                    let id = trie.len() as u32;
+                    evidence.push((pos, neg));
+                    trie.push(if depth + 1 == nv {
+                        TrieNode::Leaf(pos == SPP::new(1))
                     } else {
-                        let id = trie.len() as u32;
-                        evidence.push((pos, neg));
-                        trie.push(if depth + 1 == nv {
-                            TrieNode::Leaf(pos == SPP::new(1))
-                        } else {
-                            TrieNode::Branch([None; 4])
-                        });
-                        classes.push(id);
-                        id
-                    };
-                    assigned.insert((pos, neg), id);
+                        TrieNode::Branch([None; 4])
+                    });
+                    classes.push(id);
                     id
                 };
-                if let TrieNode::Branch(children) = &mut trie[parent as usize] {
-                    children[branch] = Some(child);
-                }
+                assigned.insert((pos, neg), id);
+                id
+            };
+            if let TrieNode::Branch(children) = &mut trie[parent as usize] {
+                children[branch] = Some(child);
             }
         }
         levels.push(classes);
     }
+    INPUT_SIZES.with(|s| {
+        let mut sizes = s.get();
+        sizes[4] = levels.iter().map(Vec::len).sum();
+        s.set(sizes);
+    });
     Ok(build_spp(&trie, &levels, store))
 }
 
@@ -256,82 +176,6 @@ pub fn learn_spp_from_relations(
 enum TrieNode {
     Branch([Option<u32>; 4]),
     Leaf(bool),
-}
-
-/// Merge compatible trie nodes level by level, top-down (RPNI-style).
-///
-/// The nodes at depth `d` are the prefix cells of the examples; each level is
-/// swept in order, greedily merging every node into the first [`compatible`]
-/// class found at that level (unioning the subtrees and redirecting the parent
-/// edge), or starting a new class.  Pooled evidence at one level narrows the
-/// don't-cares at every level below.  The result is a layered DAG; returns the
-/// surviving class nodes per level, root (depth 0) first.
-fn merge_levels(trie: &mut [TrieNode], nv: usize) -> Vec<Vec<u32>> {
-    let mut levels: Vec<Vec<u32>> = Vec::with_capacity(nv + 1);
-    levels.push(vec![0]);
-    for d in 0..nv {
-        // Gather the populated (parent, branch, child) slots feeding depth d+1.
-        let mut slots: Vec<(u32, usize, u32)> = Vec::new();
-        for &p in &levels[d] {
-            if let TrieNode::Branch(children) = trie[p as usize] {
-                for (b, child) in children.iter().enumerate() {
-                    if let Some(n) = child {
-                        slots.push((p, b, *n));
-                    }
-                }
-            }
-        }
-        let mut classes: Vec<u32> = Vec::new();
-        for (p, b, n) in slots {
-            match classes
-                .iter()
-                .copied()
-                .find(|&c| compatible(trie, c as usize, n as usize))
-            {
-                Some(c) => {
-                    merge(trie, c as usize, n as usize);
-                    if let TrieNode::Branch(children) = &mut trie[p as usize] {
-                        children[b] = Some(c);
-                    }
-                }
-                None => classes.push(n),
-            }
-        }
-        levels.push(classes);
-    }
-    levels
-}
-
-/// Do two same-depth subtrees agree on every decision path they both exercise?
-fn compatible(trie: &[TrieNode], a: usize, b: usize) -> bool {
-    match (trie[a], trie[b]) {
-        (TrieNode::Leaf(la), TrieNode::Leaf(lb)) => la == lb,
-        (TrieNode::Branch(ca), TrieNode::Branch(cb)) => {
-            ca.iter().zip(&cb).all(|(x, y)| match (x, y) {
-                (Some(x), Some(y)) => compatible(trie, *x as usize, *y as usize),
-                _ => true,
-            })
-        }
-        _ => unreachable!("compatibility check across depths"),
-    }
-}
-
-/// Union subtree `b` into `a` (same depth, already checked [`compatible`]).
-/// `b` becomes unreachable afterwards.
-fn merge(trie: &mut [TrieNode], a: usize, b: usize) {
-    let (ca, cb) = match (trie[a], trie[b]) {
-        (TrieNode::Branch(ca), TrieNode::Branch(cb)) => (ca, cb),
-        _ => return, // leaves: labels already known to agree
-    };
-    let mut merged = ca;
-    for (slot, y) in merged.iter_mut().zip(cb) {
-        match (*slot, y) {
-            (Some(x), Some(y)) => merge(trie, x as usize, y as usize),
-            (None, Some(y)) => *slot = Some(y),
-            _ => {}
-        }
-    }
-    trie[a] = TrieNode::Branch(merged);
 }
 
 /// Fold the merged, layered trie into an [`SPP`], one whole level at a time
@@ -618,5 +462,79 @@ mod tests {
             learn_spp_from_relations(zero, one, &mut store).unwrap(),
             zero
         );
+    }
+}
+
+// Opt-in experiment measurements of actual learner evidence.
+thread_local! {
+    static INPUT_SIZES: std::cell::Cell<[usize; 5]> = const { std::cell::Cell::new([0; 5]) };
+}
+pub(crate) fn input_sizes() -> [usize; 5] {
+    INPUT_SIZES.with(|s| s.get())
+}
+fn measure_relations(positive: SPP, negative: SPP, store: &SPPstore) {
+    if !crate::experiment::candidate_stats_enabled() {
+        return;
+    }
+    fn visit(root: SPP, store: &SPPstore, seen: &mut std::collections::BTreeSet<SPP>) {
+        if !seen.insert(root) || root.as_u32() <= 1 {
+            return;
+        }
+        let n = store.get(root);
+        for c in [n.x00, n.x01, n.x10, n.x11] {
+            visit(c, store, seen);
+        }
+    }
+    let mut p = std::collections::BTreeSet::new();
+    let mut n = std::collections::BTreeSet::new();
+    visit(positive, store, &mut p);
+    visit(negative, store, &mut n);
+    let sizes = [p.len(), n.len(), p.union(&n).count(), 0, 0];
+    INPUT_SIZES.with(|s| s.set(sizes));
+}
+
+#[cfg(test)]
+mod randomized_tests {
+    use super::*;
+    use rand::{RngExt, SeedableRng};
+    #[test]
+    fn random_merge_orders_preserve_finite_requirements() {
+        for seed in 0..16 {
+            crate::experiment::with_seed(seed, || {
+                let mut rng = rand::rngs::StdRng::seed_from_u64(123);
+                for _ in 0..24 {
+                    let mut store = SPPstore::new(3);
+                    let mut examples = Vec::new();
+                    for i in 0..8 {
+                        for o in 0..8 {
+                            let label = rng.random_range(0..4);
+                            if label < 2 {
+                                examples.push(Example {
+                                    input: (0..3).map(|b| i & (1 << b) != 0).collect(),
+                                    output: (0..3).map(|b| o & (1 << b) != 0).collect(),
+                                    in_spp: label == 1,
+                                });
+                            }
+                        }
+                    }
+                    let result = learn_spp(
+                        examples.iter().map(|e| Example {
+                            input: e.input.clone(),
+                            output: e.output.clone(),
+                            in_spp: e.in_spp,
+                        }),
+                        &mut store,
+                    )
+                    .unwrap();
+                    for e in examples {
+                        assert_eq!(
+                            store.accepts(result, &e.input, &e.output),
+                            e.in_spp,
+                            "seed={seed}"
+                        );
+                    }
+                }
+            });
+        }
     }
 }

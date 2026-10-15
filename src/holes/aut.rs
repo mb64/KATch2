@@ -4,6 +4,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 
+mod upper;
+pub use upper::get_upper_bound_counterexample;
+
 /// Nondeterministic symbolic NetKAT automaton with epsilon transitions.
 ///
 /// Every automaton has a single distinguished start state.  The first packet
@@ -2278,6 +2281,76 @@ mod tests {
                 trial, dfa_empty, closure_empty
             );
         }
+    }
+
+    #[test]
+    fn direct_upper_check_matches_closure_and_returns_full_witnesses() {
+        crate::fuzz::seed_fuzzer(0xEFA_2026);
+        for trial in 0..500 {
+            let mut arena = crate::aut::Aut::new(2);
+            let nfa = random_nfa(&mut arena, 3, 2);
+            let upper = random_dfa(&mut arena, 3, 2);
+            let store = arena.spp_store_mut();
+            let old = ops::intersection(&nfa, ops::complement(&upper));
+            let empty = is_empty(&old, store);
+            let result = get_upper_bound_counterexample(nfa.inner(), &upper, store);
+            assert_eq!(result.is_none(), empty, "trial {trial}");
+            if let Some((path, output)) = result {
+                let raw = nfa.inner();
+                assert_eq!(path[0].0, raw.start(store));
+                for pair in path.windows(2) {
+                    assert!(
+                        raw.transitions(store, &pair[0].0).iter().any(|(r, q)| {
+                            *q == pair[1].0 && store.accepts(*r, &pair[0].1, &pair[1].1)
+                        }),
+                        "invalid full-path edge on trial {trial}"
+                    );
+                }
+                let last = path.last().unwrap();
+                let relation = raw.output(store, &last.0);
+                assert!(store.accepts(relation, &last.1, &output));
+                let trace: Vec<_> = path
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, (q, p))| {
+                        (i == 0 || raw.is_visible(store, q)).then_some(p.clone())
+                    })
+                    .collect();
+                assert!(nfa.nfa_accepts(store, &trace, &output));
+                assert!(!upper.nfa_accepts(store, &trace, &output));
+            }
+        }
+    }
+
+    #[test]
+    fn direct_upper_check_preserves_visible_anchor_through_packet_changes() {
+        let mut store = spp::SPPstore::new(1);
+        let set = store.assign(0, true);
+        let raw = RandomVisibility {
+            inner: ExplicitDFA {
+                start: 0,
+                transitions: vec![vec![(set, 1)], vec![(store.one, 2)], vec![]],
+                outputs: vec![store.zero, store.zero, store.one],
+            },
+            visible: vec![false, false, true],
+        };
+        let exact = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(set, 1)], vec![]],
+            outputs: vec![store.zero, store.one],
+        };
+        assert!(get_upper_bound_counterexample(&raw, &exact, &mut store).is_none());
+        let identity = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(store.one, 1)], vec![]],
+            outputs: vec![store.zero, store.one],
+        };
+        let (path, output) = get_upper_bound_counterexample(&raw, &identity, &mut store).unwrap();
+        assert_eq!(
+            path,
+            vec![(0, vec![false]), (1, vec![true]), (2, vec![true])]
+        );
+        assert_eq!(output, vec![true]);
     }
 
     #[test]

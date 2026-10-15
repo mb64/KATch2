@@ -6,7 +6,8 @@
 //! `RefCell`, the same trick `EpsilonClosure` uses for its memo table.
 
 use crate::holes::aut::{
-    DFA, ENFA, EpsilonClosure, NFA, SubsetDfa, get_any_trace_with_states, ops,
+    DFA, ENFA, EpsilonClosure, NFA, SubsetDfa, get_any_trace_with_states,
+    get_upper_bound_counterexample, ops,
 };
 use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Hole, State as OuterState};
 use crate::spp;
@@ -120,26 +121,11 @@ impl<Inner: NFA> Instantiate<Inner> {
         store: &mut spp::SPPstore,
         upper_bound: &U,
     ) -> Result<(), UpperBoundCounterexample<Inner::State>> {
-        // Build the product NFA `self ∩ complement(upper_bound)`, extract a
-        // visible trace from it, elaborate the trace through the underlying
-        // `AutWithHoles` to recover invisible intermediates, then walk every
-        // transition and the final output to collect abstract labels.
-        let self_nfa = EpsilonClosure::new(self);
-        let complement_ub = ops::complement(upper_bound);
-        let product = ops::intersection(&self_nfa, &complement_ub);
-
-        let Some((visible_path, output_pkt)) = get_any_trace_with_states(&product, store) else {
+        let Some((full_path, output_pkt)) =
+            get_upper_bound_counterexample(self, upper_bound, store)
+        else {
             return Ok(());
         };
-        // Project onto the self-side state component.
-        let self_visible_path: Vec<(State<_>, Vec<bool>)> = visible_path
-            .into_iter()
-            .map(|((q_self, _q_ub), p)| (q_self, p))
-            .collect();
-
-        // Splice the invisible intermediates back in.
-        let full_path: Vec<(State<_>, Vec<bool>)> =
-            self_nfa.elaborate_trace(store, &self_visible_path, &output_pkt);
 
         let witnesses = self.holes_used_in_trace(store, &full_path, &output_pkt);
         Err(UpperBoundCounterexample {

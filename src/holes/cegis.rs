@@ -82,8 +82,8 @@ impl Constraint {
     /// for a lower-bound one — and returns `false`. Lower-bound violations
     /// learn the forward frontier, plus the backward frontier and min-cut
     /// clauses when [`flags::lb_backward`] and [`flags::lb_mincut`] are enabled.
-    /// An [`Constraint::Equality`] that fails its upper-bound check stops
-    /// before checking the lower bound.
+    /// Equality checks randomize which bound is checked first and stop at
+    /// the first counterexample.
     fn check<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
         &self,
         inst: &mut Instantiate<C>,
@@ -91,39 +91,75 @@ impl Constraint {
         learner: &mut L,
         store: &mut spp::SPPstore,
         reference_dfa: &'a ExplicitDFA,
+        metrics: &mut crate::holes::metrics::Metrics,
     ) -> bool {
         let dfa = self.dfa();
-
-        // Upper-bound half: `aut[candidate] ⊆ dfa`.
-        if matches!(
-            self,
-            Constraint::UpperBound { .. } | Constraint::Equality { .. }
-        ) && let Err(cex) = inst.check_upper_bound(store, dfa)
-        {
-            if cex.witnesses.len() == 1 {
-                let (hole, (input, inner, output)) = &cex.witnesses[0];
-                if let Literal::Spp { spp, .. } =
-                    C::reject_literal(hole_to_var[hole], input, inner, output)
-                    && let Some(forbidden) = inst::upper_bound_forbidden(inst, &cex, dfa, store)
-                {
-                    debug_assert!(store.accepts(forbidden, input, output));
-                    learner.forbid_spp(spp, forbidden, store);
+        let lower_first =
+            matches!(self, Constraint::Equality { .. }) && crate::experiment::positive_first();
+        if matches!(self, Constraint::Equality { .. }) {
+            metrics.add(
+                if lower_first {
+                    "positive_first_rounds"
+                } else {
+                    "negative_first_rounds"
+                },
+                1,
+            );
+        }
+        for upper in if lower_first {
+            [false, true]
+        } else {
+            [true, false]
+        } {
+            if upper
+                && matches!(
+                    self,
+                    Constraint::UpperBound { .. } | Constraint::Equality { .. }
+                )
+            {
+                metrics.add("negative_checks", 1);
+                let started = metrics.start();
+                let result = inst.check_upper_bound(store, dfa);
+                metrics.elapsed("check_upper_ns", started);
+                if let Err(cex) = result {
+                    metrics.add("negative_counterexamples", 1);
+                    if crate::experiment::symbolic_upper() && cex.witnesses.len() == 1 {
+                        let (hole, (input, inner, output)) = &cex.witnesses[0];
+                        if let Literal::Spp { spp, .. } =
+                            C::reject_literal(hole_to_var[hole], input, inner, output)
+                            && let Some(forbidden) =
+                                inst::upper_bound_forbidden(inst, &cex, dfa, store)
+                        {
+                            debug_assert!(store.accepts(forbidden, input, output));
+                            learner.forbid_spp(spp, forbidden, store);
+                            return false;
+                        }
+                    }
+                    add_upper_bound_clause::<C, L>(
+                        cex.witnesses,
+                        hole_to_var,
+                        learner,
+                        &mut store.sp,
+                    );
                     return false;
                 }
             }
-            add_upper_bound_clause::<C, L>(cex.witnesses, hole_to_var, learner, &mut store.sp);
-            return false;
-        }
-
-        // Lower-bound half: `dfa ⊆ aut[candidate]`.
-        if matches!(
-            self,
-            Constraint::LowerBound { .. } | Constraint::Equality { .. }
-        ) && let Err(cex) = inst.check_greater_than(store, dfa)
-        {
-            // println!("Lower bound cex: {cex:?}");
-            add_lower_bound_clause(cex, inst, hole_to_var, learner, store, reference_dfa);
-            return false;
+            if !upper
+                && matches!(
+                    self,
+                    Constraint::LowerBound { .. } | Constraint::Equality { .. }
+                )
+            {
+                metrics.add("positive_checks", 1);
+                let started = metrics.start();
+                let result = inst.check_greater_than(store, dfa);
+                metrics.elapsed("check_lower_ns", started);
+                if let Err(cex) = result {
+                    metrics.add("positive_counterexamples", 1);
+                    add_lower_bound_clause(cex, inst, hole_to_var, learner, store, reference_dfa);
+                    return false;
+                }
+            }
         }
 
         true
@@ -191,7 +227,14 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
         // ends the pass so we re-extract before re-checking.
         let mut satisfied = true;
         for (c, inst) in constraints.iter().zip(insts.iter_mut()) {
-            if !c.check(inst, &hole_to_var, &mut learner, store, reference_dfa) {
+            if !c.check(
+                inst,
+                &hole_to_var,
+                &mut learner,
+                store,
+                reference_dfa,
+                &mut metrics,
+            ) {
                 satisfied = false;
                 break;
             }
@@ -222,6 +265,12 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
             }
         }
         metrics.elapsed("install_candidates_ns", started);
+        let interval = crate::experiment::stats_interval();
+        if metrics.enabled() && interval > 0 && iters.is_multiple_of(interval) {
+            eprintln!("KATCH2_CHECKPOINT round={iters}");
+            learner.checkpoint();
+            metrics.checkpoint();
+        }
     }
 }
 
@@ -1185,7 +1234,8 @@ mod tests {
                 &hole_to_var,
                 &mut learner,
                 &mut store,
-                &reference
+                &reference,
+                &mut crate::holes::metrics::Metrics::new("test")
             ));
             let expected = match shape {
                 0 => 1,

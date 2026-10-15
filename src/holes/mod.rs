@@ -1074,3 +1074,5 @@ mod end_to_end {
         assert!(sol.contains_key(&Hole(0)));
     }
 }
+
+mod candidate_stats;

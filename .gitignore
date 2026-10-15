@@ -1,13 +1,10 @@
-/target
+target
 fast-stackat.md
-.cursorrules
-out/
+out
 .DS_Store
-.cursorrules
-CLAUDE.md
-# AI assistant data
-ai_data/
 .claude
 
-# API keys
-api_keys.json
+scripts
+*.txt
+Dockerfile
+.dockerignore
