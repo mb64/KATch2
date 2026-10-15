@@ -235,6 +235,59 @@ and verify that width 1 agrees with entropy and an unpruned shortlist recovers
 exhaustive expression size. Raw times are saved locally in
 `out/profiles/top-five-lookahead-benchmark.json`.
 
+## Direct ENFA upper-bound checking
+
+Compared profiling builds on `ex3_repair.nkpl` with
+`--iteration-limit 5000 --output <solution-file>`. Both implementations report
+UNKNOWN after 5,000 rounds. Output paths under `out/profiles/` preserve any
+existing user solution file. The baseline binary was saved before changing
+upper-bound checking; both use the same profiling settings.
+
+Three alternating wall-time runs per implementation, with `KATCH2_METRICS=1`,
+gave medians of **19.21 s before** and **9.36 s after** (about 2.05x faster).
+Ranges were 18.95–19.40 s and 9.30–9.65 s, respectively. Every run recorded
+exactly 5,000 CEGIS rounds and reported UNKNOWN. Raw timings and counters are
+in `out/profiles/ex3-direct-comparison-timings.json`.
+
+Separate Samply runs measured:
+
+| Measurement | Epsilon-closure check | Direct ENFA check |
+| --- | ---: | ---: |
+| Profiled duration | 18.40 s | 9.65 s |
+| Upper-bound check, inclusive samples | 69.75% (~12.8 s) | 32.82% (~3.2 s) |
+| Epsilon closure, inclusive samples | 58.94% | 0.75% |
+| Trace elaboration, inclusive samples | 10.36% | 0% |
+| Candidate extraction, inclusive samples | 29.97% | 65.75% |
+
+Inclusive percentages overlap and are taken from the active solver thread,
+excluding the waiting CLI thread. The remaining epsilon-closure samples in
+the new profile all belong to lower-bound checking. Approximate phase seconds
+come from 1 ms sample counts. Different witness selection changes the candidate
+sequence, so this is an end-to-end comparison, not identical candidate checks.
+The known `sol3` from the input also passes the new separate checker (VALID).
+
+The new checker is tested against the original closure-based product on 500
+seeded random ENFAs with random visibility, including cycles and incomplete
+upper-bound DFAs. Tests validate every returned concrete edge, its output,
+and acceptance by the ENFA and rejection by the upper bound.
+
+Profile artifacts are saved locally as
+`out/profiles/ex3-epsilon-baseline.samply.json.gz` and
+`out/profiles/ex3-direct-enfa.samply.json.gz`, with their `.syms.json`
+companions. Sample summaries are in
+`out/profiles/ex3-direct-comparison-profile.json`.
+
+Reproduce the updated profile:
+
+```sh
+cargo build --profile profiling --bin nksynth
+samply record --save-only --unstable-presymbolicate \
+  --output out/profiles/ex3-direct-enfa.samply.json.gz \
+  target/profiling/nksynth --iteration-limit 5000 \
+  --output out/profiles/ex3-direct-enfa.sol ex3_repair.nkpl
+samply load out/profiles/ex3-direct-enfa.samply.json.gz
+```
+
 ## Notes
 
 - The native learner uses incremental CaDiCaL through RustSAT. Criterion's

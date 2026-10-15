@@ -36,6 +36,21 @@ For what can appear in a `.nksynth` file, see `example.nksynth`.
 
 Our BDDs always store all intermediate levels. This is particularly relevant for SPP, where it is not clear what a missing level would indicate (zero, one, or top for the missing variables). In the future, we can investigate whether it is profitable do introduce a more complex scheme that can skip intermediate levels.
 
+## Upper-bound inclusion checking
+
+Upper-bound checks search the ENFA directly, without materializing an epsilon
+closure NFA. An outer worklist propagates packet sets at visible product states
+with the upper-bound DFA. For each new set, an inner worklist propagates
+relations from the preceding visible packet to the current packet through
+invisible transitions. At a visible boundary, it intersects with the DFA
+transition before projecting to a packet set; at termination, it intersects
+with the complement's output relation. Propagation records reconstruct the
+full path, including invisible states, without a separate elaboration pass.
+Lower-bound checks still use epsilon closure and determinization.
+
+Build a binary with debug symbols for Samply using
+`cargo build --profile profiling --bin nksynth`.
+
 ## Symbolic upper bounds
 
 When an upper-bound counterexample traverses exactly one SPP hole, the solver
