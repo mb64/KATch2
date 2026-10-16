@@ -26,6 +26,8 @@ Options:
   -V, --version              Print version
 ```
 
+With `KATCH_METRICS=1`, it will also dump some run statistics.
+
 For what can appear in a `.nksynth` file, see `example.nksynth`.
 
 
@@ -35,48 +37,6 @@ For what can appear in a `.nksynth` file, see `example.nksynth`.
 - SPP: represents symbolic packet programs (relations on concrete packets, represented as a BDD)
 
 Our BDDs always store all intermediate levels. This is particularly relevant for SPP, where it is not clear what a missing level would indicate (zero, one, or top for the missing variables). In the future, we can investigate whether it is profitable do introduce a more complex scheme that can skip intermediate levels.
-
-## Upper-bound inclusion checking
-
-Upper-bound checks search the ENFA directly, without materializing an epsilon
-closure NFA. An outer worklist propagates packet sets at visible product states
-with the upper-bound DFA. For each new set, an inner worklist propagates
-relations from the preceding visible packet to the current packet through
-invisible transitions. At a visible boundary, it intersects with the DFA
-transition before projecting to a packet set; at termination, it intersects
-with the complement's output relation. Propagation records reconstruct the
-full path, including invisible states, without a separate elaboration pass.
-Lower-bound checks still use epsilon closure and determinization.
-
-Build a binary with debug symbols for Samply using
-`cargo build --profile profiling --bin nksynth`.
-
-## Symbolic upper bounds
-
-When an upper-bound counterexample traverses exactly one SPP hole, the solver
-learns an entire forbidden relation for that hole. It keeps the concrete state
-path and the other trace packets fixed, while generalizing the two endpoints
-of the segment containing the hole. Prefix and suffix reachability are computed
-in the product of this path with the upper-bound complement: transition
-relations are intersected before projecting to packet sets. Complementing the
-DFA preserves its transitions and complements its final output relations,
-including a sink for missing transitions.
-
-For a concrete context `A; P; B`, if `bad` relates segment endpoints that violate
-the upper bound, the forbidden hole relation is `flip(A); bad; flip(B)`. Its
-complement is the condition `phi` in `P(x,y) => phi(x,y)`.
-
-The SAT learner checks each model against these regions alongside lazy
-Ackermannization. A violating symbolic application gets an instance
-`P(args) => !forbidden(args)`, then the solver retries. Candidate learning also
-uses the whole forbidden diagram as negative evidence. It merges shared
-positive/negative suffix diagrams level by level, without enumerating their
-packet pairs. Multi-hole counterexamples and `Cand` traversals retain concrete
-negative clauses; SPP traversals in the full solver benefit as well.
-
-With `KATCH2_METRICS=1`, native counters include `forbidden_regions`,
-`forbidden_refinement_rounds`, and `forbidden_instances` when applicable.
-
 
 ## Aut
 

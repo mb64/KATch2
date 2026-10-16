@@ -6,6 +6,7 @@
 
 pub mod aut;
 pub mod desugar;
+pub mod experiment;
 pub mod expr;
 pub mod flags;
 #[cfg(test)]

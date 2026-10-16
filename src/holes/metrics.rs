@@ -22,6 +22,17 @@ impl Metrics {
         self.enabled
     }
 
+    pub(super) fn checkpoint(&self) {
+        if self.enabled {
+            let values = self
+                .values
+                .iter()
+                .map(|(k, v)| format!(" {k}={v}"))
+                .collect::<String>();
+            eprintln!("KATCH2_CHECKPOINT_METRICS scope={}{}", self.scope, values);
+        }
+    }
+
     pub(super) fn start(&self) -> Option<Instant> {
         self.enabled.then(Instant::now)
     }
