@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 
 mod upper;
-pub use upper::get_upper_bound_counterexample;
+pub(crate) use upper::get_weighted_upper_bound_counterexample;
 
 /// Nondeterministic symbolic NetKAT automaton with epsilon transitions.
 ///
@@ -2293,33 +2293,78 @@ mod tests {
             let store = arena.spp_store_mut();
             let old = ops::intersection(&nfa, ops::complement(&upper));
             let empty = is_empty(&old, store);
-            let result = get_upper_bound_counterexample(nfa.inner(), &upper, store);
-            assert_eq!(result.is_none(), empty, "trial {trial}");
-            if let Some((path, output)) = result {
-                let raw = nfa.inner();
-                assert_eq!(path[0].0, raw.start(store));
-                for pair in path.windows(2) {
-                    assert!(
-                        raw.transitions(store, &pair[0].0).iter().any(|(r, q)| {
-                            *q == pair[1].0 && store.accepts(*r, &pair[0].1, &pair[1].1)
-                        }),
-                        "invalid full-path edge on trial {trial}"
-                    );
+            for weighted in [false, true] {
+                let result = get_weighted_upper_bound_counterexample(
+                    nfa.inner(),
+                    &upper,
+                    store,
+                    |q, label, target, _| vec![(label, weighted && (q + target) % 2 == 0)],
+                );
+                assert_eq!(result.is_none(), empty, "trial {trial}");
+                if let Some((path, output)) = result {
+                    let raw = nfa.inner();
+                    assert_eq!(path[0].0, raw.start(store));
+                    for pair in path.windows(2) {
+                        assert!(
+                            raw.transitions(store, &pair[0].0).iter().any(|(r, q)| {
+                                *q == pair[1].0 && store.accepts(*r, &pair[0].1, &pair[1].1)
+                            }),
+                            "invalid full-path edge on trial {trial}"
+                        );
+                    }
+                    let last = path.last().unwrap();
+                    let relation = raw.output(store, &last.0);
+                    assert!(store.accepts(relation, &last.1, &output));
+                    let trace: Vec<_> = path
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, (q, p))| {
+                            (i == 0 || raw.is_visible(store, q)).then_some(p.clone())
+                        })
+                        .collect();
+                    assert!(nfa.nfa_accepts(store, &trace, &output));
+                    assert!(!upper.nfa_accepts(store, &trace, &output));
                 }
-                let last = path.last().unwrap();
-                let relation = raw.output(store, &last.0);
-                assert!(store.accepts(relation, &last.1, &output));
-                let trace: Vec<_> = path
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, (q, p))| {
-                        (i == 0 || raw.is_visible(store, q)).then_some(p.clone())
-                    })
-                    .collect();
-                assert!(nfa.nfa_accepts(store, &trace, &output));
-                assert!(!upper.nfa_accepts(store, &trace, &output));
             }
         }
+    }
+
+    #[test]
+    fn weighted_upper_minimizes_paid_edges_across_visible_boundaries() {
+        let mut store = spp::SPPstore::new(1);
+        // Short route costs two; longer route costs one. Both cross visible
+        // boundaries, so an independently saturated epsilon loop is insufficient.
+        let raw = RandomVisibility {
+            inner: ExplicitDFA {
+                start: 0,
+                transitions: vec![
+                    vec![(store.one, 1), (store.one, 3)],
+                    vec![(store.one, 2)],
+                    vec![],
+                    vec![(store.one, 4)],
+                    vec![(store.one, 5)],
+                    vec![(store.one, 2)],
+                ],
+                outputs: vec![
+                    store.zero, store.zero, store.one, store.zero, store.zero, store.zero,
+                ],
+            },
+            visible: vec![true, true, true, false, true, false],
+        };
+        let upper = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(store.top, 0)]],
+            outputs: vec![store.zero],
+        };
+        let (path, _) =
+            get_weighted_upper_bound_counterexample(&raw, &upper, &mut store, |q, label, _, _| {
+                vec![(label, *q == 0 || *q == 1)]
+            })
+            .unwrap();
+        assert_eq!(
+            path.iter().map(|x| x.0).collect::<Vec<_>>(),
+            vec![0, 3, 4, 5, 2]
+        );
     }
 
     #[test]
@@ -2339,13 +2384,27 @@ mod tests {
             transitions: vec![vec![(set, 1)], vec![]],
             outputs: vec![store.zero, store.one],
         };
-        assert!(get_upper_bound_counterexample(&raw, &exact, &mut store).is_none());
+        assert!(
+            get_weighted_upper_bound_counterexample(
+                &raw,
+                &exact,
+                &mut store,
+                |_, label, _, _| vec![(label, false)]
+            )
+            .is_none()
+        );
         let identity = ExplicitDFA {
             start: 0,
             transitions: vec![vec![(store.one, 1)], vec![]],
             outputs: vec![store.zero, store.one],
         };
-        let (path, output) = get_upper_bound_counterexample(&raw, &identity, &mut store).unwrap();
+        let (path, output) = get_weighted_upper_bound_counterexample(
+            &raw,
+            &identity,
+            &mut store,
+            |_, label, _, _| vec![(label, false)],
+        )
+        .unwrap();
         assert_eq!(
             path,
             vec![(0, vec![false]), (1, vec![true]), (2, vec![true])]

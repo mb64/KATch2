@@ -32,6 +32,19 @@ pub trait Candidate<'a>: ENFA<State: Ord> + NFA + Clone {
     /// The learner slot handle for this candidate kind ([`SppVar`] / [`CandVar`]).
     type Var: Copy + Eq + Hash;
 
+    fn sure_lower<L: SmtLearner<'a>>(_var: Self::Var, _learner: &L, store: &mut SPPstore) -> SPP {
+        store.zero
+    }
+    fn plausible_upper<L: SmtLearner<'a>>(
+        var: Self::Var,
+        learner: &L,
+        store: &mut SPPstore,
+        upper: &'a ExplicitDFA,
+    ) -> Self {
+        let _ = (var, learner);
+        Self::top(store, upper)
+    }
+
     /// Allocate a fresh learnable slot in `learner`.
     fn fresh_var<L: SmtLearner<'a>>(learner: &mut L, upper_bound: &'a ExplicitDFA) -> Self::Var;
 
@@ -91,6 +104,17 @@ fn concrete(pkt: &[bool]) -> Vec<AbstractBit> {
 
 impl<'a> Candidate<'a> for SPP {
     type Var = SppVar;
+    fn sure_lower<L: SmtLearner<'a>>(var: SppVar, learner: &L, store: &mut SPPstore) -> SPP {
+        learner.spp_bounds(var, store).0
+    }
+    fn plausible_upper<L: SmtLearner<'a>>(
+        var: SppVar,
+        learner: &L,
+        store: &mut SPPstore,
+        _upper: &'a ExplicitDFA,
+    ) -> Self {
+        learner.spp_bounds(var, store).1
+    }
 
     fn fresh_var<L: SmtLearner<'a>>(learner: &mut L, _upper_bound: &'a ExplicitDFA) -> SppVar {
         learner.fresh_spp()

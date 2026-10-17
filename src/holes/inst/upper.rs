@@ -237,7 +237,9 @@ mod tests {
         };
         let top = store.top;
         let inst = instantiate(&mut store, &Expr::hole(Hole(0)), top);
-        let cex = inst.check_upper_bound(&mut store, &upper).unwrap_err();
+        let cex = inst
+            .check_upper_bound(&mut store, &upper, &HashMap::new())
+            .unwrap_err();
         let forbidden = upper_bound_forbidden(&inst, &cex, &upper, &mut store).unwrap();
         assert_eq!(forbidden, store.complement(store.one));
     }
@@ -262,13 +264,14 @@ mod tests {
                     );
                     let top = store.top;
                     let inst = instantiate(&mut store, &expr, top);
-                    let forbidden = match inst.check_upper_bound(&mut store, &upper) {
-                        Ok(()) => store.zero,
-                        Err(cex) => {
-                            assert_eq!(cex.witnesses.len(), 1);
-                            upper_bound_forbidden(&inst, &cex, &upper, &mut store).unwrap()
-                        }
-                    };
+                    let forbidden =
+                        match inst.check_upper_bound(&mut store, &upper, &HashMap::new()) {
+                            Ok(()) => store.zero,
+                            Err(cex) => {
+                                assert_eq!(cex.witnesses.len(), 1);
+                                upper_bound_forbidden(&inst, &cex, &upper, &mut store).unwrap()
+                            }
+                        };
                     for x in [false, true] {
                         for y in [false, true] {
                             let expected = [false, true].into_iter().any(|p0| {
@@ -336,7 +339,8 @@ mod tests {
                     let upper = expr_to_dfa(&upper_expr, &mut store);
                     let top = store.top;
                     let inst = instantiate(&mut store, &expr, top);
-                    let Err(cex) = inst.check_upper_bound(&mut store, &upper) else {
+                    let Err(cex) = inst.check_upper_bound(&mut store, &upper, &HashMap::new())
+                    else {
                         continue;
                     };
                     let forbidden = upper_bound_forbidden(&inst, &cex, &upper, &mut store).unwrap();
@@ -365,7 +369,9 @@ mod tests {
         let expr = Expr::sequence(Expr::hole(Hole(0)), Expr::hole(Hole(0)));
         let top = store.top;
         let inst = instantiate(&mut store, &expr, top);
-        let cex = inst.check_upper_bound(&mut store, &upper).unwrap_err();
+        let cex = inst
+            .check_upper_bound(&mut store, &upper, &HashMap::new())
+            .unwrap_err();
         assert_eq!(cex.witnesses.len(), 2);
         assert!(upper_bound_forbidden(&inst, &cex, &upper, &mut store).is_none());
     }

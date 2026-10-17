@@ -180,6 +180,11 @@ impl std::fmt::Display for InconsistentError {
 /// `'a` is the lifetime of the [`ExplicitDFA`]s that [`Cand`] slots predicate
 /// over.
 pub trait SmtLearner<'a> {
+    /// Sure relational bounds; defaults to no information for other backends.
+    fn spp_bounds(&self, _spp: SppVar, store: &mut SPPstore) -> (SPP, SPP) {
+        (store.zero, store.top)
+    }
+
     /// Emit a cumulative experiment snapshot, including the SAT backend.
     fn checkpoint(&self) {}
 
@@ -266,6 +271,7 @@ pub struct Native<'a> {
     applications: HashMap<(SlotRef, Vec<Arg>), usize>,
     clauses: Vec<Vec<TrackedLit>>,
     forbidden: Vec<Option<SPP>>,
+    sure_bounds: Vec<(SPP, SPP)>,
     metrics: crate::holes::metrics::Metrics,
     candidate_stats: crate::holes::candidate_stats::CandidateStats,
 }
@@ -275,6 +281,13 @@ pub struct Native<'a> {
 pub type Z3<'a> = Native<'a>;
 
 impl<'a> SmtLearner<'a> for Native<'a> {
+    fn spp_bounds(&self, spp: SppVar, store: &mut SPPstore) -> (SPP, SPP) {
+        self.sure_bounds
+            .get(spp.0 as usize)
+            .copied()
+            .unwrap_or((store.zero, store.top))
+    }
+
     fn checkpoint(&self) {
         self.metrics.checkpoint();
         self.solver.checkpoint();
@@ -291,6 +304,7 @@ impl<'a> SmtLearner<'a> for Native<'a> {
             existentials: Vec::new(),
             clauses: Vec::new(),
             forbidden: Vec::new(),
+            sure_bounds: Vec::new(),
             metrics: crate::holes::metrics::Metrics::new("native"),
             candidate_stats: crate::holes::candidate_stats::CandidateStats::new(),
         }
@@ -425,6 +439,9 @@ impl<'a> SmtLearner<'a> for Native<'a> {
     fn extract(&mut self, spp_store: &mut SPPstore) -> Result<Solution<'a>, InconsistentError> {
         self.metrics.add("extractions", 1);
         let model = self.solve(spp_store)?;
+
+        self.refresh_bounds(spp_store);
+
         let started = self.metrics.start();
         let selection_started = self.metrics.start();
         let mut examples = self.select_examples(&model, flags::example_cover());
@@ -480,6 +497,56 @@ impl<'a> SmtLearner<'a> for Native<'a> {
 }
 
 impl<'a> Native<'a> {
+    fn refresh_bounds(&mut self, store: &mut SPPstore) {
+        self.sure_bounds = self
+            .forbidden
+            .iter()
+            .map(|forbidden| {
+                let upper = store.difference(store.top, forbidden.unwrap_or(store.zero));
+                (store.zero, upper)
+            })
+            .collect();
+        let n = self.num_vars as usize;
+        // Cache queries shared across predicate applications. Never treat a SAT
+        // model decision, or a partially fixed packet, as a universal fact.
+        let mut roots = HashMap::new();
+        for atom in &self.atoms {
+            let SlotRef::Spp(slot) = atom.slot else {
+                continue;
+            };
+            let Some(value) = *roots
+                .entry(atom.result)
+                .or_insert_with(|| self.solver.root_value(atom.result))
+            else {
+                continue;
+            };
+            let packet: Option<Vec<bool>> = atom
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    Arg::Bit(lit) => *roots
+                        .entry(*lit)
+                        .or_insert_with(|| self.solver.root_value(*lit)),
+                    Arg::State(_) => None,
+                })
+                .collect();
+            let Some(packet) = packet else {
+                continue;
+            };
+            let inputs = store.sp.singleton(&packet[..n]);
+            let outputs = store.sp.singleton(&packet[n..]);
+            let inputs = store.ibwd(inputs);
+            let outputs = store.ifwd(outputs);
+            let pair = store.intersect(inputs, outputs);
+            let (lower, upper) = &mut self.sure_bounds[slot as usize];
+            if value {
+                *lower = store.union(*lower, pair);
+            } else {
+                *upper = store.difference(*upper, pair);
+            }
+        }
+    }
+
     /// Instantiate `P(args) => !forbidden(args)` only when a SAT model
     /// violates it. The instance constrains the symbolic arguments, so it also
     /// excludes future forbidden values of this application, not just one pair.
@@ -951,6 +1018,38 @@ mod tests {
             &[false, false, false],
             &[true, true, true],
         ));
+    }
+
+    #[test]
+    fn sure_bounds_combine_fixed_atoms_and_symbolic_forbidden() {
+        let mut store = SPPstore::new(N);
+        let mut learner = Native::new(N);
+        let slot = learner.fresh_spp();
+        let a = vec![false; N as usize];
+        let b = vec![true; N as usize];
+        for (input, output, value) in [(&a, &b, true), (&b, &a, false)] {
+            learner.add_clause(
+                AbstractClause {
+                    literals: vec![spp_lit(
+                        slot,
+                        ap_concrete(input),
+                        ap_concrete(output),
+                        value,
+                    )],
+                },
+                &mut store.sp,
+            );
+        }
+        let forbidden = store.test(0, true);
+        learner.forbid_spp(slot, forbidden, &mut store);
+        learner.extract(&mut store).unwrap();
+        learner.refresh_bounds(&mut store);
+        let (lower, upper) = learner.spp_bounds(slot, &mut store);
+        assert!(store.accepts(lower, &a, &b));
+        assert!(!store.accepts(lower, &b, &b));
+        assert!(!store.accepts(upper, &b, &a));
+        assert!(!store.accepts(upper, &b, &b));
+        assert!(store.accepts(upper, &a, &b));
     }
 
     #[test]

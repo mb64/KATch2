@@ -6,8 +6,7 @@
 //! `RefCell`, the same trick `EpsilonClosure` uses for its memo table.
 
 use crate::holes::aut::{
-    DFA, ENFA, EpsilonClosure, NFA, SubsetDfa, get_any_trace_with_states,
-    get_upper_bound_counterexample, ops,
+    DFA, ENFA, EpsilonClosure, NFA, SubsetDfa, get_any_trace_with_states, ops,
 };
 use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Hole, State as OuterState};
 use crate::spp;
@@ -111,26 +110,46 @@ impl<Inner: NFA> Instantiate<Inner> {
         store: &mut spp::SPPstore,
         upper_bound: &U,
     ) -> Result<(), Vec<(Hole, (Vec<bool>, Vec<(Inner::State, Vec<bool>)>, Vec<bool>))>> {
-        self.check_upper_bound(store, upper_bound)
+        self.check_upper_bound(store, upper_bound, &HashMap::new())
             .map_err(|cex| cex.witnesses)
     }
 
     /// Like [`Self::check_less_than`], retaining the concrete path context.
+    /// Minimize paid hole traversals: known SPP pairs are free; entering an
+    /// internal Cand path costs one, and its remaining transitions are free.
+    /// Pass an empty map when no lower-bound information is available.
     pub fn check_upper_bound<U: DFA>(
         &self,
         store: &mut spp::SPPstore,
-        upper_bound: &U,
+        upper: &U,
+        lower: &HashMap<Hole, spp::SPP>,
     ) -> Result<(), UpperBoundCounterexample<Inner::State>> {
-        let Some((full_path, output_pkt)) =
-            get_upper_bound_counterexample(self, upper_bound, store)
-        else {
+        let result = crate::holes::aut::get_weighted_upper_bound_counterexample(
+            self,
+            upper,
+            store,
+            |source, label, target, store| {
+                if let State::Entering(hole, _) = source {
+                    if matches!(target, State::Outer(_)) {
+                        let sure = lower.get(hole).copied().unwrap_or(store.zero);
+                        let free = store.intersect(label, sure);
+                        let paid = store.difference(label, sure);
+                        vec![(free, false), (paid, true)]
+                    } else {
+                        vec![(label, true)]
+                    }
+                } else {
+                    vec![(label, false)]
+                }
+            },
+        );
+        let Some((path, output)) = result else {
             return Ok(());
         };
-
-        let witnesses = self.holes_used_in_trace(store, &full_path, &output_pkt);
+        let witnesses = self.holes_used_in_trace(store, &path, &output);
         Err(UpperBoundCounterexample {
-            path: full_path,
-            output: output_pkt,
+            path,
+            output,
             witnesses,
         })
     }
@@ -296,6 +315,38 @@ mod tests {
         let mut aut = AutWithHoles::new();
         let start = aut.expr_to_state(store, expr);
         Instantiate::new(aut, start, holes)
+    }
+
+    #[test]
+    fn weighted_search_counts_only_unknown_portions_of_holes() {
+        let mut store = mk_store();
+        let identity = store.one;
+        let expr = Expr::union(
+            Expr::hole(Hole(0)),
+            Expr::sequence(Expr::hole(Hole(1)), Expr::hole(Hole(2))),
+        );
+        let holes = (0..3).map(|h| (Hole(h), identity)).collect();
+        let inst = build_inst(&mut store, &expr, holes);
+        let upper = crate::holes::aut::ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![]],
+            outputs: vec![store.zero],
+        };
+        let cex = inst
+            .check_upper_bound(&mut store, &upper, &HashMap::new())
+            .unwrap_err();
+        assert_eq!(
+            cex.witnesses.iter().map(|w| w.0).collect::<Vec<_>>(),
+            vec![Hole(0)]
+        );
+        let known = HashMap::from([(Hole(1), identity), (Hole(2), identity)]);
+        let cex = inst
+            .check_upper_bound(&mut store, &upper, &known)
+            .unwrap_err();
+        assert_eq!(
+            cex.witnesses.iter().map(|w| w.0).collect::<Vec<_>>(),
+            vec![Hole(1), Hole(2)]
+        );
     }
 
     #[test]

@@ -47,6 +47,15 @@ impl Sat {
         }
     }
 
+    /// Root-level fixed assignment, independent of the current SAT decisions.
+    pub(super) fn root_value(&self, lit: Lit) -> Option<bool> {
+        match self.solver.current_lit_val(lit) {
+            TernaryVal::True => Some(true),
+            TernaryVal::False => Some(false),
+            TernaryVal::DontCare => None,
+        }
+    }
+
     pub(super) fn checkpoint(&self) {
         self.metrics.checkpoint();
         if self.metrics.enabled() {
@@ -218,6 +227,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn root_values_exclude_model_decisions() {
+        let mut sat = Sat::new();
+        let x = sat.fresh();
+        let y = sat.fresh();
+        sat.clause([x, y]);
+        let _ = sat.solve().unwrap();
+        assert_eq!(sat.root_value(x), None);
+        assert_eq!(sat.root_value(y), None);
+        sat.clause([x]);
+        let _ = sat.solve().unwrap();
+        assert_eq!(sat.root_value(x), Some(true));
+        assert_eq!(sat.root_value(!x), Some(false));
     }
 
     #[test]

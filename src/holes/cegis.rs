@@ -119,7 +119,11 @@ impl Constraint {
             {
                 metrics.add("negative_checks", 1);
                 let started = metrics.start();
-                let result = inst.check_upper_bound(store, dfa);
+                let lower = hole_to_var
+                    .iter()
+                    .map(|(&h, &v)| (h, C::sure_lower(v, learner, store)))
+                    .collect();
+                let result = inst.check_upper_bound(store, dfa, &lower);
                 metrics.elapsed("check_upper_ns", started);
                 if let Err(cex) = result {
                     metrics.add("negative_counterexamples", 1);
@@ -436,6 +440,7 @@ fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
         &cex,
         inst,
         hole_to_var,
+        learner,
         store,
         reference_dfa,
         flags::lb_backward(),
@@ -466,32 +471,52 @@ fn add_lower_bound_clause<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
             &reach,
             direction,
         );
-        if !clauses
+        clauses.push(clause);
+    }
+    let mut tightened = Vec::new();
+    for mut clause in clauses {
+        // Tighten only after selecting the cut. A rectangle's projections
+        // through the sure upper relation preserve all feasible witnesses.
+        clause.literals.retain_mut(|literal| {
+            if let Literal::SppMember { spp, in_sp, out_sp } = literal {
+                let (_, upper) = learner.spp_bounds(*spp, store);
+                let pre = store.pull(upper, *out_sp);
+                *in_sp = store.sp.intersect(*in_sp, pre);
+                let post = store.push(*in_sp, upper);
+                *out_sp = store.sp.intersect(*out_sp, post);
+                !store.sp.is_zero(*in_sp) && !store.sp.is_zero(*out_sp)
+            } else {
+                true
+            }
+        });
+
+        if !tightened
             .iter()
-            .any(|prior| prior.same_literals(&clause, &mut store.sp))
+            .any(|prior: &AbstractClause| prior.same_literals(&clause, &mut store.sp))
         {
-            clauses.push(clause);
+            tightened.push(clause);
         }
     }
-    for clause in clauses {
+    for clause in tightened {
         learner.add_clause(clause, &mut store.sp);
     }
 }
 
 /// All clause builders use the same current instantiation and counterexample.
-/// The two frontier directions also share the all-top reachability passes.
+/// The clause builders share reachability under the known upper bounds.
 struct LowerBoundReachability {
     edges: Vec<(State, EdgeLabel, State)>,
     forward: HashMap<(State, usize), sp::SP>,
     backward: HashMap<(State, usize), sp::SP>,
-    forward_top: HashMap<(State, usize), sp::SP>,
-    backward_top: HashMap<(State, usize), sp::SP>,
+    forward_possible: HashMap<(State, usize), sp::SP>,
+    backward_possible: HashMap<(State, usize), sp::SP>,
 }
 
-fn lower_bound_reachability<'a, C: Candidate<'a>>(
+fn lower_bound_reachability<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     cex: &LowerBoundCounterexample,
     inst: &mut Instantiate<C>,
     hole_to_var: &HashMap<Hole, C::Var>,
+    learner: &L,
     store: &mut spp::SPPstore,
     reference_dfa: &'a ExplicitDFA,
     backward_frontier: bool,
@@ -530,16 +555,11 @@ fn lower_bound_reachability<'a, C: Candidate<'a>>(
     };
 
     let saved = inst.holes().clone();
-    let top = C::top(store, reference_dfa);
-    for &hole in hole_to_var.keys() {
-        inst.set_hole(hole, top.clone());
+    for (&hole, &var) in hole_to_var {
+        inst.set_hole(hole, C::plausible_upper(var, learner, store, reference_dfa));
     }
-    let forward_top = if backward_frontier {
-        outer_only(forward_reachable(&*inst, store, &cex.trace))
-    } else {
-        HashMap::new()
-    };
-    let backward_top = outer_only(backward_reachable(
+    let forward_possible = outer_only(forward_reachable(&*inst, store, &cex.trace));
+    let backward_possible = outer_only(backward_reachable(
         &*inst,
         store,
         &cex.trace,
@@ -554,8 +574,8 @@ fn lower_bound_reachability<'a, C: Candidate<'a>>(
         edges,
         forward,
         backward,
-        forward_top,
-        backward_top,
+        forward_possible,
+        backward_possible,
     }
 }
 
@@ -611,7 +631,7 @@ where
     let source = graph.add_node(());
     let sink = graph.add_node(());
     let mut int_nodes: HashMap<(State, usize), NodeIndex> = HashMap::new();
-    let mut edge_literals: HashMap<EdgeIndex, Literal> = HashMap::new();
+    let mut edge_literals = HashMap::new();
 
     for (q, label, qp) in &reach.edges {
         let (q, qp) = (*q, *qp);
@@ -716,7 +736,7 @@ where
                                 continue;
                             }
                             let e = graph.add_edge(u, v, 1);
-                            edge_literals.insert(e, lit);
+                            edge_literals.insert(e, (lit, (q, i), (qp, jt)));
                         }
                     }
                 }
@@ -727,6 +747,24 @@ where
     let literals = min_cut_edges(&graph, source, sink)
         .into_iter()
         .filter_map(|e| edge_literals.remove(&e))
+        .map(|(mut literal, source, target)| {
+            if let Literal::SppMember { in_sp, out_sp, .. } = &mut literal {
+                let plausible_in = reach
+                    .forward_possible
+                    .get(&source)
+                    .copied()
+                    .unwrap_or(store.sp.zero);
+                let plausible_out = reach
+                    .backward_possible
+                    .get(&target)
+                    .copied()
+                    .unwrap_or(store.sp.zero);
+                *in_sp = store.sp.intersect(*in_sp, plausible_in);
+                *out_sp = store.sp.intersect(*out_sp, plausible_out);
+            }
+
+            literal
+        })
         .collect();
     AbstractClause { literals }
 }
@@ -737,8 +775,8 @@ enum FrontierDirection {
     Backward,
 }
 
-/// Forward frontier: `F_current(source) -> B_top(target) \ F_current(target)`.
-/// Backward frontier: `F_top(source) \ B_current(source) -> B_current(target)`.
+/// Forward frontier: `F_current(source) -> B_possible(target) \ F_current(target)`.
+/// Backward frontier: `F_possible(source) \ B_current(source) -> B_current(target)`.
 /// Any repaired accepting path must cross each frontier on a changed hole
 /// traversal; concrete transitions are closed under current reachability.
 fn lower_bound_clause_frontier<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
@@ -754,8 +792,8 @@ where
     <C as ENFA>::State: Ord,
 {
     let (forward, backward) = match direction {
-        FrontierDirection::Forward => (&reach.forward, &reach.backward_top),
-        FrontierDirection::Backward => (&reach.forward_top, &reach.backward),
+        FrontierDirection::Forward => (&reach.forward, &reach.backward_possible),
+        FrontierDirection::Backward => (&reach.forward_possible, &reach.backward),
     };
 
     let sites = collect_hole_sites(
@@ -932,6 +970,91 @@ mod tests {
     ) -> Result<HashMap<Hole, C>, CegisError> {
         let constraints = bounds_constraints(store, expr, lb, ub);
         run::<C, Native>(&constraints, holes, reference_dfa, store, max_iters)
+    }
+
+    #[test]
+    fn known_bounds_preserve_every_one_bit_series_repair() {
+        crate::experiment::with_seed(90210, || {
+            let mut store = spp::SPPstore::new(1);
+            let relations: Vec<_> = (0..16u32)
+                .map(|mask| {
+                    store.mk(
+                        spp::SPP::new(mask & 1),
+                        spp::SPP::new((mask >> 1) & 1),
+                        spp::SPP::new((mask >> 2) & 1),
+                        spp::SPP::new((mask >> 3) & 1),
+                    )
+                })
+                .collect();
+            let expr = Expr::sequence(Expr::hole(Hole(0)), Expr::hole(Hole(1)));
+            let reference = top_dfa(&store);
+            for a in 0..16 {
+                for b in 0..16 {
+                    let possible = store.sequence(relations[a], relations[b]);
+                    for input in [false, true] {
+                        for output in [false, true] {
+                            let singleton = singleton_pair_spp(&mut store, &[input], &[output]);
+                            let dfa = |relation| ExplicitDFA {
+                                start: 0,
+                                transitions: vec![vec![]],
+                                outputs: vec![relation],
+                            };
+                            let constraints = vec![
+                                Constraint::upper_bound(
+                                    &mut store,
+                                    &Expr::hole(Hole(0)),
+                                    dfa(relations[a]),
+                                ),
+                                Constraint::upper_bound(
+                                    &mut store,
+                                    &Expr::hole(Hole(1)),
+                                    dfa(relations[b]),
+                                ),
+                                Constraint::lower_bound(&mut store, &expr, dfa(singleton)),
+                            ];
+                            let result = run::<spp::SPP, Native>(
+                                &constraints,
+                                &[Hole(0), Hole(1)],
+                                &reference,
+                                &mut store,
+                                Some(64),
+                            );
+                            let feasible = store.accepts(possible, &[input], &[output]);
+                            assert_eq!(
+                                result.is_ok(),
+                                feasible,
+                                "a={a} b={b} input={input} output={output}"
+                            );
+                            if let Ok(holes) = result {
+                                let first = holes[&Hole(0)];
+                                let second = holes[&Hole(1)];
+                                let outside = store.difference(first, relations[a]);
+                                assert!(store.is_zero(outside));
+                                let outside = store.difference(second, relations[b]);
+                                assert!(store.is_zero(outside));
+                                let composed = store.sequence(first, second);
+                                assert!(store.accepts(composed, &[input], &[output]));
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn randomized_synthesis_preserves_bounds() {
+        for seed in 0..8 {
+            crate::experiment::with_seed(seed, || {
+                trivial_bounds_converge_immediately();
+                concrete_violation_is_infeasible();
+                hole_bounded_above_by_zero_yields_zero();
+                two_holes_trivial_bounds();
+                two_holes_bounded_above_by_zero();
+                lower_bound_drives_refinement();
+                cand_trivial_bounds_converge();
+            });
+        }
     }
 
     #[test]
@@ -1262,7 +1385,7 @@ mod tests {
                     assert!(!clause.same_literals(other, &mut store.sp));
                 }
             }
-            // The frontier's all-top pass restores the original candidates.
+            // The plausibility passes restore the original candidates.
             assert!(inst.holes().values().all(|&spp| spp == store.zero));
             let solution = learner.extract(&mut store).unwrap();
             // Every retained clause is realized by the trained diagrams.
@@ -1480,6 +1603,7 @@ mod tests {
                             &cex,
                             &mut inst,
                             &hole_to_var,
+                            &learner,
                             &mut store,
                             &reference,
                             true,
@@ -1559,8 +1683,15 @@ mod tests {
             output: vec![false],
         };
         // Request the shared maps even when this builder is disabled in CEGIS.
-        let reach =
-            lower_bound_reachability(&cex, &mut inst, &hole_to_var, &mut store, &reference, true);
+        let reach = lower_bound_reachability(
+            &cex,
+            &mut inst,
+            &hole_to_var,
+            &learner,
+            &mut store,
+            &reference,
+            true,
+        );
 
         let clause = lower_bound_clause_frontier::<spp::SPP, Native>(
             &cex,
