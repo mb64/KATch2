@@ -20,7 +20,7 @@
 
 use crate::desugar::{DesugarEnv, DesugarError, desugar_with_env};
 use crate::expr::{Exp, Expr, Hole};
-use crate::holes::aut::expr_to_dfa;
+use crate::holes::aut::{expr_to_dfa, is_empty, ops};
 use crate::holes::nk_with_holes::Expr as HExpr;
 use crate::holes::problem::{Constraint, ProblemInstance};
 use crate::parser::{Lexer, ParseError, Parser, Span, TokenKind};
@@ -250,11 +250,11 @@ fn to_test(expr: &Expr, store: &mut spp::SPPstore) -> Option<spp::SPP> {
 ///
 /// * `lhs <= rhs` with holes on the left  → [`Constraint::upper_bound`] (`lhs[holes] ⊆ rhs`)
 /// * `lhs <= rhs` with holes on the right → [`Constraint::lower_bound`] (`lhs ⊆ rhs[holes]`)
-/// * `lhs == rhs`                          → [`Constraint::equality`]
+/// * `lhs == rhs` with holes              → [`Constraint::equality`]
 ///
 /// The hole-free side is compiled into the reference DFA; the hole-bearing side
-/// into the hole automaton. If neither side has holes, the left side plays the
-/// hole-automaton role (a pure verification constraint).
+/// into the hole automaton. Hole-free assertions are checked here: passing
+/// assertions are omitted, and failing assertions become [`Constraint::False`].
 pub fn desugar(program: &Program) -> Result<ProblemInstance, DesugarError> {
     let n = num_fields(program);
     let mut store = spp::SPPstore::new(n);
@@ -276,8 +276,9 @@ pub fn desugar(program: &Program) -> Result<ProblemInstance, DesugarError> {
             Stmt::Assert { lhs, op, rhs } => {
                 let dl = desugar_with_env(lhs, &env)?;
                 let dr = desugar_with_env(rhs, &env)?;
-                let constraint = build_constraint(&mut store, &dl, *op, &dr)?;
-                constraints.push(constraint);
+                if let Some(constraint) = build_constraint(&mut store, &dl, *op, &dr)? {
+                    constraints.push(constraint);
+                }
             }
         }
     }
@@ -291,13 +292,15 @@ pub fn desugar(program: &Program) -> Result<ProblemInstance, DesugarError> {
 
 /// Build the constraint for a single (desugared) assertion. The hole-bearing
 /// side becomes the hole automaton; the hole-free side becomes the reference
-/// DFA. Errors if both sides contain holes.
+/// DFA. Passing hole-free assertions are verified immediately and return `None`.
+/// A false assertion returns [`Constraint::False`]; having holes on both
+/// sides is an error.
 fn build_constraint(
     store: &mut spp::SPPstore,
     lhs: &Expr,
     op: AssertOp,
     rhs: &Expr,
-) -> Result<Constraint, DesugarError> {
+) -> Result<Option<Constraint>, DesugarError> {
     let lhs_holes = has_holes(lhs);
     let rhs_holes = has_holes(rhs);
     if lhs_holes && rhs_holes {
@@ -308,10 +311,23 @@ fn build_constraint(
         });
     }
 
+    if !lhs_holes && !rhs_holes {
+        let lhs_dfa = expr_to_dfa(lhs, store);
+        let rhs_dfa = expr_to_dfa(rhs, store);
+        let contained = |store: &mut spp::SPPstore, lhs, rhs| {
+            is_empty(&ops::intersection(lhs, ops::complement(rhs)), store)
+        };
+        if !contained(store, &lhs_dfa, &rhs_dfa)
+            || (op == AssertOp::Eq && !contained(store, &rhs_dfa, &lhs_dfa))
+        {
+            return Ok(Some(Constraint::False));
+        }
+        return Ok(None);
+    }
+
     let constraint = match op {
         AssertOp::Eq => {
-            // Equality is symmetric: put the hole-bearing side (or `lhs` when
-            // neither has holes) on the automaton side.
+            // Equality is symmetric: put the hole-bearing side on the automaton side.
             let (hole_side, dfa_side) = if rhs_holes { (rhs, lhs) } else { (lhs, rhs) };
             let dfa = expr_to_dfa(dfa_side, store);
             let hole_expr = to_hole_expr(hole_side, store).simplify(store);
@@ -331,7 +347,7 @@ fn build_constraint(
         }
     };
 
-    Ok(constraint)
+    Ok(Some(constraint))
 }
 
 // --- Plugging a solution into a Program ---------------------------------------
@@ -506,6 +522,67 @@ mod tests {
     fn desugar_errors_when_both_sides_have_holes() {
         let prog = parse_program("hole h\nhole g\nassert h <= g\n").unwrap();
         assert!(desugar(&prog).is_err());
+    }
+
+    #[test]
+    fn hole_free_assertions_are_checked_during_construction() {
+        for source in [
+            "assert (x0 == 1) <= 1",
+            "assert (x0 == 1) + (x0 == 0) == 1",
+            "assert dup <= dup + 1",
+            "assert (dup + 1) - dup == 1",
+            "assert (dup + 1) & dup == dup",
+            "assert 0 == 0",
+        ] {
+            let instance = desugar(&parse_program(source).unwrap()).unwrap();
+            assert!(instance.constraints.is_empty(), "{source}");
+        }
+
+        for source in [
+            "assert 1 <= (x0 == 1)",
+            "assert (x0 == 1) == 1",
+            "assert 1 == (x0 == 1)",
+            "assert dup + 1 == dup",
+            "assert dup == dup + 1",
+            "assert dup <= 1",
+            "hole h\nassert h == 1\nassert 1 == 0",
+        ] {
+            let mut instance = desugar(&parse_program(source).unwrap()).unwrap();
+            assert!(
+                instance
+                    .constraints
+                    .iter()
+                    .any(|c| matches!(c, Constraint::False)),
+                "{source}"
+            );
+            assert_eq!(
+                instance.solve(Some(0)),
+                Err(crate::holes::cegis::CegisError::Infeasible),
+                "{source}"
+            );
+            assert!(
+                matches!(
+                    instance.solve_full(Some(0)),
+                    Err(crate::holes::cegis::CegisError::Infeasible)
+                ),
+                "{source}"
+            );
+        }
+
+        let source = "hole h\ndef identity = 1\nassert identity == 1\nassert h == (x0 := 1)\nassert dup <= dup + 1";
+        let mut instance = desugar(&parse_program(source).unwrap()).unwrap();
+        assert_eq!(instance.constraints.len(), 1);
+        assert!(matches!(
+            instance.constraints[0],
+            Constraint::Equality { .. }
+        ));
+        assert!(instance.solve(Some(100)).unwrap().contains_key(&Hole(0)));
+        assert!(
+            instance
+                .solve_full(Some(100))
+                .unwrap()
+                .contains_key(&Hole(0))
+        );
     }
 
     #[test]

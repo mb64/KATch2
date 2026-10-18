@@ -194,6 +194,12 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     store: &mut spp::SPPstore,
     max_iters: Option<usize>,
 ) -> Result<HashMap<Hole, C>, CegisError> {
+    // Reject assertions checked during problem construction before allocating
+    // the learner or instantiating any hole-bearing automata.
+    if constraints.iter().any(|c| matches!(c, Constraint::False)) {
+        return Err(CegisError::Infeasible);
+    }
+
     let mut metrics = super::metrics::Metrics::new("cegis");
     let mut learner = L::new(store.num_vars());
 

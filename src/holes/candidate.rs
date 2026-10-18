@@ -207,7 +207,7 @@ impl<'a> Candidate<'a> for Cand<'a> {
                         Some(ops::WithSinkState(dfa))
                     }
                 }
-                Constraint::LowerBound { .. } => None,
+                Constraint::LowerBound { .. } | Constraint::False => None,
             })
             .collect();
         ExplicitDFA::product(store, &completed)

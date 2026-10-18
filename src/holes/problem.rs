@@ -23,7 +23,7 @@ pub use crate::expr::Hole;
 
 /// A single constraint relating a hole-bearing automaton to a concrete DFA.
 ///
-/// Each variant pairs an [`AutWithHoles`] (with its pinned start [`State`])
+/// Each bound variant pairs an [`AutWithHoles`] (with its pinned start [`State`])
 /// against an [`ExplicitDFA`].  Once the holes are filled with concrete
 /// candidates, the constraint asserts a containment between the resulting
 /// instantiated automaton and the DFA; see the variant docs for the
@@ -34,6 +34,8 @@ pub use crate::expr::Hole;
 /// the underlying automaton for you.
 #[derive(Debug, Clone)]
 pub enum Constraint {
+    /// A hole-free assertion was already checked and found false.
+    False,
     /// `dfa ⊆ aut[holes]`: the DFA is a lower bound on the instantiated
     /// automaton (every triple the DFA accepts must also be accepted).
     LowerBound {
@@ -83,6 +85,7 @@ impl Constraint {
     /// The hole-bearing automaton this constraint is over.
     pub fn aut(&self) -> &AutWithHoles {
         match self {
+            Constraint::False => panic!("a false constraint has no automaton or DFA"),
             Constraint::LowerBound { aut, .. }
             | Constraint::UpperBound { aut, .. }
             | Constraint::Equality { aut, .. } => aut,
@@ -92,6 +95,7 @@ impl Constraint {
     /// The pinned start state of [`Constraint::aut`].
     pub fn start(&self) -> State {
         match self {
+            Constraint::False => panic!("a false constraint has no automaton or DFA"),
             Constraint::LowerBound { start, .. }
             | Constraint::UpperBound { start, .. }
             | Constraint::Equality { start, .. } => *start,
@@ -101,6 +105,7 @@ impl Constraint {
     /// The concrete DFA this constraint compares against.
     pub fn dfa(&self) -> &ExplicitDFA {
         match self {
+            Constraint::False => panic!("a false constraint has no automaton or DFA"),
             Constraint::LowerBound { dfa, .. }
             | Constraint::UpperBound { dfa, .. }
             | Constraint::Equality { dfa, .. } => dfa,
