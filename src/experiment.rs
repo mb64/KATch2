@@ -1,7 +1,8 @@
-//! Configuration and independent random streams for synthesis experiments.
+//! Synthesis configuration and one shared RNG per solver thread.
 //!
-//! `nksynth` initializes this on its solver thread. Library callers retain
-//! deterministic behavior until they explicitly call [`configure`].
+//! The RNG starts from system entropy unless explicitly seeded with [`configure`].
+//! All random choices, including seeds for new CaDiCaL instances, advance this
+//! same stream. Reconfigure only to start or replay a seeded run.
 use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::{cell::RefCell, path::PathBuf};
 
@@ -24,84 +25,64 @@ impl Config {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Seeds {
-    pub master: u64,
-    pub sat: i32,
-    pub phases: u64,
-    pub merges: u64,
-    pub checks: u64,
-}
 struct State {
     config: Config,
-    seeds: Seeds,
-    merges: StdRng,
-    checks: StdRng,
+    rng: StdRng,
+    candidate_stats_runs: usize,
 }
 impl State {
     fn new(config: Config) -> Self {
-        let mut rng = StdRng::seed_from_u64(config.seed);
-        let seeds = Seeds {
-            master: config.seed,
-            sat: rng.random_range(0..=2_000_000_000),
-            phases: rng.random(),
-            merges: rng.random(),
-            checks: rng.random(),
-        };
+        let rng = StdRng::seed_from_u64(config.seed);
         Self {
             config,
-            seeds,
-            merges: StdRng::seed_from_u64(seeds.merges),
-            checks: StdRng::seed_from_u64(seeds.checks),
+            rng,
+            candidate_stats_runs: 0,
         }
     }
 }
-thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
-
-/// Reset all experimental random streams on the current solver thread.
-/// Log the returned seeds with the build and input when collecting results.
-pub fn configure(config: Config) -> Seeds {
-    let state = State::new(config);
-    let seeds = state.seeds;
-    STATE.with(|s| *s.borrow_mut() = Some(state));
-    seeds
-}
-pub(crate) fn sat_parameters() -> Option<(i32, StdRng)> {
-    STATE.with(|s| {
-        s.borrow()
-            .as_ref()
-            .map(|s| (s.seeds.sat, StdRng::seed_from_u64(s.seeds.phases)))
-    })
-}
-pub(crate) fn shuffle<T>(items: &mut [T]) {
-    STATE.with(|s| {
-        if let Some(s) = &mut *s.borrow_mut() {
-            items.shuffle(&mut s.merges);
-        }
+thread_local! {
+    static STATE: RefCell<State> = RefCell::new({
+        let mut config = Config::new(rand::rng().random());
+        // Library callers leave checkpoints disabled unless configured.
+        config.stats_interval = 0;
+        State::new(config)
     });
 }
+
+/// Set configuration and seed the shared RNG on the current solver thread.
+/// Keep advancing this stream across solver instances and randomized restarts.
+pub fn configure(config: Config) {
+    STATE.with(|s| *s.borrow_mut() = State::new(config));
+}
+
+pub(crate) fn with_rng<T>(f: impl FnOnce(&mut StdRng) -> T) -> T {
+    STATE.with(|s| f(&mut s.borrow_mut().rng))
+}
+
+pub(crate) fn shuffle<T>(items: &mut [T]) {
+    with_rng(|rng| items.shuffle(rng));
+}
 pub(crate) fn positive_first() -> bool {
-    STATE.with(|s| s.borrow_mut().as_mut().is_some_and(|s| s.checks.random()))
+    with_rng(|rng| rng.random())
 }
 pub(crate) fn symbolic_upper() -> bool {
-    STATE.with(|s| s.borrow().as_ref().is_none_or(|s| s.config.symbolic_upper))
+    STATE.with(|s| s.borrow().config.symbolic_upper)
 }
 pub(crate) fn stats_interval() -> usize {
-    STATE.with(|s| s.borrow().as_ref().map_or(0, |s| s.config.stats_interval))
+    STATE.with(|s| s.borrow().config.stats_interval)
 }
-pub(crate) fn candidate_stats_path() -> Option<PathBuf> {
+/// Allocate a candidate-log run number without resetting the random stream.
+pub(crate) fn candidate_stats_log() -> Option<(PathBuf, usize)> {
     STATE.with(|s| {
-        s.borrow()
-            .as_ref()
-            .and_then(|s| s.config.candidate_stats.clone())
+        let mut state = s.borrow_mut();
+        let path = state.config.candidate_stats.clone()?;
+        let run = state.candidate_stats_runs;
+        state.candidate_stats_runs += 1;
+        Some((path, run))
     })
 }
 pub(crate) fn candidate_stats_enabled() -> bool {
-    STATE.with(|s| {
-        s.borrow()
-            .as_ref()
-            .is_some_and(|s| s.config.candidate_stats.is_some())
-    })
+    STATE.with(|s| s.borrow().config.candidate_stats.is_some())
 }
 
 #[cfg(test)]
@@ -109,10 +90,12 @@ pub(crate) fn with_seed<T>(seed: u64, f: impl FnOnce() -> T) -> T {
     struct Restore(Option<State>);
     impl Drop for Restore {
         fn drop(&mut self) {
-            STATE.with(|s| *s.borrow_mut() = self.0.take());
+            STATE.with(|s| *s.borrow_mut() = self.0.take().unwrap());
         }
     }
-    let _restore = Restore(STATE.with(|s| s.borrow_mut().replace(State::new(Config::new(seed)))));
+    let _restore = Restore(Some(STATE.with(|s| {
+        std::mem::replace(&mut *s.borrow_mut(), State::new(Config::new(seed)))
+    })));
     f()
 }
 
@@ -120,25 +103,23 @@ pub(crate) fn with_seed<T>(seed: u64, f: impl FnOnce() -> T) -> T {
 mod tests {
     use super::*;
     #[test]
-    fn streams_replay_and_do_not_consume_each_other() {
+    fn shared_stream_replays_and_advances_across_components() {
         let sample = || {
-            let mut v: Vec<_> = (0..24).collect();
-            shuffle(&mut v);
-            (v, (0..32).map(|_| positive_first()).collect::<Vec<_>>())
+            let before = with_rng(|rng| rng.random::<u64>());
+            let mut items: Vec<_> = (0..24).collect();
+            shuffle(&mut items);
+            let checks: Vec<_> = (0..32).map(|_| positive_first()).collect();
+            let after = with_rng(|rng| rng.random::<u64>());
+            (before, items, checks, after)
         };
         assert_eq!(with_seed(17, sample), with_seed(17, sample));
         assert_ne!(with_seed(17, sample), with_seed(18, sample));
-        let plain = with_seed(17, || (0..32).map(|_| positive_first()).collect::<Vec<_>>());
-        let shuffled = with_seed(17, || {
-            let mut v: Vec<_> = (0..24).collect();
-            for _ in 0..50 {
-                shuffle(&mut v)
-            }
-            (0..32).map(|_| positive_first()).collect::<Vec<_>>()
+
+        let plain = with_seed(17, || with_rng(|rng| rng.random::<u64>()));
+        let after_shuffle = with_seed(17, || {
+            shuffle(&mut [0, 1, 2, 3, 4, 5]);
+            with_rng(|rng| rng.random::<u64>())
         });
-        assert_eq!(plain, shuffled);
-        let mut state = State::new(Config::new(17));
-        assert!((0..=2_000_000_000).contains(&state.seeds.sat));
-        assert_ne!(state.merges.random::<u64>(), state.checks.random::<u64>());
+        assert_ne!(plain, after_shuffle);
     }
 }

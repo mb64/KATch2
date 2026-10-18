@@ -1,6 +1,6 @@
 //! Boolean bitblasting with an incremental RustSAT/CaDiCaL backend.
 
-use rand::{RngExt, rngs::StdRng};
+use rand::RngExt;
 use std::collections::HashMap;
 
 use rustsat::{
@@ -15,7 +15,6 @@ pub(super) const FALSE: Lit = Lit::negative(0);
 
 pub(super) struct Sat {
     solver: CaDiCaL<'static, 'static>,
-    phase_rng: Option<StdRng>,
     next_var: u32,
     gates: HashMap<(Lit, Lit, Lit), Lit>,
     metrics: crate::holes::metrics::Metrics,
@@ -33,14 +32,11 @@ impl Model {
 impl Sat {
     pub(super) fn new() -> Self {
         let mut solver = CaDiCaL::default();
-        let phase_rng = crate::experiment::sat_parameters().map(|(seed, rng)| {
-            solver.set_option("seed", seed).expect("set CaDiCaL seed");
-            rng
-        });
+        let seed = crate::experiment::with_rng(|rng| rng.random_range(0..=2_000_000_000));
+        solver.set_option("seed", seed).expect("set CaDiCaL seed");
         solver.add_unit(TRUE).expect("assert Boolean constant");
         Self {
             solver,
-            phase_rng,
             next_var: 1,
             gates: HashMap::new(),
             metrics: crate::holes::metrics::Metrics::new("sat"),
@@ -72,12 +68,14 @@ impl Sat {
     pub(super) fn fresh(&mut self) -> Lit {
         let lit = Lit::positive(self.next_var);
         self.next_var += 1;
-        if let Some(rng) = &mut self.phase_rng {
-            let preferred = if rng.random::<bool>() { lit } else { !lit };
-            self.solver
-                .phase_lit(preferred)
-                .expect("set CaDiCaL phase preference");
-        }
+        let preferred = if crate::experiment::with_rng(|rng| rng.random::<bool>()) {
+            lit
+        } else {
+            !lit
+        };
+        self.solver
+            .phase_lit(preferred)
+            .expect("set CaDiCaL phase preference");
         lit
     }
 
@@ -268,6 +266,27 @@ mod tests {
 #[cfg(test)]
 mod randomized_tests {
     use super::*;
+
+    #[test]
+    fn constructing_solvers_advances_the_shared_stream_and_replays() {
+        let sample = || {
+            (0..3)
+                .map(|_| {
+                    let _sat = Sat::new();
+                    crate::experiment::with_rng(|rng| rng.random::<u64>())
+                })
+                .collect::<Vec<_>>()
+        };
+        let replay = crate::experiment::with_seed(17, sample);
+        assert_eq!(replay, crate::experiment::with_seed(17, sample));
+        let without_solvers = crate::experiment::with_seed(17, || {
+            (0..3)
+                .map(|_| crate::experiment::with_rng(|rng| rng.random::<u64>()))
+                .collect::<Vec<_>>()
+        });
+        assert_ne!(replay, without_solvers);
+    }
+
     #[test]
     fn preferred_phases_preserve_incremental_constraints() {
         for seed in 0..32 {

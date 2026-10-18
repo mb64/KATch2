@@ -42,7 +42,11 @@ impl std::fmt::Display for SPP {
 pub type Var = u32;
 
 /// The store of SPPs. (store = arena + memo tables)
-#[derive(Debug)]
+///
+/// Cloning copies both arenas and all memo tables, preserving existing SPP/SP
+/// handles. Each copy can then grow independently; handles allocated after
+/// cloning belong only to the store that created them.
+#[derive(Debug, Clone)]
 pub struct SPPstore {
     num_vars: Var, // Idea: it's ok to pick this larger than you need. Hash consing & memoization will handle it
     nodes: Vec<SPPnode>, // the arena

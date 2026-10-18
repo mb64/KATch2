@@ -7,17 +7,33 @@ use std::{
 };
 
 pub(super) struct CandidateStats {
+    run: usize,
     guess: usize,
     writer: Option<BufWriter<File>>,
 }
 impl CandidateStats {
     pub(super) fn new() -> Self {
-        let writer = crate::experiment::candidate_stats_path().map(|path| {
-            let mut writer = BufWriter::new(File::create(path).expect("create candidate-size log"));
-            writeln!(writer,"guess,slot,root,internal_nodes,terminal_nodes,total_nodes,accepted_pairs,positive_examples,negative_examples,forbidden_nodes,example_selection_ns,learning_ns,input_positive_nodes,input_negative_nodes,input_shared_nodes,input_trie_nodes,merged_dag_nodes").unwrap();
+        let mut run = 0;
+        let writer = crate::experiment::candidate_stats_log().map(|(path, id)| {
+            run = id;
+            let file = File::options()
+                .write(true)
+                .create(true)
+                .truncate(run == 0)
+                .append(run != 0)
+                .open(path)
+                .expect("open candidate-size log");
+            let mut writer = BufWriter::new(file);
+            if run == 0 {
+                writeln!(writer,"guess,slot,root,internal_nodes,terminal_nodes,total_nodes,accepted_pairs,positive_examples,negative_examples,forbidden_nodes,example_selection_ns,learning_ns,input_positive_nodes,input_negative_nodes,input_shared_nodes,input_trie_nodes,merged_dag_nodes,run").unwrap();
+            }
             writer
         });
-        Self { guess: 0, writer }
+        Self {
+            run,
+            guess: 0,
+            writer,
+        }
     }
     pub(super) fn enabled(&self) -> bool {
         self.writer.is_some()
@@ -49,7 +65,7 @@ impl CandidateStats {
         let [ip, ine, shared, trie, merged] = crate::spp::learner::input_sizes();
         writeln!(
             writer,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.guess,
             slot,
             candidate.as_u32(),
@@ -66,7 +82,8 @@ impl CandidateStats {
             ine,
             shared,
             trie,
-            merged
+            merged,
+            self.run
         )
         .unwrap();
         if self.guess.is_multiple_of(256) {

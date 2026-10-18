@@ -138,6 +138,7 @@ pub mod minimize;
 pub mod nk_with_holes;
 pub mod parser;
 pub mod problem;
+pub mod restarts;
 pub mod smt;
 
 use std::collections::HashMap;

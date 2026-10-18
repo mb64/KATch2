@@ -12,8 +12,9 @@ use std::collections::HashMap;
 use crate::holes::aut::{ExplicitDFA, SubsetDfa, ops};
 use crate::holes::cand::Cand;
 use crate::holes::candidate::Candidate;
-use crate::holes::cegis::{CegisError, run};
+use crate::holes::cegis::CegisError;
 use crate::holes::nk_with_holes::{AutWithHoles, Expr, State};
+use crate::holes::restarts;
 use crate::holes::smt::Native;
 use crate::spp::{self, SPP};
 
@@ -134,7 +135,8 @@ impl ProblemInstance {
     /// hole (or a [`CegisError`] if no solution exists / the search is
     /// inconclusive).
     ///
-    /// `max_iters` caps the number of CEGIS refinement rounds: pass `Some(n)` to
+    /// Attempts use reluctant doubling with an initial cutoff of 140 iterations.
+    /// `max_iters` caps the total CEGIS rounds across all attempts: pass `Some(n)` to
     /// give up with [`CegisError::IterationLimit`] after `n` rounds, or `None`
     /// to loop until the problem is solved or proven infeasible.
     ///
@@ -143,12 +145,13 @@ impl ProblemInstance {
         // SPP candidates ignore the reference DFA, but the loop still needs one.
         let reference_dfa =
             <SPP as Candidate>::make_reference_dfa(&mut self.store, &self.constraints);
-        run::<SPP, Native>(
+        restarts::run::<SPP, Native>(
             &self.constraints,
             &self.holes,
             &reference_dfa,
             &mut self.store,
             max_iters,
+            restarts::Config::default(),
         )
     }
 
@@ -156,7 +159,7 @@ impl ProblemInstance {
     /// dup-ful [`Cand`]), returning each hole's synthesized sub-program as an
     /// [`ExplicitDFA`].
     ///
-    /// `max_iters` caps the number of CEGIS refinement rounds (see
+    /// `max_iters` caps the total CEGIS refinement rounds across attempts (see
     /// [`ProblemInstance::solve`]).
     ///
     /// This searches a strictly larger space than [`ProblemInstance::solve`], so
@@ -170,12 +173,13 @@ impl ProblemInstance {
             &mut self.store,
             &self.constraints,
         );
-        let candidates: HashMap<Hole, ops::Union<SPP, Cand<'_>>> = run::<_, Native>(
+        let candidates: HashMap<Hole, ops::Union<SPP, Cand<'_>>> = restarts::run::<_, Native>(
             &self.constraints,
             &self.holes,
             &reference_dfa,
             &mut self.store,
             max_iters,
+            restarts::Config::default(),
         )?;
         // Materialize each candidate (an NFA) into a concrete DFA via subset
         // construction while `reference_dfa` is still alive.

@@ -38,8 +38,8 @@ struct Cli {
     #[arg(required = true, value_name = "FILE")]
     files: Vec<PathBuf>,
 
-    /// Master seed for independent SAT, merge, and check-order random streams.
-    /// Omit to choose a fresh seed; the seed and substream seeds are logged.
+    /// Seed for the shared RNG used by all synthesis random choices.
+    /// Omit to choose a seed from system entropy; the chosen seed is logged.
     #[arg(long, value_name = "SEED")]
     seed: Option<u64>,
 
@@ -64,7 +64,7 @@ struct Cli {
     #[arg(long = "no-full", conflicts_with = "full")]
     no_full: bool,
 
-    /// Give up after this many CEGIS refinement rounds, reporting `UNKNOWN`
+    /// Give up after this many total CEGIS rounds across restarts, reporting `UNKNOWN`
     /// instead of looping until solved or proven infeasible.
     #[arg(long, value_name = "N")]
     iteration_limit: Option<usize>,
@@ -164,15 +164,10 @@ fn run() -> ExitCode {
         config.symbolic_upper = !cli.no_symbolic_upper;
         config.candidate_stats = cli.candidate_stats.clone();
         config.stats_interval = cli.stats_interval;
-        let seeds = katch2::experiment::configure(config);
+        katch2::experiment::configure(config);
         eprintln!(
-            "KATCH2_RANDOM seed={} sat_seed={} phase_seed={} merge_seed={} check_seed={} symbolic_upper={}",
-            seeds.master,
-            seeds.sat,
-            seeds.phases,
-            seeds.merges,
-            seeds.checks,
-            !cli.no_symbolic_upper
+            "KATCH2_RANDOM seed={} symbolic_upper={}",
+            seed, !cli.no_symbolic_upper
         );
         match solve_file(path, full, cli.iteration_limit) {
             Ok((verdict, solution)) => {
