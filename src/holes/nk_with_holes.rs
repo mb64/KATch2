@@ -16,8 +16,8 @@
 //!
 //! To use it, you can fill in the holes using `inst::Instantiate`.
 
+use crate::hash::{HashMap, HashMapExt as _};
 use crate::spp;
-use ahash::{HashMap, HashMapExt as _};
 
 /// A formal hole standing for an unknown SPP.  The canonical definition now
 /// lives in [`crate::expr`]; re-exported here so existing `nk_with_holes::Hole`

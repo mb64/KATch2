@@ -33,8 +33,8 @@
 //! its children" step.
 
 use crate::expr::{Exp, Expr};
+use crate::hash::{HashMap, HashMapExt as _, HashSetExt as _};
 use crate::spp::{self, SPP};
-use ahash::{HashMap, HashMapExt as _, HashSetExt as _};
 
 pub fn reduce(store: &mut spp::SPPstore, target: SPP, care: SPP) -> SPP {
     let mut reducer = Reducer {
@@ -410,7 +410,7 @@ impl TreeBuilder<'_> {
 
     /// Number of distinct nodes in `spp`.
     fn num_nodes(&self, spp: SPP) -> usize {
-        let mut seen = ahash::HashSet::new();
+        let mut seen = crate::hash::HashSet::new();
         let mut stack = vec![spp];
         while let Some(x) = stack.pop() {
             if x.as_u32() <= 1 || !seen.insert(x) {

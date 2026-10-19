@@ -1,6 +1,6 @@
 //! Compile packet-only subexpressions immediately, keeping shared definitions
 //! compact instead of expanding them into boxed per-bit expression trees.
-use ahash::{HashMap, HashMapExt as _};
+use crate::hash::{HashMap, HashMapExt as _};
 use std::rc::Rc;
 
 use super::{
@@ -96,10 +96,10 @@ impl Term {
     }
     fn unary(op: Unary, e: Self, store: &mut SPPstore) -> Self {
         // Language complement also accepts longer traces: it is not SPP complement.
-        if matches!(op, Unary::Star) {
-            if let Some(s) = e.spp() {
-                return Self::packet(store.star(s), false);
-            }
+        if matches!(op, Unary::Star)
+            && let Some(s) = e.spp()
+        {
+            return Self::packet(store.star(s), false);
         }
         Self {
             has_holes: e.has_holes,

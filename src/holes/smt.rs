@@ -15,7 +15,7 @@
 //! violates them, and passed as shared diagrams to the SPP learner. DFA state
 //! arguments are concrete.
 
-use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
+use crate::hash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 mod sat;
 
 use rustsat::types::Lit;

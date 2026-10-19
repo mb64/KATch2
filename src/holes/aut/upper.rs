@@ -6,11 +6,11 @@
 //! intersect with the upper DFA transition before projecting to packet sets.
 
 use super::{DFA, ENFA, ops};
+use crate::hash::{HashMap, HashMapExt as _};
 use crate::{
     sp::SP,
     spp::{SPP, SPPstore},
 };
-use ahash::{HashMap, HashMapExt as _};
 
 struct EpsilonStep<S> {
     state: S,

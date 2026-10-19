@@ -10,9 +10,9 @@
 //!
 //! It's essentially an OBDD, like an SP or SPP, but the implementation is slightly different.
 
+use crate::hash::{HashMap, HashMapExt as _};
 use crate::holes::aut::{DFA, ENFA, ExplicitDFA, NFA, ops};
 use crate::spp;
-use ahash::{HashMap, HashMapExt as _};
 
 #[derive(Debug, Clone)]
 pub struct Cand<'a> {

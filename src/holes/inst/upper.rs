@@ -212,9 +212,9 @@ pub(crate) fn upper_bound_forbidden<C: NFA>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash::{HashMap, HashMapExt as _};
     use crate::holes::aut::expr_to_dfa;
     use crate::holes::nk_with_holes::{AutWithHoles, Expr, Hole};
-    use ahash::{HashMap, HashMapExt as _};
 
     fn instantiate(store: &mut SPPstore, expr: &Expr, candidate: SPP) -> Instantiate<SPP> {
         let mut aut = AutWithHoles::new();

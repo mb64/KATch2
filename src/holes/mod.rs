@@ -128,7 +128,7 @@
 //! assert!(result.is_ok());
 //! ```
 
-use ahash::HashMap;
+use crate::hash::HashMap;
 pub mod aut;
 pub mod cand;
 pub mod candidate;

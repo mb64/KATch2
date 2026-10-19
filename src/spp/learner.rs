@@ -18,7 +18,7 @@
 //! and merge-target order. All positive and negative requirements are preserved.
 
 use super::{SPP, SPPstore};
-use ahash::{HashMap, HashMapExt as _};
+use crate::hash::{HashMap, HashMapExt as _};
 
 /// A single concrete training example for [`learn_spp`].
 ///

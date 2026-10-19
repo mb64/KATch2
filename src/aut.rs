@@ -1,6 +1,6 @@
 use crate::expr::Expr;
+use crate::hash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use crate::spp;
-use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 
 use std::collections::VecDeque;
 use std::hash::Hash;

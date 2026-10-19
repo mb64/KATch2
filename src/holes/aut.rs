@@ -1,6 +1,6 @@
+use crate::hash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use crate::sp;
 use crate::spp;
-use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::hash::Hash;

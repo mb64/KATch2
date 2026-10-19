@@ -1,6 +1,6 @@
 //! Boolean bitblasting with an incremental RustSAT/CaDiCaL backend.
 
-use ahash::{HashMap, HashMapExt as _};
+use crate::hash::{HashMap, HashMapExt as _};
 use rand::RngExt;
 
 use rustsat::{

@@ -41,7 +41,7 @@
 //! * Symbolic upper-bound generalization requires a single SPP traversal.
 //!   Multiple traversals and [`crate::holes::cand::Cand`] use concrete clauses.
 
-use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
+use crate::hash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use std::collections::VecDeque;
 
 use petgraph::Direction;

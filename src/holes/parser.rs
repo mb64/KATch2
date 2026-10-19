@@ -21,11 +21,11 @@
 use super::desugar::{Env, Term};
 use crate::desugar::DesugarError;
 use crate::expr::{Exp, Expr, Hole};
+use crate::hash::HashMapExt as _;
 use crate::holes::aut::{is_empty, ops};
 use crate::holes::problem::{Constraint, ProblemInstance};
 use crate::parser::{Lexer, ParseError, Parser, Span, TokenKind};
 use crate::spp;
-use ahash::HashMapExt as _;
 
 /// A fully-parsed `.nksynth` file: an ordered list of statements.
 #[derive(Debug, Clone, PartialEq)]
@@ -312,7 +312,7 @@ fn build_constraint(
 /// solution's `def NAME = expr`, so the rest of the program sees the solution wherever it used the
 /// hole.
 pub fn fill_holes(program: &Program, solution: &Program) -> Result<Program, String> {
-    let mut defs: ahash::HashMap<&str, &Exp> = ahash::HashMap::new();
+    let mut defs: crate::hash::HashMap<&str, &Exp> = crate::hash::HashMap::new();
     for stmt in &solution.statements {
         match stmt {
             Stmt::Def(name, expr) => {

@@ -5,12 +5,12 @@
 //! `&mut self`, but [`ENFA`]'s methods take `&self`; we bridge with a
 //! `RefCell`, the same trick `EpsilonClosure` uses for its memo table.
 
+use crate::hash::{HashMap, HashMapExt as _};
 use crate::holes::aut::{
     DFA, ENFA, EpsilonClosure, NFA, SubsetDfa, get_any_trace_with_states, ops,
 };
 use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Hole, State as OuterState};
 use crate::spp;
-use ahash::{HashMap, HashMapExt as _};
 use std::cell::RefCell;
 
 mod upper;

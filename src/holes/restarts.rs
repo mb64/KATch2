@@ -4,7 +4,7 @@
 //! dropped in full; on success the caller receives the winning store, so the
 //! returned candidates' handles remain valid. The shared RNG keeps advancing.
 
-use ahash::HashMap;
+use crate::hash::HashMap;
 use std::num::NonZeroUsize;
 
 use super::{
@@ -21,7 +21,7 @@ pub fn reluctant_doubling() -> impl Iterator<Item = usize> {
     let (mut index, mut value) = (1usize, 1usize);
     std::iter::from_fn(move || {
         let result = value;
-        if index & index.wrapping_neg() == value {
+        if index.isolate_lowest_one() == value {
             index = index.saturating_add(1);
             value = 1;
         } else {
@@ -109,8 +109,10 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
                     let roots: Vec<_> = bounds.iter().flat_map(|&(l, u)| [l, u]).collect();
                     let roots = compact.import(&attempt_store, &roots);
                     bounds = roots
-                        .chunks_exact(2)
-                        .map(|pair| (pair[0], pair[1]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|&[l, u]| (l, u))
                         .collect();
                     carried_store = Some(compact);
                 }
@@ -212,7 +214,7 @@ mod tests {
                     .count(),
                 1
             );
-            let runs: ahash::HashSet<_> = csv
+            let runs: crate::hash::HashSet<_> = csv
                 .lines()
                 .skip(1)
                 .map(|line| line.rsplit(',').next().unwrap().parse::<usize>().unwrap())

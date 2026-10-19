@@ -1,4 +1,4 @@
-use ahash::{HashMap, HashMapExt as _};
+use crate::hash::{HashMap, HashMapExt as _};
 // Symbolic Packets represent sets of concrete packets.
 // They are represented in a BDD-like structure.
 // Unlike traditional BDDs, we do not leave out any levels of the BDD:
