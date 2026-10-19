@@ -193,51 +193,71 @@ pub fn has_holes(expr: &Expr) -> bool {
     }
 }
 
-/// Convert a desugared [`Expr`] into a [`nk_with_holes::Expr`](HExpr),
-/// compiling predicate/assignment leaves into SPPs.
-///
-/// Panics if the expression uses a construct `nk_with_holes::Expr` cannot
-/// represent: intersection, xor, difference, complement, the LTL operators, or
-/// any sugar that should have been desugared away.
-pub fn to_hole_expr(expr: &Expr, store: &mut spp::SPPstore) -> HExpr {
-    if let Some(spp) = to_test(expr, store) {
-        return HExpr::spp(spp);
-    }
-    match expr {
-        // Expr::Top => HExpr::spp(store.top), // BUG
-        Expr::Assign(f, v) => {
-            let s = store.assign(*f, *v);
-            HExpr::spp(s)
+/// Result of compiling a subtree, retaining its classification without rescanning.
+#[derive(Debug)]
+pub enum CompiledExpr {
+    Test(spp::SPP),
+    /// A concrete expression, which can include assignments and `dup`.
+    Expr(HExpr),
+    ExprWithHoles(HExpr),
+}
+
+impl CompiledExpr {
+    pub fn into_expr(self) -> HExpr {
+        match self {
+            Self::Test(s) => HExpr::spp(s),
+            Self::Expr(e) | Self::ExprWithHoles(e) => e,
         }
-        Expr::Dup => HExpr::dup(),
-        Expr::Hole(h) => HExpr::hole(*h),
-        Expr::Union(a, b) => HExpr::union(to_hole_expr(a, store), to_hole_expr(b, store)),
-        Expr::Sequence(a, b) => HExpr::sequence(to_hole_expr(a, store), to_hole_expr(b, store)),
-        Expr::Star(e) => HExpr::star(to_hole_expr(e, store)),
-        other => panic!("to_hole_expr: construct not supported by nk_with_holes::Expr: {other:?}"),
+    }
+
+    fn has_holes(&self) -> bool {
+        matches!(self, Self::ExprWithHoles(_))
     }
 }
 
-fn to_test(expr: &Expr, store: &mut spp::SPPstore) -> Option<spp::SPP> {
-    match *expr {
-        Expr::Zero => Some(store.zero),
-        Expr::One => Some(store.one),
-        Expr::Test(f, v) => Some(store.test(f, v)),
-        Expr::Union(ref a, ref b) => {
-            let a = to_test(a, store)?;
-            let b = to_test(b, store)?;
-            Some(store.union(a, b))
+/// Compile and classify each subtree once. Only predicates support intersection
+/// and test negation; other unsupported constructs retain the previous panic.
+pub fn to_hole_expr(expr: &Expr, store: &mut spp::SPPstore) -> CompiledExpr {
+    use CompiledExpr::{Expr as Concrete, ExprWithHoles, Test};
+    match expr {
+        Expr::Zero => Test(store.zero),
+        Expr::One => Test(store.one),
+        Expr::Test(f, v) => Test(store.test(*f, *v)),
+        Expr::Assign(f, v) => Concrete(HExpr::spp(store.assign(*f, *v))),
+        Expr::Dup => Concrete(HExpr::dup()),
+        Expr::Hole(h) => ExprWithHoles(HExpr::hole(*h)),
+        Expr::Union(a, b) | Expr::Sequence(a, b) | Expr::Intersect(a, b) => {
+            let a = to_hole_expr(a, store);
+            let b = to_hole_expr(b, store);
+            let holes = a.has_holes() || b.has_holes();
+            let result = match (expr, a, b) {
+                (Expr::Union(..), Test(a), Test(b)) => return Test(store.union(a, b)),
+                (Expr::Intersect(..), Test(a), Test(b)) => return Test(store.intersect(a, b)),
+                (Expr::Union(..), a, b) => HExpr::union(a.into_expr(), b.into_expr()),
+                (Expr::Sequence(..), a, b) => HExpr::sequence(a.into_expr(), b.into_expr()),
+                _ => panic!("to_hole_expr: intersection requires predicates"),
+            };
+            if holes {
+                ExprWithHoles(result)
+            } else {
+                Concrete(result)
+            }
         }
-        Expr::Intersect(ref a, ref b) => {
-            let a = to_test(a, store)?;
-            let b = to_test(b, store)?;
-            Some(store.intersect(a, b))
+        Expr::Star(e) => {
+            let e = to_hole_expr(e, store);
+            let holes = e.has_holes();
+            let result = HExpr::star(e.into_expr());
+            if holes {
+                ExprWithHoles(result)
+            } else {
+                Concrete(result)
+            }
         }
-        Expr::TestNegation(ref a) => {
-            let a = to_test(a, store)?;
-            Some(store.complement(a))
-        }
-        _ => None,
+        Expr::TestNegation(e) => match to_hole_expr(e, store) {
+            Test(s) => Test(store.complement(s)),
+            _ => panic!("to_hole_expr: test negation requires a predicate"),
+        },
+        other => panic!("to_hole_expr: construct not supported by nk_with_holes::Expr: {other:?}"),
     }
 }
 
@@ -330,19 +350,19 @@ fn build_constraint(
             // Equality is symmetric: put the hole-bearing side on the automaton side.
             let (hole_side, dfa_side) = if rhs_holes { (rhs, lhs) } else { (lhs, rhs) };
             let dfa = expr_to_dfa(dfa_side, store);
-            let hole_expr = to_hole_expr(hole_side, store).simplify(store);
+            let hole_expr = to_hole_expr(hole_side, store).into_expr().simplify(store);
             Constraint::equality(store, &hole_expr, dfa)
         }
         AssertOp::Leq if rhs_holes => {
             // lhs ⊆ rhs[holes]: the DFA is a lower bound on the automaton.
             let dfa = expr_to_dfa(lhs, store);
-            let hole_expr = to_hole_expr(rhs, store).simplify(store);
+            let hole_expr = to_hole_expr(rhs, store).into_expr().simplify(store);
             Constraint::lower_bound(store, &hole_expr, dfa)
         }
         AssertOp::Leq => {
             // lhs[holes] ⊆ rhs: the DFA is an upper bound on the automaton.
             let dfa = expr_to_dfa(rhs, store);
-            let hole_expr = to_hole_expr(lhs, store).simplify(store);
+            let hole_expr = to_hole_expr(lhs, store).into_expr().simplify(store);
             Constraint::upper_bound(store, &hole_expr, dfa)
         }
     };
@@ -393,6 +413,46 @@ pub fn fill_holes(program: &Program, solution: &Program) -> Result<Program, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compilation_retains_predicate_and_hole_classification() {
+        let mut store = spp::SPPstore::new(2);
+        let test = Expr::union(Expr::test(0, false), Expr::test(1, true));
+        let CompiledExpr::Test(actual) = to_hole_expr(&test, &mut store) else {
+            panic!("predicate union must remain a test");
+        };
+        let a = store.test(0, false);
+        let b = store.test(1, true);
+        assert_eq!(actual, store.union(a, b));
+
+        let concrete = Expr::sequence(test.clone(), Expr::assign(0, true));
+        let compiled = to_hole_expr(&concrete, &mut store);
+        assert!(matches!(compiled, CompiledExpr::Expr(_)));
+        assert_eq!(
+            compiled.into_expr(),
+            HExpr::sequence(HExpr::spp(actual), HExpr::spp(store.assign(0, true)))
+        );
+
+        let with_hole = Expr::star(Expr::union(concrete, Expr::hole(Hole(0))));
+        assert!(matches!(
+            to_hole_expr(&with_hole, &mut store),
+            CompiledExpr::ExprWithHoles(_)
+        ));
+    }
+
+    #[test]
+    fn compilation_handles_negated_compound_tests() {
+        let mut store = spp::SPPstore::new(2);
+        let test = Expr::Intersect(Expr::test(0, true), Expr::test(1, false));
+        let negated = Expr::TestNegation(Box::new(test));
+        let CompiledExpr::Test(actual) = to_hole_expr(&negated, &mut store) else {
+            panic!("negated predicate must remain a test");
+        };
+        let a = store.test(0, true);
+        let b = store.test(1, false);
+        let both = store.intersect(a, b);
+        assert_eq!(actual, store.complement(both));
+    }
     use crate::expr::Expr;
 
     #[test]
