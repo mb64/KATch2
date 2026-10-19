@@ -220,6 +220,18 @@ fn solve_file(
     let started = timings.start();
     let mut instance = desugar(&program).map_err(|e| format!("desugar error: {e}"))?;
     timings.elapsed("desugar_ns", started);
+    // The compiled problem owns everything needed for synthesis. Keep only the
+    // small list of names needed to print solutions, not the original AST.
+    let started = timings.start();
+    let names: Vec<_> = program
+        .statements
+        .into_iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::Hole(name) => Some(name),
+            _ => None,
+        })
+        .collect();
+    timings.elapsed("drop_syntax_ns", started);
 
     // Each hole's solution, as an expression, in `instance.holes` order
     let outcome: Result<Vec<Exp>, CegisError> = if full {
@@ -260,13 +272,10 @@ fn solve_file(
         Err(CegisError::IterationLimit) => return Ok(("UNKNOWN", None)),
     };
 
-    // `desugar` numbers the holes in declaration order
-    let names = program.statements.iter().filter_map(|stmt| match stmt {
-        Stmt::Hole(name) => Some(name),
-        _ => None,
-    });
+    // Names and compiled holes retain declaration order.
     let started = timings.start();
     let text = names
+        .into_iter()
         .zip(&solution)
         .map(|(name, expr)| format!("def {name} = {}\n", pretty(expr)))
         .collect();
@@ -285,13 +294,14 @@ fn check_file(
     solution_path: &Path,
     max_iters: Option<usize>,
 ) -> Result<&'static str, String> {
-    let program = read_program(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let solution =
-        read_program(solution_path).map_err(|e| format!("{}: {e}", solution_path.display()))?;
-    let filled =
-        fill_holes(&program, &solution).map_err(|e| format!("{}: {e}", solution_path.display()))?;
-    let mut instance =
-        desugar(&filled).map_err(|e| format!("{}: desugar error: {e}", path.display()))?;
+    let mut instance = {
+        let program = read_program(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let solution =
+            read_program(solution_path).map_err(|e| format!("{}: {e}", solution_path.display()))?;
+        let filled = fill_holes(&program, &solution)
+            .map_err(|e| format!("{}: {e}", solution_path.display()))?;
+        desugar(&filled).map_err(|e| format!("{}: desugar error: {e}", path.display()))?
+    };
     debug_assert!(instance.holes.is_empty());
 
     Ok(match instance.solve(max_iters) {

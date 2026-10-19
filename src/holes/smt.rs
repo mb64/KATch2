@@ -15,6 +15,7 @@
 //! violates them, and passed as shared diagrams to the SPP learner. DFA state
 //! arguments are concrete.
 
+use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 mod sat;
 
 use rustsat::types::Lit;
@@ -26,8 +27,6 @@ use crate::holes::cand::{Cand, Input};
 use crate::sp::{SP, SPstore};
 use crate::spp::learner::{Example, learn_spp_with_bounds};
 use crate::spp::{SPP, SPPstore, Var};
-
-use std::collections::{HashMap, HashSet};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Public types

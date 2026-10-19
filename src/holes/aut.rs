@@ -1,7 +1,8 @@
 use crate::sp;
 use crate::spp;
+use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
 use std::hash::Hash;
 
 mod upper;
@@ -1408,7 +1409,7 @@ pub fn compute_coreachable<A: ENFA>(
 ) -> HashMap<A::State, sp::SP> {
     // Explore the graph from the start state, recording each state's predecessors
     let start = aut.start(store);
-    let mut seen: HashSet<A::State> = HashSet::from([start.clone()]);
+    let mut seen: HashSet<A::State> = HashSet::from_iter([start.clone()]);
     let mut order: Vec<A::State> = vec![start.clone()];
     let mut stack = vec![start];
     let mut preds: HashMap<A::State, Vec<(spp::SPP, A::State)>> = HashMap::new();

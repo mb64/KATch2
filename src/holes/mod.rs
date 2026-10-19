@@ -128,10 +128,12 @@
 //! assert!(result.is_ok());
 //! ```
 
+use ahash::HashMap;
 pub mod aut;
 pub mod cand;
 pub mod candidate;
 pub mod cegis;
+mod desugar;
 pub mod inst;
 #[doc(hidden)]
 pub mod metrics;
@@ -141,8 +143,6 @@ pub mod parser;
 pub mod problem;
 pub mod restarts;
 pub mod smt;
-
-use std::collections::HashMap;
 
 use crate::spp;
 use aut::{ExplicitDFA, ops};

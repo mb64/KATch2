@@ -12,8 +12,7 @@
 
 use crate::holes::aut::{DFA, ENFA, ExplicitDFA, NFA, ops};
 use crate::spp;
-
-use std::collections::HashMap;
+use ahash::{HashMap, HashMapExt as _};
 
 #[derive(Debug, Clone)]
 pub struct Cand<'a> {

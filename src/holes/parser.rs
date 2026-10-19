@@ -18,13 +18,14 @@
 //! into [`crate::expr::Expr::Hole`] and inlining definitions — is a separate
 //! pass and not the parser's job.
 
-use crate::desugar::{DesugarEnv, DesugarError, desugar_with_env};
+use super::desugar::{Env, Term};
+use crate::desugar::DesugarError;
 use crate::expr::{Exp, Expr, Hole};
-use crate::holes::aut::{expr_to_dfa, is_empty, ops};
-use crate::holes::nk_with_holes::Expr as HExpr;
+use crate::holes::aut::{is_empty, ops};
 use crate::holes::problem::{Constraint, ProblemInstance};
 use crate::parser::{Lexer, ParseError, Parser, Span, TokenKind};
 use crate::spp;
+use ahash::HashMapExt as _;
 
 /// A fully-parsed `.nksynth` file: an ordered list of statements.
 #[derive(Debug, Clone, PartialEq)]
@@ -193,80 +194,12 @@ pub fn has_holes(expr: &Expr) -> bool {
     }
 }
 
-/// Result of compiling a subtree, retaining its classification without rescanning.
-#[derive(Debug)]
-pub enum CompiledExpr {
-    Test(spp::SPP),
-    /// A concrete expression, which can include assignments and `dup`.
-    Expr(HExpr),
-    ExprWithHoles(HExpr),
-}
-
-impl CompiledExpr {
-    pub fn into_expr(self) -> HExpr {
-        match self {
-            Self::Test(s) => HExpr::spp(s),
-            Self::Expr(e) | Self::ExprWithHoles(e) => e,
-        }
-    }
-
-    fn has_holes(&self) -> bool {
-        matches!(self, Self::ExprWithHoles(_))
-    }
-}
-
-/// Compile and classify each subtree once. Only predicates support intersection
-/// and test negation; other unsupported constructs retain the previous panic.
-pub fn to_hole_expr(expr: &Expr, store: &mut spp::SPPstore) -> CompiledExpr {
-    use CompiledExpr::{Expr as Concrete, ExprWithHoles, Test};
-    match expr {
-        Expr::Zero => Test(store.zero),
-        Expr::One => Test(store.one),
-        Expr::Test(f, v) => Test(store.test(*f, *v)),
-        Expr::Assign(f, v) => Concrete(HExpr::spp(store.assign(*f, *v))),
-        Expr::Dup => Concrete(HExpr::dup()),
-        Expr::Hole(h) => ExprWithHoles(HExpr::hole(*h)),
-        Expr::Union(a, b) | Expr::Sequence(a, b) | Expr::Intersect(a, b) => {
-            let a = to_hole_expr(a, store);
-            let b = to_hole_expr(b, store);
-            let holes = a.has_holes() || b.has_holes();
-            let result = match (expr, a, b) {
-                (Expr::Union(..), Test(a), Test(b)) => return Test(store.union(a, b)),
-                (Expr::Intersect(..), Test(a), Test(b)) => return Test(store.intersect(a, b)),
-                (Expr::Union(..), a, b) => HExpr::union(a.into_expr(), b.into_expr()),
-                (Expr::Sequence(..), a, b) => HExpr::sequence(a.into_expr(), b.into_expr()),
-                _ => panic!("to_hole_expr: intersection requires predicates"),
-            };
-            if holes {
-                ExprWithHoles(result)
-            } else {
-                Concrete(result)
-            }
-        }
-        Expr::Star(e) => {
-            let e = to_hole_expr(e, store);
-            let holes = e.has_holes();
-            let result = HExpr::star(e.into_expr());
-            if holes {
-                ExprWithHoles(result)
-            } else {
-                Concrete(result)
-            }
-        }
-        Expr::TestNegation(e) => match to_hole_expr(e, store) {
-            Test(s) => Test(store.complement(s)),
-            _ => panic!("to_hole_expr: test negation requires a predicate"),
-        },
-        other => panic!("to_hole_expr: construct not supported by nk_with_holes::Expr: {other:?}"),
-    }
-}
-
 /// Lower a parsed [`Program`] into a [`ProblemInstance`].
 ///
-/// Maintains a [`DesugarEnv`]: each `hole NAME` binds `NAME` to a fresh
+/// Maintains shared compiled definitions: each `hole NAME` binds `NAME` to a fresh
 /// [`Expr::Hole`] (so expressions referencing it pick up the hole during
 /// desugaring), and each `def NAME = expr` binds `NAME` to its desugared body.
-/// For every assertion, [`has_holes`] decides the constraint shape:
+/// Cached hole information decides the constraint shape for every assertion:
 ///
 /// * `lhs <= rhs` with holes on the left  → [`Constraint::upper_bound`] (`lhs[holes] ⊆ rhs`)
 /// * `lhs <= rhs` with holes on the right → [`Constraint::lower_bound`] (`lhs ⊆ rhs[holes]`)
@@ -278,7 +211,7 @@ pub fn to_hole_expr(expr: &Expr, store: &mut spp::SPPstore) -> CompiledExpr {
 pub fn desugar(program: &Program) -> Result<ProblemInstance, DesugarError> {
     let n = num_fields(program);
     let mut store = spp::SPPstore::new(n);
-    let mut env = DesugarEnv::new();
+    let mut env = Env::default();
     let mut holes: Vec<Hole> = Vec::new();
     let mut constraints: Vec<Constraint> = Vec::new();
 
@@ -287,15 +220,15 @@ pub fn desugar(program: &Program) -> Result<ProblemInstance, DesugarError> {
             Stmt::Hole(name) => {
                 let h = Hole(holes.len() as u32);
                 holes.push(h);
-                env.add_variable(name.clone(), Expr::hole(h));
+                env.bind(name.clone(), Term::hole(h));
             }
             Stmt::Def(name, expr) => {
-                let desugared = desugar_with_env(expr, &env)?;
-                env.add_variable(name.clone(), desugared);
+                let desugared = env.compile(expr, &mut store)?;
+                env.bind(name.clone(), desugared);
             }
             Stmt::Assert { lhs, op, rhs } => {
-                let dl = desugar_with_env(lhs, &env)?;
-                let dr = desugar_with_env(rhs, &env)?;
+                let dl = env.compile(lhs, &mut store)?;
+                let dr = env.compile(rhs, &mut store)?;
                 if let Some(constraint) = build_constraint(&mut store, &dl, *op, &dr)? {
                     constraints.push(constraint);
                 }
@@ -317,12 +250,12 @@ pub fn desugar(program: &Program) -> Result<ProblemInstance, DesugarError> {
 /// sides is an error.
 fn build_constraint(
     store: &mut spp::SPPstore,
-    lhs: &Expr,
+    lhs: &Term,
     op: AssertOp,
-    rhs: &Expr,
+    rhs: &Term,
 ) -> Result<Option<Constraint>, DesugarError> {
-    let lhs_holes = has_holes(lhs);
-    let rhs_holes = has_holes(rhs);
+    let lhs_holes = lhs.has_holes;
+    let rhs_holes = rhs.has_holes;
     if lhs_holes && rhs_holes {
         return Err(DesugarError {
             message:
@@ -332,8 +265,8 @@ fn build_constraint(
     }
 
     if !lhs_holes && !rhs_holes {
-        let lhs_dfa = expr_to_dfa(lhs, store);
-        let rhs_dfa = expr_to_dfa(rhs, store);
+        let lhs_dfa = lhs.to_dfa(store);
+        let rhs_dfa = rhs.to_dfa(store);
         let contained = |store: &mut spp::SPPstore, lhs, rhs| {
             is_empty(&ops::intersection(lhs, ops::complement(rhs)), store)
         };
@@ -349,20 +282,20 @@ fn build_constraint(
         AssertOp::Eq => {
             // Equality is symmetric: put the hole-bearing side on the automaton side.
             let (hole_side, dfa_side) = if rhs_holes { (rhs, lhs) } else { (lhs, rhs) };
-            let dfa = expr_to_dfa(dfa_side, store);
-            let hole_expr = to_hole_expr(hole_side, store).into_expr().simplify(store);
+            let dfa = dfa_side.to_dfa(store);
+            let hole_expr = hole_side.to_hole_expr();
             Constraint::equality(store, &hole_expr, dfa)
         }
         AssertOp::Leq if rhs_holes => {
             // lhs ⊆ rhs[holes]: the DFA is a lower bound on the automaton.
-            let dfa = expr_to_dfa(lhs, store);
-            let hole_expr = to_hole_expr(rhs, store).into_expr().simplify(store);
+            let dfa = lhs.to_dfa(store);
+            let hole_expr = rhs.to_hole_expr();
             Constraint::lower_bound(store, &hole_expr, dfa)
         }
         AssertOp::Leq => {
             // lhs[holes] ⊆ rhs: the DFA is an upper bound on the automaton.
-            let dfa = expr_to_dfa(rhs, store);
-            let hole_expr = to_hole_expr(lhs, store).into_expr().simplify(store);
+            let dfa = rhs.to_dfa(store);
+            let hole_expr = lhs.to_hole_expr();
             Constraint::upper_bound(store, &hole_expr, dfa)
         }
     };
@@ -379,7 +312,7 @@ fn build_constraint(
 /// solution's `def NAME = expr`, so the rest of the program sees the solution wherever it used the
 /// hole.
 pub fn fill_holes(program: &Program, solution: &Program) -> Result<Program, String> {
-    let mut defs: std::collections::HashMap<&str, &Exp> = std::collections::HashMap::new();
+    let mut defs: ahash::HashMap<&str, &Exp> = ahash::HashMap::new();
     for stmt in &solution.statements {
         match stmt {
             Stmt::Def(name, expr) => {
@@ -414,45 +347,6 @@ pub fn fill_holes(program: &Program, solution: &Program) -> Result<Program, Stri
 mod tests {
     use super::*;
 
-    #[test]
-    fn compilation_retains_predicate_and_hole_classification() {
-        let mut store = spp::SPPstore::new(2);
-        let test = Expr::union(Expr::test(0, false), Expr::test(1, true));
-        let CompiledExpr::Test(actual) = to_hole_expr(&test, &mut store) else {
-            panic!("predicate union must remain a test");
-        };
-        let a = store.test(0, false);
-        let b = store.test(1, true);
-        assert_eq!(actual, store.union(a, b));
-
-        let concrete = Expr::sequence(test.clone(), Expr::assign(0, true));
-        let compiled = to_hole_expr(&concrete, &mut store);
-        assert!(matches!(compiled, CompiledExpr::Expr(_)));
-        assert_eq!(
-            compiled.into_expr(),
-            HExpr::sequence(HExpr::spp(actual), HExpr::spp(store.assign(0, true)))
-        );
-
-        let with_hole = Expr::star(Expr::union(concrete, Expr::hole(Hole(0))));
-        assert!(matches!(
-            to_hole_expr(&with_hole, &mut store),
-            CompiledExpr::ExprWithHoles(_)
-        ));
-    }
-
-    #[test]
-    fn compilation_handles_negated_compound_tests() {
-        let mut store = spp::SPPstore::new(2);
-        let test = Expr::Intersect(Expr::test(0, true), Expr::test(1, false));
-        let negated = Expr::TestNegation(Box::new(test));
-        let CompiledExpr::Test(actual) = to_hole_expr(&negated, &mut store) else {
-            panic!("negated predicate must remain a test");
-        };
-        let a = store.test(0, true);
-        let b = store.test(1, false);
-        let both = store.intersect(a, b);
-        assert_eq!(actual, store.complement(both));
-    }
     use crate::expr::Expr;
 
     #[test]

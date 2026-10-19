@@ -1,7 +1,7 @@
 use crate::expr::Expr;
 use crate::spp;
-use std::collections::HashMap;
-use std::collections::HashSet;
+use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
+
 use std::collections::VecDeque;
 use std::hash::Hash;
 
@@ -94,7 +94,7 @@ impl Aut {
 
     // Smart Constructors with Simplifications
 
-    fn mk_spp(&mut self, spp: spp::SPP) -> State {
+    pub(crate) fn mk_spp(&mut self, spp: spp::SPP) -> State {
         // TODO: Add simplification for SPP constants (0, 1) if not handled by SPPstore itself
         self.intern(AExpr::SPP(spp))
     }
@@ -140,7 +140,7 @@ impl Aut {
         self.intern(AExpr::Union(new_states))
     }
 
-    fn mk_union(&mut self, e1: State, e2: State) -> State {
+    pub(crate) fn mk_union(&mut self, e1: State, e2: State) -> State {
         self.mk_union_n(vec![e1, e2])
     }
 
@@ -232,11 +232,11 @@ impl Aut {
         self.intern(AExpr::Intersect(rest))
     }
 
-    fn mk_intersect(&mut self, e1: State, e2: State) -> State {
+    pub(crate) fn mk_intersect(&mut self, e1: State, e2: State) -> State {
         self.mk_intersect_n(vec![e1, e2])
     }
 
-    fn mk_xor(&mut self, e1: State, e2: State) -> State {
+    pub(crate) fn mk_xor(&mut self, e1: State, e2: State) -> State {
         if e1 == e2 {
             return self.mk_spp(self.spp.zero);
         } // e ^ e = 0
@@ -266,7 +266,7 @@ impl Aut {
         self.intern(AExpr::Difference(e1, e2))
     }
 
-    fn mk_complement(&mut self, e: State) -> State {
+    pub(crate) fn mk_complement(&mut self, e: State) -> State {
         // Simplify !!e = e
         if let AExpr::Complement(inner_e) = self.get_expr(e) {
             return *inner_e;
@@ -311,7 +311,7 @@ impl Aut {
         self.intern(AExpr::Complement(e))
     }
 
-    fn mk_sequence(&mut self, e1: State, e2: State) -> State {
+    pub(crate) fn mk_sequence(&mut self, e1: State, e2: State) -> State {
         // SPP Simplification: s1 ; s2
         if let (AExpr::SPP(s1), AExpr::SPP(s2)) = (self.get_expr(e1), self.get_expr(e2)) {
             let result_spp = self.spp.sequence(*s1, *s2);
@@ -349,7 +349,7 @@ impl Aut {
         self.intern(AExpr::Sequence(e1, e2))
     }
 
-    fn mk_star(&mut self, e: State) -> State {
+    pub(crate) fn mk_star(&mut self, e: State) -> State {
         // Simplify (e*)* = e*
         if let AExpr::Star(_inner_e) = self.get_expr(e) {
             // Return the existing e* index
@@ -370,16 +370,20 @@ impl Aut {
         self.intern(AExpr::Star(e))
     }
 
-    fn mk_dup(&mut self) -> State {
+    pub(crate) fn mk_dup(&mut self) -> State {
         self.intern(AExpr::Dup)
     }
 
-    fn mk_top(&mut self) -> State {
+    pub(crate) fn mk_top(&mut self) -> State {
         self.intern(AExpr::Top)
     }
 
-    fn mk_until(&mut self, e1: State, e2: State) -> State {
+    pub(crate) fn mk_until(&mut self, e1: State, e2: State) -> State {
         self.intern(AExpr::LtlUntil(e1, e2))
+    }
+
+    pub(crate) fn mk_next(&mut self, state: State) -> State {
+        self.intern(AExpr::LtlNext(state))
     }
 
     // Helper to get the actual expression from an index
@@ -500,7 +504,7 @@ impl Aut {
         if state == self.mk_spp(self.spp.zero) {
             return ST::new(HashMap::new());
         }
-        ST::new(HashMap::from([(state, spp)]))
+        ST::new(HashMap::from_iter([(state, spp)]))
     }
 
     // /// Insert a transition into a ST.

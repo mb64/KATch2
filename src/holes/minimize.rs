@@ -12,10 +12,11 @@ use crate::expr::{Exp, Expr};
 use crate::holes::aut::{self, DFA, ENFA, ExplicitDFA, ExplicitNFA, NFA, ops};
 use crate::sp;
 use crate::spp::{self, reduce};
+use ahash::{HashMap, HashMapExt as _};
 use petgraph::algo::{coloring, dominators, tarjan_scc};
 use petgraph::graph::{DiGraph, NodeIndex, UnGraph};
 use petgraph::unionfind::UnionFind;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Step 1 -- taking an automaton and identifying (un)mergable states
 ///

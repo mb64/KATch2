@@ -4,7 +4,8 @@
 //! dropped in full; on success the caller receives the winning store, so the
 //! returned candidates' handles remain valid. The shared RNG keeps advancing.
 
-use std::{collections::HashMap, num::NonZeroUsize};
+use ahash::HashMap;
+use std::num::NonZeroUsize;
 
 use super::{
     aut::ExplicitDFA,
@@ -53,7 +54,8 @@ impl Default for Config {
 /// attempt's cutoff is shortened to fit the remaining budget. `None` permits
 /// unlimited restarts. Only [`CegisError::IterationLimit`] triggers a restart.
 /// Neither constraints nor the reference DFA are recompiled between attempts.
-/// On error, `store` is unchanged; on success it becomes the winning store.
+/// The template's operation caches are reset before cloning. On error its arenas
+/// are unchanged; on success it becomes the winning store.
 pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     constraints: &[Constraint],
     holes: &[Hole],
@@ -62,6 +64,9 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     max_iters: Option<usize>,
     config: Config,
 ) -> Result<HashMap<Hole, C>, CegisError> {
+    // Desugaring may leave large caches of intermediate computations. Do not
+    // retain or copy those caches into every restart's working store.
+    store.memo_reset();
     let mut remaining = max_iters;
     let mut completed = 0usize;
     let mut bounds = Vec::new();
@@ -159,7 +164,14 @@ mod tests {
                 initial_cutoff: NonZeroUsize::new(1).unwrap(),
                 ..Config::default()
             };
-            let template = format!("{:?}", problem.store);
+            // Operation caches may be reset, but template handles must remain valid.
+            let roots = [
+                problem.store.zero,
+                problem.store.one,
+                problem.store.top,
+                problem.store.assign(0, true),
+            ];
+            let nodes = roots.map(|root| problem.store.get(root));
             // Two one-round attempts cannot refine and then verify a solution.
             assert_eq!(
                 run::<SPP, Native>(
@@ -172,7 +184,7 @@ mod tests {
                 ),
                 Err(CegisError::IterationLimit)
             );
-            assert_eq!(format!("{:?}", problem.store), template);
+            assert_eq!(roots.map(|root| problem.store.get(root)), nodes);
 
             let solution = run::<SPP, Native>(
                 &problem.constraints,
@@ -200,7 +212,7 @@ mod tests {
                     .count(),
                 1
             );
-            let runs: std::collections::HashSet<_> = csv
+            let runs: ahash::HashSet<_> = csv
                 .lines()
                 .skip(1)
                 .map(|line| line.rsplit(',').next().unwrap().parse::<usize>().unwrap())

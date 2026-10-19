@@ -10,8 +10,8 @@ use crate::holes::aut::{
 };
 use crate::holes::nk_with_holes::{AutWithHoles, EdgeLabel, Hole, State as OuterState};
 use crate::spp;
+use ahash::{HashMap, HashMapExt as _};
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 mod upper;
 pub(crate) use upper::upper_bound_forbidden;
@@ -339,7 +339,7 @@ mod tests {
             cex.witnesses.iter().map(|w| w.0).collect::<Vec<_>>(),
             vec![Hole(0)]
         );
-        let known = HashMap::from([(Hole(1), identity), (Hole(2), identity)]);
+        let known = HashMap::from_iter([(Hole(1), identity), (Hole(2), identity)]);
         let cex = inst
             .check_upper_bound(&mut store, &upper, &known)
             .unwrap_err();

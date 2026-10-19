@@ -17,7 +17,7 @@
 //! To use it, you can fill in the holes using `inst::Instantiate`.
 
 use crate::spp;
-use std::collections::HashMap;
+use ahash::{HashMap, HashMapExt as _};
 
 /// A formal hole standing for an unknown SPP.  The canonical definition now
 /// lives in [`crate::expr`]; re-exported here so existing `nk_with_holes::Hole`

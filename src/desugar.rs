@@ -1,6 +1,6 @@
 use crate::expr::{Exp, Expr, Pattern};
 use crate::pre::Field;
-use std::collections::HashMap;
+use ahash::{HashMap, HashMapExt as _};
 
 /// Environment for variable bindings and bit range aliases
 #[derive(Debug, Clone)]

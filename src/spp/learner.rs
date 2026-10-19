@@ -18,7 +18,7 @@
 //! and merge-target order. All positive and negative requirements are preserved.
 
 use super::{SPP, SPPstore};
-use std::collections::HashMap;
+use ahash::{HashMap, HashMapExt as _};
 
 /// A single concrete training example for [`learn_spp`].
 ///
@@ -347,7 +347,6 @@ mod tests {
     use super::*;
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
-    use std::collections::HashMap;
 
     const N: u32 = 2;
 

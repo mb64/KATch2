@@ -10,7 +10,7 @@ use crate::{
     sp::SP,
     spp::{SPP, SPPstore},
 };
-use std::collections::HashMap;
+use ahash::{HashMap, HashMapExt as _};
 
 struct EpsilonStep<S> {
     state: S,

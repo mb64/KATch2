@@ -1,3 +1,4 @@
+use ahash::{HashMap, HashMapExt as _};
 // Symbolic Packet Programs represent relations of concrete packets.
 // They are represented in a BDD-like structure.
 // Unlike traditional BDDs, we do not leave out any levels of the BDD:
@@ -10,7 +11,6 @@ use rand::seq::SliceRandom;
 
 use crate::expr::Exp;
 use crate::sp::{SP, SPnode, SPstore};
-use std::collections::HashMap;
 
 /// We use indices into the SPP store to represent SPPs.
 /// The zero SPP is represented by SPP(0) and the one SPP is represented by SPP(1).
@@ -97,51 +97,51 @@ impl SPPstore {
             top: SPP::new(0), // Dummy values, will be set later
             // We prefill the memo tables with the results of the trivial cases
             // Need to benchmark if this is actually faster than checking these cases in the operations
-            union_memo: HashMap::from([
+            union_memo: HashMap::from_iter([
                 ((SPP::new(0), SPP::new(0)), SPP::new(0)),
                 ((SPP::new(0), SPP::new(1)), SPP::new(1)),
                 ((SPP::new(1), SPP::new(0)), SPP::new(1)),
                 ((SPP::new(1), SPP::new(1)), SPP::new(1)),
             ]),
-            intersect_memo: HashMap::from([
+            intersect_memo: HashMap::from_iter([
                 ((SPP::new(0), SPP::new(0)), SPP::new(0)),
                 ((SPP::new(0), SPP::new(1)), SPP::new(0)),
                 ((SPP::new(1), SPP::new(0)), SPP::new(0)),
                 ((SPP::new(1), SPP::new(1)), SPP::new(1)),
             ]),
-            xor_memo: HashMap::from([
+            xor_memo: HashMap::from_iter([
                 ((SPP::new(0), SPP::new(0)), SPP::new(0)),
                 ((SPP::new(0), SPP::new(1)), SPP::new(1)),
                 ((SPP::new(1), SPP::new(0)), SPP::new(1)),
                 ((SPP::new(1), SPP::new(1)), SPP::new(0)),
             ]),
-            difference_memo: HashMap::from([
+            difference_memo: HashMap::from_iter([
                 ((SPP::new(0), SPP::new(0)), SPP::new(0)),
                 ((SPP::new(0), SPP::new(1)), SPP::new(0)),
                 ((SPP::new(1), SPP::new(0)), SPP::new(1)),
                 ((SPP::new(1), SPP::new(1)), SPP::new(0)),
             ]),
-            sequence_memo: HashMap::from([
+            sequence_memo: HashMap::from_iter([
                 ((SPP::new(0), SPP::new(0)), SPP::new(0)),
                 ((SPP::new(0), SPP::new(1)), SPP::new(0)),
                 ((SPP::new(1), SPP::new(0)), SPP::new(0)),
                 ((SPP::new(1), SPP::new(1)), SPP::new(1)),
             ]),
-            star_memo: HashMap::from([(SPP::new(0), SPP::new(1)), (SPP::new(1), SPP::new(1))]),
-            complement_memo: HashMap::from([
+            star_memo: HashMap::from_iter([(SPP::new(0), SPP::new(1)), (SPP::new(1), SPP::new(1))]),
+            complement_memo: HashMap::from_iter([
                 (SPP::new(0), SPP::new(1)),
                 (SPP::new(1), SPP::new(0)),
             ]),
             // branch_memo: HashMap::new(),
             test_memo: HashMap::new(),
             assign_memo: HashMap::new(),
-            flip_memo: HashMap::from([(SPP::new(0), SPP::new(0)), (SPP::new(1), SPP::new(1))]),
-            is_zero_memo: HashMap::from([(SPP::new(0), true), (SPP::new(1), false)]),
+            flip_memo: HashMap::from_iter([(SPP::new(0), SPP::new(0)), (SPP::new(1), SPP::new(1))]),
+            is_zero_memo: HashMap::from_iter([(SPP::new(0), true), (SPP::new(1), false)]),
             sp: SPstore::new(num_vars),
 
             // in the memo tables, we only want the base cases for 0 and 1
-            fwd_memo: HashMap::from([(SPP::new(0), SP::new(0)), (SPP::new(1), SP::new(1))]),
-            ifwd_memo: HashMap::from([(SP::new(0), SPP::new(0)), (SP::new(1), SPP::new(1))]),
+            fwd_memo: HashMap::from_iter([(SPP::new(0), SP::new(0)), (SPP::new(1), SP::new(1))]),
+            ifwd_memo: HashMap::from_iter([(SP::new(0), SPP::new(0)), (SP::new(1), SPP::new(1))]),
             zeros: vec![],
         };
         store.zero = store.zero();
@@ -149,6 +149,27 @@ impl SPPstore {
         store.top = store.top();
 
         store
+    }
+
+    /// Release operation caches, retaining only the terminal base cases.
+    /// Arenas and hash-consing indexes remain intact, so every existing handle
+    /// keeps its meaning. Replacing the maps also releases their capacity.
+    pub fn memo_reset(&mut self) {
+        let empty = Self::new(0);
+        self.union_memo = empty.union_memo;
+        self.intersect_memo = empty.intersect_memo;
+        self.xor_memo = empty.xor_memo;
+        self.difference_memo = empty.difference_memo;
+        self.sequence_memo = empty.sequence_memo;
+        self.star_memo = empty.star_memo;
+        self.complement_memo = empty.complement_memo;
+        self.test_memo = empty.test_memo;
+        self.assign_memo = empty.assign_memo;
+        self.flip_memo = empty.flip_memo;
+        self.is_zero_memo = empty.is_zero_memo;
+        self.fwd_memo = empty.fwd_memo;
+        self.ifwd_memo = empty.ifwd_memo;
+        self.sp.memo_reset();
     }
 
     pub fn num_vars(&self) -> Var {
@@ -784,6 +805,80 @@ mod tests {
         let expr = aut.spp_store_mut().to_expr(spp);
         let state = aut.expr_to_state(&expr);
         assert_eq!(aut.epsilon(state), spp, "to_expr({spp}) = {expr}");
+    }
+
+    #[test]
+    fn memo_reset_releases_caches_and_preserves_handles() {
+        fn operations(store: &mut SPPstore, a: SPP, b: SPP) -> (Vec<SPP>, Vec<SP>, bool) {
+            let fwd = store.fwd(a);
+            let bwd = store.bwd(a);
+            (
+                vec![
+                    store.union(a, b),
+                    store.intersect(a, b),
+                    store.xor(a, b),
+                    store.difference(a, b),
+                    store.sequence(a, b),
+                    store.star(a),
+                    store.complement(a),
+                    store.flip(a),
+                    store.ifwd(fwd),
+                    store.ibwd(bwd),
+                ],
+                vec![fwd, bwd],
+                store.is_zero(a),
+            )
+        }
+        let mut store = SPPstore::new(3);
+        let a = store.assign(0, true);
+        let b = store.test(1, false);
+        let expected = operations(&mut store, a, b);
+        let nodes = store.nodes.clone();
+        let canonical_count = store.hc.len();
+        store.memo_reset();
+        let empty = SPPstore::new(0);
+        assert_eq!(store.union_memo.len(), empty.union_memo.len());
+        assert_eq!(store.union_memo.capacity(), empty.union_memo.capacity());
+        assert_eq!(store.intersect_memo.len(), empty.intersect_memo.len());
+        assert_eq!(
+            store.intersect_memo.capacity(),
+            empty.intersect_memo.capacity()
+        );
+        assert_eq!(store.xor_memo.len(), empty.xor_memo.len());
+        assert_eq!(store.xor_memo.capacity(), empty.xor_memo.capacity());
+        assert_eq!(store.difference_memo.len(), empty.difference_memo.len());
+        assert_eq!(
+            store.difference_memo.capacity(),
+            empty.difference_memo.capacity()
+        );
+        assert_eq!(store.sequence_memo.len(), empty.sequence_memo.len());
+        assert_eq!(
+            store.sequence_memo.capacity(),
+            empty.sequence_memo.capacity()
+        );
+        assert_eq!(store.star_memo.len(), empty.star_memo.len());
+        assert_eq!(store.star_memo.capacity(), empty.star_memo.capacity());
+        assert_eq!(store.complement_memo.len(), empty.complement_memo.len());
+        assert_eq!(
+            store.complement_memo.capacity(),
+            empty.complement_memo.capacity()
+        );
+        assert_eq!(store.test_memo.len(), empty.test_memo.len());
+        assert_eq!(store.test_memo.capacity(), empty.test_memo.capacity());
+        assert_eq!(store.assign_memo.len(), empty.assign_memo.len());
+        assert_eq!(store.assign_memo.capacity(), empty.assign_memo.capacity());
+        assert_eq!(store.flip_memo.len(), empty.flip_memo.len());
+        assert_eq!(store.flip_memo.capacity(), empty.flip_memo.capacity());
+        assert_eq!(store.is_zero_memo.len(), empty.is_zero_memo.len());
+        assert_eq!(store.is_zero_memo.capacity(), empty.is_zero_memo.capacity());
+        assert_eq!(store.fwd_memo.len(), empty.fwd_memo.len());
+        assert_eq!(store.fwd_memo.capacity(), empty.fwd_memo.capacity());
+        assert_eq!(store.ifwd_memo.len(), empty.ifwd_memo.len());
+        assert_eq!(store.ifwd_memo.capacity(), empty.ifwd_memo.capacity());
+        assert_eq!(store.nodes, nodes);
+        assert_eq!(store.hc.len(), canonical_count);
+        assert_eq!(operations(&mut store, a, b), expected);
+        assert_eq!(store.nodes, nodes);
     }
 
     #[test]

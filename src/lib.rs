@@ -405,7 +405,7 @@ mod perf_tests {
         println!("Testing simplified is_empty worklist...");
         let start = Instant::now();
         let mut todo = vec![(state, sp_one)];
-        let mut sp_map = std::collections::HashMap::new();
+        let mut sp_map = ahash::HashMap::default();
         let mut iterations = 0;
 
         while !todo.is_empty() && iterations < 10 {

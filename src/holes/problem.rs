@@ -7,8 +7,6 @@
 //! [`ProblemInstance::solve_full`] methods run the CEGIS loop
 //! ([`crate::holes::cegis`]) and report a per-hole solution.
 
-use std::collections::HashMap;
-
 use crate::holes::aut::{ExplicitDFA, SubsetDfa, ops};
 use crate::holes::cand::Cand;
 use crate::holes::candidate::Candidate;
@@ -17,6 +15,7 @@ use crate::holes::nk_with_holes::{AutWithHoles, Expr, State};
 use crate::holes::restarts;
 use crate::holes::smt::Native;
 use crate::spp::{self, SPP};
+use ahash::HashMap;
 
 /// The formal hole standing for an unknown sub-program. Re-exported from
 /// [`crate::expr`] for convenience alongside the problem types.

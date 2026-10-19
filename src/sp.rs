@@ -1,9 +1,9 @@
+use ahash::{HashMap, HashMapExt as _};
 // Symbolic Packets represent sets of concrete packets.
 // They are represented in a BDD-like structure.
 // Unlike traditional BDDs, we do not leave out any levels of the BDD:
 // each path down the BDD has precisely the same depth, namely the number of variables, i.e. the packet size in bits.
 
-use std::collections::HashMap;
 use std::fmt;
 
 use rand::seq::SliceRandom;
@@ -74,26 +74,41 @@ impl SPstore {
             one: SP::new(0), // Dummy values, will be set later
             // We prefill the memo tables with the results of the trivial cases
             // Need to benchmark if this is actually faster than checking these cases in the operations
-            union_memo: HashMap::from([
+            union_memo: HashMap::from_iter([
                 ((SP::new(0), SP::new(0)), SP::new(0)),
                 ((SP::new(0), SP::new(1)), SP::new(1)),
                 ((SP::new(1), SP::new(0)), SP::new(1)),
                 ((SP::new(1), SP::new(1)), SP::new(1)),
             ]),
-            intersect_memo: HashMap::from([
+            intersect_memo: HashMap::from_iter([
                 ((SP::new(0), SP::new(0)), SP::new(0)),
                 ((SP::new(0), SP::new(1)), SP::new(0)),
                 ((SP::new(1), SP::new(0)), SP::new(0)),
                 ((SP::new(1), SP::new(1)), SP::new(1)),
             ]),
-            complement_memo: HashMap::from([(SP::new(0), SP::new(1)), (SP::new(1), SP::new(0))]),
+            complement_memo: HashMap::from_iter([
+                (SP::new(0), SP::new(1)),
+                (SP::new(1), SP::new(0)),
+            ]),
             ifelse_memo: HashMap::new(),
-            is_zero_memo: HashMap::from([(SP::new(0), true), (SP::new(1), false)]),
-            count_memo: HashMap::from([(SP::new(0), 0.0), (SP::new(1), 1.0)]),
+            is_zero_memo: HashMap::from_iter([(SP::new(0), true), (SP::new(1), false)]),
+            count_memo: HashMap::from_iter([(SP::new(0), 0.0), (SP::new(1), 1.0)]),
         };
         store.zero = store.zero();
         store.one = store.one();
         store
+    }
+
+    /// Release operation caches while preserving terminal cases and all handles.
+    /// The arena and its hash-consing index are not changed.
+    pub fn memo_reset(&mut self) {
+        let empty = Self::new(0);
+        self.union_memo = empty.union_memo;
+        self.intersect_memo = empty.intersect_memo;
+        self.complement_memo = empty.complement_memo;
+        self.ifelse_memo = empty.ifelse_memo;
+        self.is_zero_memo = empty.is_zero_memo;
+        self.count_memo = empty.count_memo;
     }
 
     pub fn get(&self, sp: SP) -> SPnode {
@@ -394,6 +409,52 @@ mod tests {
     use super::*;
 
     const N: Var = 2;
+
+    #[test]
+    fn memo_reset_releases_caches_and_preserves_handles() {
+        fn operations(store: &mut SPstore, a: SP, b: SP) -> (Vec<SP>, bool, f32) {
+            (
+                vec![
+                    store.union(a, b),
+                    store.intersect(a, b),
+                    store.complement(a),
+                    store.ifelse(0, a, b),
+                ],
+                store.is_zero(a),
+                store.count(a),
+            )
+        }
+        let mut store = SPstore::new(3);
+        let a = store.singleton(&[true, false, true]);
+        let b = store.singleton(&[false, true, false]);
+        let expected = operations(&mut store, a, b);
+        let nodes = store.nodes.clone();
+        let canonical_count = store.hc.len();
+        store.memo_reset();
+        let empty = SPstore::new(0);
+        assert_eq!(store.union_memo.len(), empty.union_memo.len());
+        assert_eq!(store.union_memo.capacity(), empty.union_memo.capacity());
+        assert_eq!(store.intersect_memo.len(), empty.intersect_memo.len());
+        assert_eq!(
+            store.intersect_memo.capacity(),
+            empty.intersect_memo.capacity()
+        );
+        assert_eq!(store.complement_memo.len(), empty.complement_memo.len());
+        assert_eq!(
+            store.complement_memo.capacity(),
+            empty.complement_memo.capacity()
+        );
+        assert_eq!(store.ifelse_memo.len(), empty.ifelse_memo.len());
+        assert_eq!(store.ifelse_memo.capacity(), empty.ifelse_memo.capacity());
+        assert_eq!(store.is_zero_memo.len(), empty.is_zero_memo.len());
+        assert_eq!(store.is_zero_memo.capacity(), empty.is_zero_memo.capacity());
+        assert_eq!(store.count_memo.len(), empty.count_memo.len());
+        assert_eq!(store.count_memo.capacity(), empty.count_memo.capacity());
+        assert_eq!(store.nodes, nodes);
+        assert_eq!(store.hc.len(), canonical_count);
+        assert_eq!(operations(&mut store, a, b), expected);
+        assert_eq!(store.nodes, nodes);
+    }
 
     #[test]
     fn test_laws_0() {

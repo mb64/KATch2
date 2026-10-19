@@ -41,7 +41,8 @@
 //! * Symbolic upper-bound generalization requires a single SPP traversal.
 //!   Multiple traversals and [`crate::holes::cand::Cand`] use concrete clauses.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
+use std::collections::VecDeque;
 
 use petgraph::Direction;
 use petgraph::algo::dinics;
@@ -1582,7 +1583,7 @@ mod tests {
         let reference = top_dfa(&store);
         let mut learner = Native::new(1);
         let slots = [learner.fresh_spp(), learner.fresh_spp()];
-        let hole_to_var = HashMap::from([(Hole(0), slots[0]), (Hole(1), slots[1])]);
+        let hole_to_var = HashMap::from_iter([(Hole(0), slots[0]), (Hole(1), slots[1])]);
         let expr = Expr::sequence(Expr::hole(Hole(0)), Expr::hole(Hole(1)));
         let mut aut = AutWithHoles::new();
         let start = aut.expr_to_state(&mut store, &expr);
@@ -1610,7 +1611,7 @@ mod tests {
                         let mut inst = Instantiate::new(
                             aut.clone(),
                             start,
-                            HashMap::from([
+                            HashMap::from_iter([
                                 (Hole(0), relations[a as usize]),
                                 (Hole(1), relations[b as usize]),
                             ]),
@@ -1688,7 +1689,7 @@ mod tests {
         let mut learner = Native::new(1);
         let first = learner.fresh_spp();
         let last = learner.fresh_spp();
-        let hole_to_var = HashMap::from([(Hole(0), first), (Hole(1), last)]);
+        let hole_to_var = HashMap::from_iter([(Hole(0), first), (Hole(1), last)]);
         let expr = Expr::sequence(
             Expr::hole(Hole(0)),
             Expr::sequence(Expr::dup(), Expr::hole(Hole(1))),
@@ -1698,7 +1699,7 @@ mod tests {
         let mut inst = Instantiate::new(
             aut,
             start,
-            HashMap::from([(Hole(0), store.zero), (Hole(1), store.zero)]),
+            HashMap::from_iter([(Hole(0), store.zero), (Hole(1), store.zero)]),
         );
         let cex = LowerBoundCounterexample {
             trace: vec![vec![false], vec![true]],

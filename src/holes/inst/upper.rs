@@ -214,12 +214,12 @@ mod tests {
     use super::*;
     use crate::holes::aut::expr_to_dfa;
     use crate::holes::nk_with_holes::{AutWithHoles, Expr, Hole};
-    use std::collections::HashMap;
+    use ahash::{HashMap, HashMapExt as _};
 
     fn instantiate(store: &mut SPPstore, expr: &Expr, candidate: SPP) -> Instantiate<SPP> {
         let mut aut = AutWithHoles::new();
         let start = aut.expr_to_state(store, expr);
-        Instantiate::new(aut, start, HashMap::from([(Hole(0), candidate)]))
+        Instantiate::new(aut, start, HashMap::from_iter([(Hole(0), candidate)]))
     }
 
     fn relation(mask: u32, store: &mut SPPstore) -> SPP {

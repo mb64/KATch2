@@ -1,7 +1,7 @@
 //! Boolean bitblasting with an incremental RustSAT/CaDiCaL backend.
 
+use ahash::{HashMap, HashMapExt as _};
 use rand::RngExt;
-use std::collections::HashMap;
 
 use rustsat::{
     solvers::{GetInternalStats, PhaseLit, Solve, SolverResult},
