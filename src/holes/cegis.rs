@@ -194,6 +194,18 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
     store: &mut spp::SPPstore,
     max_iters: Option<usize>,
 ) -> Result<HashMap<Hole, C>, CegisError> {
+    run_with_bounds::<C, L>(constraints, holes, reference_dfa, store, max_iters, None)
+}
+
+/// CEGIS with optional proven SPP bounds carried across restart attempts.
+pub(crate) fn run_with_bounds<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
+    constraints: &[Constraint],
+    holes: &[Hole],
+    reference_dfa: &'a ExplicitDFA,
+    store: &mut spp::SPPstore,
+    max_iters: Option<usize>,
+    mut saved: Option<&mut Vec<(spp::SPP, spp::SPP)>>,
+) -> Result<HashMap<Hole, C>, CegisError> {
     // Reject assertions checked during problem construction before allocating
     // the learner or instantiating any hole-bearing automata.
     if constraints.iter().any(|c| matches!(c, Constraint::False)) {
@@ -208,9 +220,10 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
         hole_to_var.insert(h, C::fresh_var(&mut learner, reference_dfa));
     }
 
-    let sol = learner
-        .extract(store)
-        .expect("haven't added any constraints yet");
+    if let Some(bounds) = saved.as_ref().filter(|bounds| !bounds.is_empty()) {
+        learner.restore_spp_bounds(bounds, store);
+    }
+    let sol = learner.extract(store).map_err(|_| CegisError::Infeasible)?;
     let mut candidates: HashMap<Hole, C> = hole_to_var
         .iter()
         .map(|(&h, &v)| (h, C::from_solution(&sol, v)))
@@ -227,6 +240,9 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
         if let Some(cap) = max_iters
             && iters >= cap
         {
+            if let Some(bounds) = saved.as_mut() {
+                **bounds = learner.save_spp_bounds(store);
+            }
             return Err(CegisError::IterationLimit);
         }
         iters += 1;

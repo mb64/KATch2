@@ -34,12 +34,15 @@ pub fn reluctant_doubling() -> impl Iterator<Item = usize> {
 pub struct Config {
     /// Multiply each sequence element by this many CEGIS iterations.
     pub initial_cutoff: NonZeroUsize,
+    /// Carry proven SPP lower/upper bounds across attempts, compacting their DAGs.
+    pub save_bounds: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            initial_cutoff: NonZeroUsize::new(140).unwrap(),
+            initial_cutoff: NonZeroUsize::new(150).unwrap(),
+            save_bounds: false,
         }
     }
 }
@@ -61,6 +64,8 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
 ) -> Result<HashMap<Hole, C>, CegisError> {
     let mut remaining = max_iters;
     let mut completed = 0usize;
+    let mut bounds = Vec::new();
+    let mut carried_store = None;
     for (attempt, multiple) in reluctant_doubling().enumerate() {
         let cutoff = config.initial_cutoff.get().saturating_mul(multiple);
         let cutoff = remaining.map_or(cutoff, |remaining| cutoff.min(remaining));
@@ -70,13 +75,14 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
             cutoff,
             completed
         );
-        let mut attempt_store = store.clone();
-        match cegis::run::<C, L>(
+        let mut attempt_store = carried_store.take().unwrap_or_else(|| store.clone());
+        match cegis::run_with_bounds::<C, L>(
             constraints,
             holes,
             reference_dfa,
             &mut attempt_store,
             Some(cutoff),
+            config.save_bounds.then_some(&mut bounds),
         ) {
             Ok(candidates) => {
                 *store = attempt_store;
@@ -84,8 +90,6 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
             }
             Err(CegisError::Infeasible) => return Err(CegisError::Infeasible),
             Err(CegisError::IterationLimit) => {
-                // Free this attempt before allocating the next clone.
-                drop(attempt_store);
                 completed = completed.saturating_add(cutoff);
                 if let Some(remaining) = &mut remaining {
                     *remaining -= cutoff;
@@ -93,6 +97,19 @@ pub fn run<'a, C: Candidate<'a>, L: SmtLearner<'a>>(
                         return Err(CegisError::IterationLimit);
                     }
                 }
+                if config.save_bounds {
+                    // Start from the immutable compiled template every time,
+                    // importing only current bound roots, not past garbage.
+                    let mut compact = store.clone();
+                    let roots: Vec<_> = bounds.iter().flat_map(|&(l, u)| [l, u]).collect();
+                    let roots = compact.import(&attempt_store, &roots);
+                    bounds = roots
+                        .chunks_exact(2)
+                        .map(|pair| (pair[0], pair[1]))
+                        .collect();
+                    carried_store = Some(compact);
+                }
+                drop(attempt_store);
             }
         }
     }
@@ -140,6 +157,7 @@ mod tests {
             let reference = SPP::make_reference_dfa(&mut problem.store, &problem.constraints);
             let config = Config {
                 initial_cutoff: NonZeroUsize::new(1).unwrap(),
+                ..Config::default()
             };
             let template = format!("{:?}", problem.store);
             // Two one-round attempts cannot refine and then verify a solution.
@@ -205,5 +223,47 @@ mod tests {
             problem.solve_full(Some(0)),
             Err(CegisError::IterationLimit)
         ));
+    }
+    #[test]
+    fn retained_bounds_make_progress_even_with_one_round_attempts() {
+        crate::experiment::with_seed(17, || {
+            let mut problem =
+                desugar(&parse_program("hole h\nassert h == (x0 := 1)").unwrap()).unwrap();
+            let reference = SPP::make_reference_dfa(&mut problem.store, &problem.constraints);
+            let mut bounds = Vec::new();
+            let first = cegis::run_with_bounds::<SPP, Native>(
+                &problem.constraints,
+                &problem.holes,
+                &reference,
+                &mut problem.store,
+                Some(1),
+                Some(&mut bounds),
+            );
+            assert_eq!(first, Err(CegisError::IterationLimit));
+            assert_eq!(bounds.len(), 1);
+            assert!(bounds[0].0 != problem.store.zero || bounds[0].1 != problem.store.top);
+            let solution = run::<SPP, Native>(
+                &problem.constraints,
+                &problem.holes,
+                &reference,
+                &mut problem.store,
+                Some(100),
+                Config {
+                    save_bounds: true,
+                    initial_cutoff: NonZeroUsize::new(1).unwrap(),
+                },
+            )
+            .unwrap();
+            for input in [false, true] {
+                for output in [false, true] {
+                    assert_eq!(
+                        problem
+                            .store
+                            .accepts(solution[&Hole(0)], &[input], &[output]),
+                        output
+                    );
+                }
+            }
+        });
     }
 }

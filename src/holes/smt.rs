@@ -24,7 +24,7 @@ use crate::flags;
 use crate::holes::aut::ExplicitDFA;
 use crate::holes::cand::{Cand, Input};
 use crate::sp::{SP, SPstore};
-use crate::spp::learner::{Example, learn_spp_with_forbidden};
+use crate::spp::learner::{Example, learn_spp_with_bounds};
 use crate::spp::{SPP, SPPstore, Var};
 
 use std::collections::{HashMap, HashSet};
@@ -180,6 +180,16 @@ impl std::fmt::Display for InconsistentError {
 /// `'a` is the lifetime of the [`ExplicitDFA`]s that [`Cand`] slots predicate
 /// over.
 pub trait SmtLearner<'a> {
+    /// Export only proven relational facts, never current-model choices.
+    fn save_spp_bounds(&mut self, _store: &mut SPPstore) -> Vec<(SPP, SPP)> {
+        Vec::new()
+    }
+
+    /// Restore bounds in fresh SPP slots allocated in the same order.
+    fn restore_spp_bounds(&mut self, bounds: &[(SPP, SPP)], _store: &mut SPPstore) {
+        assert!(bounds.is_empty(), "this backend cannot restore SPP bounds");
+    }
+
     /// Sure relational bounds; defaults to no information for other backends.
     fn spp_bounds(&self, _spp: SppVar, store: &mut SPPstore) -> (SPP, SPP) {
         (store.zero, store.top)
@@ -271,6 +281,7 @@ pub struct Native<'a> {
     applications: HashMap<(SlotRef, Vec<Arg>), usize>,
     clauses: Vec<Vec<TrackedLit>>,
     forbidden: Vec<Option<SPP>>,
+    required: Vec<Option<SPP>>,
     sure_bounds: Vec<(SPP, SPP)>,
     metrics: crate::holes::metrics::Metrics,
     candidate_stats: crate::holes::candidate_stats::CandidateStats,
@@ -281,6 +292,19 @@ pub struct Native<'a> {
 pub type Z3<'a> = Native<'a>;
 
 impl<'a> SmtLearner<'a> for Native<'a> {
+    fn save_spp_bounds(&mut self, store: &mut SPPstore) -> Vec<(SPP, SPP)> {
+        self.refresh_bounds(store);
+        self.sure_bounds.clone()
+    }
+
+    fn restore_spp_bounds(&mut self, bounds: &[(SPP, SPP)], store: &mut SPPstore) {
+        assert_eq!(bounds.len(), self.num_spps as usize);
+        for (i, &(lower, upper)) in bounds.iter().enumerate() {
+            self.required[i] = Some(lower);
+            self.forbidden[i] = Some(store.difference(store.top, upper));
+        }
+    }
+
     fn spp_bounds(&self, spp: SppVar, store: &mut SPPstore) -> (SPP, SPP) {
         self.sure_bounds
             .get(spp.0 as usize)
@@ -304,6 +328,7 @@ impl<'a> SmtLearner<'a> for Native<'a> {
             existentials: Vec::new(),
             clauses: Vec::new(),
             forbidden: Vec::new(),
+            required: Vec::new(),
             sure_bounds: Vec::new(),
             metrics: crate::holes::metrics::Metrics::new("native"),
             candidate_stats: crate::holes::candidate_stats::CandidateStats::new(),
@@ -316,6 +341,7 @@ impl<'a> SmtLearner<'a> for Native<'a> {
         let id = self.num_spps;
         self.num_spps += 1;
         self.forbidden.push(None);
+        self.required.push(None);
         SppVar(id)
     }
 
@@ -438,6 +464,14 @@ impl<'a> SmtLearner<'a> for Native<'a> {
     /// those learners.
     fn extract(&mut self, spp_store: &mut SPPstore) -> Result<Solution<'a>, InconsistentError> {
         self.metrics.add("extractions", 1);
+        for (required, forbidden) in self.required.iter().zip(&self.forbidden) {
+            if let (Some(required), Some(forbidden)) = (required, forbidden) {
+                let overlap = spp_store.intersect(*required, *forbidden);
+                if !spp_store.is_zero(overlap) {
+                    return Err(InconsistentError);
+                }
+            }
+        }
         let model = self.solve(spp_store)?;
 
         self.refresh_bounds(spp_store);
@@ -462,7 +496,8 @@ impl<'a> SmtLearner<'a> for Native<'a> {
             let negative = exs.len() - positive;
             let spp_started = self.metrics.start();
             let forbidden = self.forbidden[idx as usize].unwrap_or(spp_store.zero);
-            let spp = learn_spp_with_forbidden(exs, forbidden, spp_store)
+            let required = self.required[idx as usize].unwrap_or(spp_store.zero);
+            let spp = learn_spp_with_bounds(exs, required, forbidden, spp_store)
                 .expect("native model is internally consistent");
             let learning_ns = spp_started.map_or(0, |t| t.elapsed().as_nanos());
             self.metrics.add("spp_learning_ns", learning_ns as u64);
@@ -501,9 +536,10 @@ impl<'a> Native<'a> {
         self.sure_bounds = self
             .forbidden
             .iter()
-            .map(|forbidden| {
+            .enumerate()
+            .map(|(i, forbidden)| {
                 let upper = store.difference(store.top, forbidden.unwrap_or(store.zero));
-                (store.zero, upper)
+                (self.required[i].unwrap_or(store.zero), upper)
             })
             .collect();
         let n = self.num_vars as usize;
@@ -551,7 +587,12 @@ impl<'a> Native<'a> {
     /// violates it. The instance constrains the symbolic arguments, so it also
     /// excludes future forbidden values of this application, not just one pair.
     fn refine_forbidden(&mut self, model: &Model, store: &SPPstore) -> bool {
-        if self.forbidden.iter().all(Option::is_none) {
+        if self
+            .forbidden
+            .iter()
+            .chain(&self.required)
+            .all(Option::is_none)
+        {
             return false;
         }
         let started = self.metrics.start();
@@ -561,18 +602,21 @@ impl<'a> Native<'a> {
             let SlotRef::Spp(slot) = atom.slot else {
                 continue;
             };
-            let Some(forbidden) = self.forbidden[slot as usize] else {
+            let value = model.value(atom.result);
+            let region = if value {
+                self.forbidden[slot as usize]
+            } else {
+                self.required[slot as usize]
+            };
+            let Some(region) = region else {
                 continue;
             };
-            if !model.value(atom.result) {
-                continue;
-            }
             let values: Vec<bool> = atom.args.iter().map(|a| a.value(model) != 0).collect();
-            if store.accepts(forbidden, &values[..n], &values[n..]) {
-                violations.push((idx, forbidden));
+            if store.accepts(region, &values[..n], &values[n..]) {
+                violations.push((idx, region, !value));
             }
         }
-        for &(idx, forbidden) in &violations {
+        for &(idx, region, required) in &violations {
             let atom = &self.atoms[idx];
             let args: Vec<Lit> = atom
                 .args
@@ -583,8 +627,9 @@ impl<'a> Native<'a> {
                 })
                 .collect();
             let result = atom.result;
-            let member = self.build_spp_bool(forbidden, &args, 0, store, &mut HashMap::new());
-            self.solver.clause([!result, !member]);
+            let member = self.build_spp_bool(region, &args, 0, store, &mut HashMap::new());
+            self.solver
+                .clause([if required { result } else { !result }, !member]);
         }
         if !violations.is_empty() {
             self.metrics.add("forbidden_refinement_rounds", 1);
@@ -1980,5 +2025,98 @@ mod tests {
         );
         assert!(learner.existentials.is_empty());
         assert!(learner.atoms.is_empty());
+    }
+    #[test]
+    fn restored_bounds_enforce_both_polarities_for_every_one_bit_relation() {
+        fn relation(mask: u32, store: &mut SPPstore) -> SPP {
+            let mut result = store.zero;
+            for pair in 0..4 {
+                if mask & (1 << pair) != 0 {
+                    let input = store.test(0, pair & 2 != 0);
+                    let output = store.assign(0, pair & 1 != 0);
+                    let singleton = store.sequence(input, output);
+                    result = store.union(result, singleton);
+                }
+            }
+            result
+        }
+        for lower in 0..16u32 {
+            for upper in 0..16u32 {
+                if lower & !upper != 0 {
+                    continue;
+                }
+                let mut store = SPPstore::new(1);
+                let bounds = [(relation(lower, &mut store), relation(upper, &mut store))];
+                for pair in 0..4 {
+                    for polarity in [false, true] {
+                        let mut learner = Native::new(1);
+                        let slot = learner.fresh_spp();
+                        learner.restore_spp_bounds(&bounds, &mut store);
+                        learner.add_clause(
+                            AbstractClause {
+                                literals: vec![Literal::Spp {
+                                    spp: slot,
+                                    ap1: vec![AbstractBit::Concrete(pair & 2 != 0)],
+                                    ap2: vec![AbstractBit::Concrete(pair & 1 != 0)],
+                                    polarity,
+                                }],
+                            },
+                            &mut store.sp,
+                        );
+                        let result = learner.extract(&mut store);
+                        let allowed = if polarity {
+                            upper & (1 << pair) != 0
+                        } else {
+                            lower & (1 << pair) == 0
+                        };
+                        assert_eq!(result.is_ok(), allowed, "{lower}/{upper}/{pair}/{polarity}");
+                        if let Ok(solution) = result {
+                            let candidate = solution.spps[&slot];
+                            for p in 0..4 {
+                                let accepts =
+                                    store.accepts(candidate, &[p & 2 != 0], &[p & 1 != 0]);
+                                if lower & (1 << p) != 0 {
+                                    assert!(accepts);
+                                }
+                                if upper & (1 << p) == 0 {
+                                    assert!(!accepts);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn saved_bounds_exclude_sat_model_decisions() {
+        let mut store = SPPstore::new(1);
+        let mut learner = Native::new(1);
+        let slot = learner.fresh_spp();
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![
+                    Literal::Spp {
+                        spp: slot,
+                        ap1: vec![AbstractBit::Concrete(false)],
+                        ap2: vec![AbstractBit::Concrete(false)],
+                        polarity: true,
+                    },
+                    Literal::Spp {
+                        spp: slot,
+                        ap1: vec![AbstractBit::Concrete(true)],
+                        ap2: vec![AbstractBit::Concrete(true)],
+                        polarity: true,
+                    },
+                ],
+            },
+            &mut store.sp,
+        );
+        learner.extract(&mut store).unwrap();
+        assert_eq!(
+            learner.save_spp_bounds(&mut store),
+            vec![(store.zero, store.top)]
+        );
     }
 }

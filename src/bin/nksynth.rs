@@ -13,6 +13,7 @@
 //! printing `VALID` or `INVALID`.
 
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::thread;
@@ -20,6 +21,7 @@ use std::thread;
 use clap::Parser;
 use katch2::expr::Exp;
 use katch2::holes::cegis::CegisError;
+use katch2::holes::metrics::Metrics;
 use katch2::holes::minimize;
 use katch2::holes::parser::{Program, Stmt, desugar, fill_holes, parse_program};
 use katch2::printer::pretty;
@@ -46,6 +48,14 @@ struct Cli {
     /// Learn only concrete upper-bound clauses; skip symbolic restrictions.
     #[arg(long)]
     no_symbolic_upper: bool,
+
+    /// Preserve proven hole bounds across randomized restarts.
+    #[arg(long)]
+    save_restart_bounds: bool,
+
+    /// Initial CEGIS iteration cutoff, multiplied by the Luby restart sequence.
+    #[arg(long, default_value = "150", value_name = "N")]
+    restart_baseline: NonZeroUsize,
 
     /// Write one CSV row per candidate guess and SPP slot (single input only).
     #[arg(long, value_name = "FILE")]
@@ -162,21 +172,27 @@ fn run() -> ExitCode {
         let seed = cli.seed.unwrap_or_else(|| rand::rng().random());
         let mut config = katch2::experiment::Config::new(seed);
         config.symbolic_upper = !cli.no_symbolic_upper;
+        config.save_restart_bounds = cli.save_restart_bounds;
+        config.restart_baseline = cli.restart_baseline;
         config.candidate_stats = cli.candidate_stats.clone();
         config.stats_interval = cli.stats_interval;
         katch2::experiment::configure(config);
         eprintln!(
-            "KATCH2_RANDOM seed={} symbolic_upper={}",
-            seed, !cli.no_symbolic_upper
+            "KATCH2_RANDOM seed={} symbolic_upper={} restart_baseline={}",
+            seed, !cli.no_symbolic_upper, cli.restart_baseline
         );
-        match solve_file(path, full, cli.iteration_limit) {
+        let mut timings = Metrics::new("cli");
+        match solve_file(path, full, cli.iteration_limit, &mut timings) {
             Ok((verdict, solution)) => {
                 println!("{verdict}");
-                if let (Some(out_path), Some(solution)) = (&cli.output, solution)
-                    && let Err(e) = fs::write(out_path, solution)
-                {
-                    eprintln!("error: {}: could not write file: {e}", out_path.display());
-                    exit = ExitCode::FAILURE;
+                if let (Some(out_path), Some(solution)) = (&cli.output, solution) {
+                    let started = timings.start();
+                    let written = fs::write(out_path, solution);
+                    timings.elapsed("write_ns", started);
+                    if let Err(e) = written {
+                        eprintln!("error: {}: could not write file: {e}", out_path.display());
+                        exit = ExitCode::FAILURE;
+                    }
                 }
             }
             Err(e) => {
@@ -196,28 +212,48 @@ fn solve_file(
     path: &Path,
     full: bool,
     max_iters: Option<usize>,
+    timings: &mut Metrics,
 ) -> Result<(&'static str, Option<String>), String> {
+    let started = timings.start();
     let program = read_program(path)?;
+    timings.elapsed("read_parse_ns", started);
+    let started = timings.start();
     let mut instance = desugar(&program).map_err(|e| format!("desugar error: {e}"))?;
+    timings.elapsed("desugar_ns", started);
 
     // Each hole's solution, as an expression, in `instance.holes` order
     let outcome: Result<Vec<Exp>, CegisError> = if full {
-        instance.solve_full(max_iters).map(|dfas| {
+        let started = timings.start();
+        let result = instance.solve_full(max_iters);
+        timings.elapsed("solve_ns", started);
+        timings.checkpoint();
+        let started = timings.start();
+        let converted = result.map(|dfas| {
             let holes = instance.holes.clone();
             holes
                 .iter()
                 .map(|h| minimize::to_expr(&dfas[h], &mut instance.store))
                 .collect()
-        })
+        });
+        timings.elapsed("to_expr_ns", started);
+        converted
     } else {
-        instance.solve(max_iters).map(|spps| {
+        let started = timings.start();
+        let result = instance.solve(max_iters);
+        timings.elapsed("solve_ns", started);
+        timings.checkpoint();
+        let started = timings.start();
+        let converted = result.map(|spps| {
             let holes = instance.holes.clone();
             holes
                 .iter()
                 .map(|h| instance.store.to_expr(spps[h]))
                 .collect()
-        })
+        });
+        timings.elapsed("to_expr_ns", started);
+        converted
     };
+    timings.checkpoint();
     let solution = match outcome {
         Ok(exprs) => exprs,
         Err(CegisError::Infeasible) => return Ok(("UNSAT", None)),
@@ -229,10 +265,12 @@ fn solve_file(
         Stmt::Hole(name) => Some(name),
         _ => None,
     });
+    let started = timings.start();
     let text = names
         .zip(&solution)
         .map(|(name, expr)| format!("def {name} = {}\n", pretty(expr)))
         .collect();
+    timings.elapsed("format_ns", started);
     Ok(("SAT", Some(text)))
 }
 
@@ -283,12 +321,25 @@ mod tests {
             "guesses.csv",
             "--stats-interval",
             "32",
+            "--restart-baseline",
+            "140",
             "input.nksynth",
         ])
         .unwrap();
         assert_eq!(cli.seed, Some(u64::MAX));
         assert!(cli.no_symbolic_upper);
         assert_eq!(cli.stats_interval, 32);
+        assert_eq!(cli.restart_baseline.get(), 140);
+        assert_eq!(
+            Cli::try_parse_from(["nksynth", "input.nksynth"])
+                .unwrap()
+                .restart_baseline
+                .get(),
+            150
+        );
+        assert!(
+            Cli::try_parse_from(["nksynth", "--restart-baseline", "0", "input.nksynth"]).is_err()
+        );
         assert!(Cli::try_parse_from(["nksynth", "--seed", "-1", "input.nksynth"]).is_err());
     }
 }

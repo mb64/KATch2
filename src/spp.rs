@@ -155,6 +155,36 @@ impl SPPstore {
         self.num_vars
     }
 
+    /// Copy only the DAG reachable from `roots`, preserving sharing between
+    /// roots. No operation caches or unrelated arena nodes are retained.
+    pub fn import(&mut self, source: &Self, roots: &[SPP]) -> Vec<SPP> {
+        assert_eq!(self.num_vars, source.num_vars);
+        fn copy(
+            s: SPP,
+            source: &SPPstore,
+            target: &mut SPPstore,
+            memo: &mut HashMap<SPP, SPP>,
+        ) -> SPP {
+            if s.as_u32() < 2 {
+                return s;
+            }
+            if let Some(&result) = memo.get(&s) {
+                return result;
+            }
+            let n = source.get(s);
+            let [a, b, c, d] =
+                [n.x00, n.x01, n.x10, n.x11].map(|child| copy(child, source, target, memo));
+            let result = target.mk(a, b, c, d);
+            memo.insert(s, result);
+            result
+        }
+        let mut memo = HashMap::new();
+        roots
+            .iter()
+            .map(|&s| copy(s, source, self, &mut memo))
+            .collect()
+    }
+
     /// Retrieves the SPPnode corresponding to a given SPP index.
     /// Panics if the index is 0, 1, or out of bounds.
     /// Assumes the caller ensures the index represents an internal node.
@@ -977,6 +1007,36 @@ mod tests {
             let is_zero_result = s.is_zero(spp);
             // An SPP is zero if it equals the zero SPP
             assert_eq!(is_zero_result, spp == s.zero);
+        }
+    }
+    #[test]
+    fn import_keeps_only_reachable_nodes_and_preserves_handles_semantically() {
+        let mut source = SPPstore::new(6);
+        let keep = source.assign(0, true);
+        let mut garbage = source.one;
+        for bits in 0..64 {
+            let mut cell = source.top;
+            for field in 0..6 {
+                let test = source.test(field, bits & (1 << field) != 0);
+                cell = source.intersect(cell, test);
+            }
+            garbage = source.union(garbage, cell);
+        }
+        let mut target = SPPstore::new(6);
+        let roots = target.import(&source, &[keep, keep, source.zero, source.top]);
+        assert_eq!(roots[0], roots[1]);
+        assert_eq!(roots[2], target.zero);
+        assert_eq!(roots[3], target.top);
+        assert!(target.nodes.len() < source.nodes.len());
+        for input in 0..64 {
+            for output in 0..64 {
+                let input: Vec<_> = (0..6).map(|f| input & (1 << f) != 0).collect();
+                let output: Vec<_> = (0..6).map(|f| output & (1 << f) != 0).collect();
+                assert_eq!(
+                    source.accepts(keep, &input, &output),
+                    target.accepts(roots[0], &input, &output)
+                );
+            }
         }
     }
 }

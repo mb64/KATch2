@@ -4,12 +4,14 @@
 //! All random choices, including seeds for new CaDiCaL instances, advance this
 //! same stream. Reconfigure only to start or replay a seeded run.
 use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
-use std::{cell::RefCell, path::PathBuf};
+use std::{cell::RefCell, num::NonZeroUsize, path::PathBuf};
 
 #[derive(Clone, Debug)]
 pub struct Config {
     pub seed: u64,
     pub symbolic_upper: bool,
+    pub save_restart_bounds: bool,
+    pub restart_baseline: NonZeroUsize,
     pub candidate_stats: Option<PathBuf>,
     /// Emit cumulative measurements every N refinement rounds; zero disables.
     pub stats_interval: usize,
@@ -19,6 +21,8 @@ impl Config {
         Self {
             seed,
             symbolic_upper: true,
+            save_restart_bounds: false,
+            restart_baseline: NonZeroUsize::new(150).unwrap(),
             candidate_stats: None,
             stats_interval: 256,
         }
@@ -64,6 +68,12 @@ pub(crate) fn shuffle<T>(items: &mut [T]) {
 }
 pub(crate) fn positive_first() -> bool {
     with_rng(|rng| rng.random())
+}
+pub(crate) fn save_restart_bounds() -> bool {
+    STATE.with(|s| s.borrow().config.save_restart_bounds)
+}
+pub(crate) fn restart_baseline() -> NonZeroUsize {
+    STATE.with(|s| s.borrow().config.restart_baseline)
 }
 pub(crate) fn symbolic_upper() -> bool {
     STATE.with(|s| s.borrow().config.symbolic_upper)

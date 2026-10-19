@@ -135,7 +135,8 @@ impl ProblemInstance {
     /// hole (or a [`CegisError`] if no solution exists / the search is
     /// inconclusive).
     ///
-    /// Attempts use reluctant doubling with an initial cutoff of 140 iterations.
+    /// Attempts default to reluctant doubling with an initial cutoff of 150
+    /// iterations, configurable through [`crate::experiment::Config`].
     /// `max_iters` caps the total CEGIS rounds across all attempts: pass `Some(n)` to
     /// give up with [`CegisError::IterationLimit`] after `n` rounds, or `None`
     /// to loop until the problem is solved or proven infeasible.
@@ -151,7 +152,10 @@ impl ProblemInstance {
             &reference_dfa,
             &mut self.store,
             max_iters,
-            restarts::Config::default(),
+            restarts::Config {
+                save_bounds: crate::experiment::save_restart_bounds(),
+                initial_cutoff: crate::experiment::restart_baseline(),
+            },
         )
     }
 
@@ -179,7 +183,10 @@ impl ProblemInstance {
             &reference_dfa,
             &mut self.store,
             max_iters,
-            restarts::Config::default(),
+            restarts::Config {
+                save_bounds: crate::experiment::save_restart_bounds(),
+                initial_cutoff: crate::experiment::restart_baseline(),
+            },
         )?;
         // Materialize each candidate (an NFA) into a concrete DFA via subset
         // construction while `reference_dfa` is still alive.

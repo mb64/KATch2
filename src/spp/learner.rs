@@ -61,7 +61,17 @@ pub fn learn_spp_with_forbidden(
     forbidden: SPP,
     store: &mut SPPstore,
 ) -> Result<SPP, ConflictError> {
-    let mut positive = store.zero;
+    learn_spp_with_bounds(examples, store.zero, forbidden, store)
+}
+
+/// Learn from concrete examples plus entire required and forbidden relations.
+pub fn learn_spp_with_bounds(
+    examples: impl IntoIterator<Item = Example>,
+    required: SPP,
+    forbidden: SPP,
+    store: &mut SPPstore,
+) -> Result<SPP, ConflictError> {
+    let mut positive = required;
     let mut negative = forbidden;
     for ex in examples {
         assert_eq!(ex.input.len(), store.num_vars() as usize);

@@ -3,14 +3,14 @@
 
 use std::{collections::BTreeMap, time::Instant};
 
-pub(super) struct Metrics {
+pub struct Metrics {
     scope: &'static str,
     enabled: bool,
     values: BTreeMap<&'static str, u64>,
 }
 
 impl Metrics {
-    pub(super) fn new(scope: &'static str) -> Self {
+    pub fn new(scope: &'static str) -> Self {
         Self {
             scope,
             enabled: std::env::var("KATCH2_METRICS").is_ok_and(|v| v == "1"),
@@ -18,11 +18,11 @@ impl Metrics {
         }
     }
 
-    pub(super) fn enabled(&self) -> bool {
+    pub fn enabled(&self) -> bool {
         self.enabled
     }
 
-    pub(super) fn checkpoint(&self) {
+    pub fn checkpoint(&self) {
         if self.enabled {
             let values = self
                 .values
@@ -33,17 +33,17 @@ impl Metrics {
         }
     }
 
-    pub(super) fn start(&self) -> Option<Instant> {
+    pub fn start(&self) -> Option<Instant> {
         self.enabled.then(Instant::now)
     }
 
-    pub(super) fn add(&mut self, key: &'static str, amount: u64) {
+    pub fn add(&mut self, key: &'static str, amount: u64) {
         if self.enabled {
             *self.values.entry(key).or_default() += amount;
         }
     }
 
-    pub(super) fn elapsed(&mut self, key: &'static str, start: Option<Instant>) {
+    pub fn elapsed(&mut self, key: &'static str, start: Option<Instant>) {
         if let Some(start) = start {
             self.add(key, start.elapsed().as_nanos().try_into().unwrap());
         }
