@@ -405,6 +405,25 @@ fn node_for(
     }
 }
 
+/// Packets at outer node `(q, i)` that are both forward- and
+/// backward-reachable under the plausible upper bounds.  A repaired accepting
+/// path only visits such packets, so restricting every region of the min-cut
+/// graph to them (dropping edges that become empty) loses no soundness.
+fn potentially_live(
+    store: &mut spp::SPPstore,
+    reach: &LowerBoundReachability,
+    q: State,
+    i: usize,
+) -> sp::SP {
+    let (Some(&fwd), Some(&bwd)) = (
+        reach.forward_possible.get(&(q, i)),
+        reach.backward_possible.get(&(q, i)),
+    ) else {
+        return store.sp.zero;
+    };
+    store.sp.intersect(fwd, bwd)
+}
+
 /// Edges crossing the minimum `source`→`sink` cut.
 ///
 /// Runs Dinic's algorithm for the max flow, then recovers the cut by finding
@@ -671,8 +690,12 @@ where
                     } else {
                         i
                     };
-                    let src = region_sp(store, forward, backward, q, i, Region::Int);
-                    let tgt = region_sp(store, forward, backward, qp, it, Region::Int);
+                    let mut src = region_sp(store, forward, backward, q, i, Region::Int);
+                    let mut tgt = region_sp(store, forward, backward, qp, it, Region::Int);
+                    let live = potentially_live(store, reach, q, i);
+                    src = store.sp.intersect(src, live);
+                    let live = potentially_live(store, reach, qp, it);
+                    tgt = store.sp.intersect(tgt, live);
                     if store.sp.is_zero(src) || store.sp.is_zero(tgt) {
                         continue;
                     }
@@ -719,8 +742,13 @@ where
                             (Region::Int, Region::Int),
                             (Region::Int, Region::Bwd),
                         ] {
-                            let in_sp = region_sp(store, forward, backward, q, i, src_region);
-                            let out_sp = region_sp(store, forward, backward, qp, jt, tgt_region);
+                            let mut in_sp = region_sp(store, forward, backward, q, i, src_region);
+                            let mut out_sp =
+                                region_sp(store, forward, backward, qp, jt, tgt_region);
+                            let live = potentially_live(store, reach, q, i);
+                            in_sp = store.sp.intersect(in_sp, live);
+                            let live = potentially_live(store, reach, qp, jt);
+                            out_sp = store.sp.intersect(out_sp, live);
                             if store.sp.is_zero(in_sp) || store.sp.is_zero(out_sp) {
                                 continue;
                             }
