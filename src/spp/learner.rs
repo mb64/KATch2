@@ -114,7 +114,7 @@ pub fn learn_spp_from_relations(
 
     // Evidence is immutable below the current level. Pooling a class uses
     // hash-consed relation union; it never mutates a shared child's evidence.
-    let mut evidence = vec![Evidence::new(positive, negative, store)];
+    let mut evidence = vec![Evidence::new(positive, negative)];
     let mut trie = vec![TrieNode::Branch([None; 4])];
     let mut levels = vec![vec![0u32]];
     for depth in 0..nv {
@@ -129,7 +129,6 @@ pub fn learn_spp_from_relations(
                 Evidence::new(
                     [p.x00, p.x01, p.x10, p.x11][branch],
                     [n.x00, n.x01, n.x10, n.x11][branch],
-                    store,
                 )
             });
             for group in preferred_groups(children, store).into_iter().flatten() {
@@ -155,7 +154,7 @@ pub fn learn_spp_from_relations(
                     let id = trie.len() as u32;
                     evidence.push(cell);
                     trie.push(if depth + 1 == nv {
-                        TrieNode::Leaf(cell.has_positive)
+                        TrieNode::Leaf(cell.has_positive(store))
                     } else {
                         TrieNode::Branch([None; 4])
                     });
@@ -184,32 +183,31 @@ pub fn learn_spp_from_relations(
 }
 
 /// Immutable suffix requirements, pooled only by union. A cell is compatible
-/// with the zero continuation exactly when it has no positive examples. Cache
-/// that fact here so testing a preferred shape never traverses the evidence DAG.
+/// with the zero continuation exactly when its positive relation is zero.
+/// The store's reserved zero indices make this an O(1) check without caching.
 #[derive(Clone, Copy)]
 struct Evidence {
     positive: SPP,
     negative: SPP,
-    has_positive: bool,
 }
 
 impl Evidence {
-    fn new(positive: SPP, negative: SPP, store: &mut SPPstore) -> Self {
-        Self {
-            positive,
-            negative,
-            has_positive: !store.is_zero(positive),
-        }
+    fn new(positive: SPP, negative: SPP) -> Self {
+        Self { positive, negative }
+    }
+
+    fn has_positive(self, store: &SPPstore) -> bool {
+        !store.is_zero(self.positive)
     }
 
     fn compatible(self, other: Self, store: &mut SPPstore) -> bool {
-        if self.has_positive {
+        if self.has_positive(store) {
             let overlap = store.intersect(self.positive, other.negative);
             if !store.is_zero(overlap) {
                 return false;
             }
         }
-        if other.has_positive {
+        if other.has_positive(store) {
             let overlap = store.intersect(other.positive, self.negative);
             if !store.is_zero(overlap) {
                 return false;
@@ -222,7 +220,6 @@ impl Evidence {
         Self {
             positive: store.union(self.positive, other.positive),
             negative: store.union(self.negative, other.negative),
-            has_positive: self.has_positive || other.has_positive,
         }
     }
 }
@@ -246,7 +243,7 @@ const PREFERRED_SHAPES: &[&[[u8; 4]]] = &[
 fn shape_fits(shape: [u8; 4], children: &[Evidence; 4], store: &mut SPPstore) -> bool {
     for branch in 0..4 {
         if shape[branch] == Z {
-            if children[branch].has_positive {
+            if children[branch].has_positive(store) {
                 return false;
             }
         } else {
@@ -295,7 +292,7 @@ fn preferred_groups(children: [Evidence; 4], store: &mut SPPstore) -> [Option<Ch
         // A purely negative group can be zero immediately. It must not later
         // merge into a positive class and reintroduce an unwanted assignment.
         evidence
-            .filter(|cell| cell.has_positive)
+            .filter(|cell| cell.has_positive(store))
             .map(|evidence| ChildGroup { branches, evidence })
     })
 }
@@ -320,23 +317,18 @@ fn build_spp(trie: &[TrieNode], levels: &[Vec<u32>], store: &mut SPPstore) -> SP
     assert_eq!(levels.len(), 1 + store.num_vars() as usize);
 
     let mut spp_of: Vec<Option<SPP>> = vec![None; trie.len()];
-    let mut zero = SPP::new(0);
     for (i, level) in levels.iter().enumerate().rev() {
         for &node in level {
             let spp = match trie[node as usize] {
                 TrieNode::Leaf(label) => SPP::new(label as u32),
                 TrieNode::Branch(children) => {
+                    let zero = store.zero_at_depth(store.num_vars() - i as u32 - 1);
                     let [x00, x01, x10, x11] =
                         children.map(|c| c.map_or(zero, |id| spp_of[id as usize].unwrap()));
                     store.mk(x00, x01, x10, x11)
                 }
             };
             spp_of[node as usize] = Some(spp);
-        }
-
-        // Except at the first iteration:
-        if i != store.num_vars() as usize {
-            zero = store.mk(zero, zero, zero, zero);
         }
     }
     spp_of[0].unwrap()

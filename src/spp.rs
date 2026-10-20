@@ -15,6 +15,8 @@ use crate::sp::{SP, SPnode, SPstore};
 /// We use indices into the SPP store to represent SPPs.
 /// The zero SPP is represented by SPP(0) and the one SPP is represented by SPP(1).
 /// Indices into the store are the u32 value - 2.
+/// Zero nodes on 1 through `num_vars` fields occupy indices 2 through
+/// `num_vars + 1`, respectively.
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SPP(pub u32);
@@ -67,14 +69,10 @@ pub struct SPPstore {
     test_memo: HashMap<(Var, bool), SPP>,
     assign_memo: HashMap<(Var, bool), SPP>,
     flip_memo: HashMap<SPP, SPP>,
-    is_zero_memo: HashMap<SPP, bool>,
 
     pub sp: SPstore,
     fwd_memo: HashMap<SPP, SP>,
     ifwd_memo: HashMap<SP, SPP>,
-
-    /// `zeros[d]` is the zero SPP on `d` fields (the empty relation at depth `d`)
-    zeros: Vec<SPP>,
 }
 
 /// A node in the SPP store. Has four children, one for each combination of the two variables.
@@ -136,14 +134,13 @@ impl SPPstore {
             test_memo: HashMap::new(),
             assign_memo: HashMap::new(),
             flip_memo: HashMap::from_iter([(SPP::new(0), SPP::new(0)), (SPP::new(1), SPP::new(1))]),
-            is_zero_memo: HashMap::from_iter([(SPP::new(0), true), (SPP::new(1), false)]),
             sp: SPstore::new(num_vars),
 
             // in the memo tables, we only want the base cases for 0 and 1
             fwd_memo: HashMap::from_iter([(SPP::new(0), SP::new(0)), (SPP::new(1), SP::new(1))]),
             ifwd_memo: HashMap::from_iter([(SP::new(0), SPP::new(0)), (SP::new(1), SPP::new(1))]),
-            zeros: vec![],
         };
+        // Allocate all zero nodes first, reserving their contiguous index range.
         store.zero = store.zero();
         store.one = store.one();
         store.top = store.top();
@@ -166,7 +163,6 @@ impl SPPstore {
         self.test_memo = empty.test_memo;
         self.assign_memo = empty.assign_memo;
         self.flip_memo = empty.flip_memo;
-        self.is_zero_memo = empty.is_zero_memo;
         self.fwd_memo = empty.fwd_memo;
         self.ifwd_memo = empty.ifwd_memo;
         self.sp.memo_reset();
@@ -186,7 +182,7 @@ impl SPPstore {
             target: &mut SPPstore,
             memo: &mut HashMap<SPP, SPP>,
         ) -> SPP {
-            if s.as_u32() < 2 {
+            if s.as_u32() < 2 || source.is_zero(s) {
                 return s;
             }
             if let Some(&result) = memo.get(&s) {
@@ -224,6 +220,10 @@ impl SPPstore {
 
     /// Computes the possible output packet set from applying the `SPP`
     pub fn fwd(&mut self, spp: SPP) -> SP {
+        if self.is_zero(spp) {
+            // SP and SPP stores reserve the same indices for zeros at each depth.
+            return SP::new(spp.0);
+        }
         // Check the memo table to see if fwd(spp) already exists
         if let Some(&result) = self.fwd_memo.get(&spp) {
             return result;
@@ -255,6 +255,10 @@ impl SPPstore {
     /// Computes the SPP corresponding to the `sp` returned by `fwd`.     
     /// - `ifwd` is a right inverse of `fwd`, i.e. `fwd ∘ ifwd = id_SP`
     pub fn ifwd(&mut self, sp: SP) -> SPP {
+        if self.sp.is_zero(sp) {
+            // Preserve the suffix depth using the shared zero-index layout.
+            return SPP::new(sp.0);
+        }
         // Check the memo table to see if ifwd(spp) already exists
         if let Some(&result) = self.ifwd_memo.get(&sp) {
             return result;
@@ -319,13 +323,11 @@ impl SPPstore {
     }
 
     fn zero(&mut self) -> SPP {
-        // We must construct a zero SPP of the right depth. Along the way, fill in `zeros` with the
-        // zero SPP of every depth.
+        // Called before allocating any other nodes, so the zero on d > 0 fields
+        // has index d + 1. Hash consing preserves these canonical handles.
         let mut spp = SPP::new(0);
-        self.zeros = vec![spp];
         for _ in 0..self.num_vars {
             spp = self.mk(spp, spp, spp, spp);
-            self.zeros.push(spp);
         }
         spp
     }
@@ -333,7 +335,8 @@ impl SPPstore {
     /// The zero SPP (the empty relation) on `depth` fields, i.e. at the level of a node for field
     /// `num_vars - depth`. `zero_at_depth(num_vars)` is `self.zero`.
     pub fn zero_at_depth(&self, depth: Var) -> SPP {
-        self.zeros[depth as usize]
+        assert!(depth <= self.num_vars, "zero depth exceeds store depth");
+        SPP::new(if depth == 0 { 0 } else { depth + 1 })
     }
     fn top(&mut self) -> SPP {
         // We must construct a top SPP of the right depth
@@ -346,15 +349,20 @@ impl SPPstore {
     fn one(&mut self) -> SPP {
         // We must construct a one SPP of the right depth
         let mut spp_one = SPP::new(1);
-        let mut spp_zero = SPP::new(0);
-        for _ in 0..self.num_vars {
+        for depth in 0..self.num_vars {
+            let spp_zero = self.zero_at_depth(depth);
             spp_one = self.mk(spp_one, spp_zero, spp_zero, spp_one);
-            spp_zero = self.mk(spp_zero, spp_zero, spp_zero, spp_zero);
         }
         spp_one
     }
 
     pub fn union(&mut self, a: SPP, b: SPP) -> SPP {
+        if self.is_zero(a) {
+            return b;
+        }
+        if self.is_zero(b) {
+            return a;
+        }
         // First, check the memo table
         if let Some(&result) = self.union_memo.get(&(a, b)) {
             return result;
@@ -372,6 +380,12 @@ impl SPPstore {
     }
 
     pub fn intersect(&mut self, a: SPP, b: SPP) -> SPP {
+        if self.is_zero(a) {
+            return a;
+        }
+        if self.is_zero(b) {
+            return b;
+        }
         // First, check the memo table
         if let Some(&result) = self.intersect_memo.get(&(a, b)) {
             return result;
@@ -390,6 +404,12 @@ impl SPPstore {
     }
 
     pub fn xor(&mut self, a: SPP, b: SPP) -> SPP {
+        if self.is_zero(a) {
+            return b;
+        }
+        if self.is_zero(b) {
+            return a;
+        }
         // First, check the memo table
         if let Some(&result) = self.xor_memo.get(&(a, b)) {
             return result;
@@ -408,6 +428,9 @@ impl SPPstore {
     }
 
     pub fn difference(&mut self, a: SPP, b: SPP) -> SPP {
+        if self.is_zero(a) || self.is_zero(b) {
+            return a;
+        }
         // First, check the memo table
         if let Some(&result) = self.difference_memo.get(&(a, b)) {
             return result;
@@ -444,25 +467,19 @@ impl SPPstore {
         res
     }
 
-    /// Checks if an SPP is zero (represents the empty relation)
-    pub fn is_zero(&mut self, spp: SPP) -> bool {
-        // First, check the memo table
-        if let Some(&result) = self.is_zero_memo.get(&spp) {
-            return result;
-        }
-        // Because we prefilled the memo with base cases,
-        // we now know that we've got a real node, so we don't need to handle 0 or 1 cases here.
-        let node = self.get(spp);
-        let x00_is_zero = self.is_zero(node.x00);
-        let x01_is_zero = self.is_zero(node.x01);
-        let x10_is_zero = self.is_zero(node.x10);
-        let x11_is_zero = self.is_zero(node.x11);
-        let result = x00_is_zero && x01_is_zero && x10_is_zero && x11_is_zero;
-        self.is_zero_memo.insert(spp, result);
-        result
+    /// Checks whether a valid SPP of at most `num_vars` fields is empty.
+    /// All such zero nodes are preallocated in a reserved index range.
+    pub fn is_zero(&self, spp: SPP) -> bool {
+        spp.0 == 0 || (spp.0 >= 2 && spp.0 - 2 < self.num_vars)
     }
 
     pub fn sequence(&mut self, a: SPP, b: SPP) -> SPP {
+        if self.is_zero(a) {
+            return a;
+        }
+        if self.is_zero(b) {
+            return b;
+        }
         // First, check the memo table
         if let Some(&result) = self.sequence_memo.get(&(a, b)) {
             return result;
@@ -549,8 +566,8 @@ impl SPPstore {
             return result;
         }
         let mut res = SPP::new(1);
-        let mut zero = SPP::new(0);
         for i in (0..self.num_vars).rev() {
+            let zero = self.zero_at_depth(self.num_vars - i - 1);
             if i == var {
                 if value {
                     res = self.mk(zero, zero, zero, res);
@@ -560,7 +577,6 @@ impl SPPstore {
             } else {
                 res = self.mk(res, zero, zero, res);
             }
-            zero = self.mk(zero, zero, zero, zero);
         }
         self.test_memo.insert((var, value), res);
         res
@@ -571,8 +587,8 @@ impl SPPstore {
             return result;
         }
         let mut res = SPP::new(1);
-        let mut zero = SPP::new(0);
         for i in (0..self.num_vars).rev() {
+            let zero = self.zero_at_depth(self.num_vars - i - 1);
             if i == var {
                 if value {
                     res = self.mk(zero, res, zero, res);
@@ -582,7 +598,6 @@ impl SPPstore {
             } else {
                 res = self.mk(res, zero, zero, res);
             }
-            zero = self.mk(zero, zero, zero, zero);
         }
         self.assign_memo.insert((var, value), res);
         res
@@ -617,6 +632,9 @@ impl SPPstore {
 
     /// Flips the relation represented by this SPP.
     pub fn flip(&mut self, spp: SPP) -> SPP {
+        if self.is_zero(spp) {
+            return spp;
+        }
         if let Some(&result) = self.flip_memo.get(&spp) {
             return result;
         }
@@ -869,8 +887,6 @@ mod tests {
         assert_eq!(store.assign_memo.capacity(), empty.assign_memo.capacity());
         assert_eq!(store.flip_memo.len(), empty.flip_memo.len());
         assert_eq!(store.flip_memo.capacity(), empty.flip_memo.capacity());
-        assert_eq!(store.is_zero_memo.len(), empty.is_zero_memo.len());
-        assert_eq!(store.is_zero_memo.capacity(), empty.is_zero_memo.capacity());
         assert_eq!(store.fwd_memo.len(), empty.fwd_memo.len());
         assert_eq!(store.fwd_memo.capacity(), empty.fwd_memo.capacity());
         assert_eq!(store.ifwd_memo.len(), empty.ifwd_memo.len());
@@ -1074,6 +1090,112 @@ mod tests {
                 assert_eq!(seq_flip, flip_seq);
             }
         }
+    }
+
+    #[test]
+    fn zero_indices_survive_allocation_reset_and_clone() {
+        for fields in 0..=6 {
+            let mut store = SPPstore::new(fields);
+            if fields > 0 {
+                store.assign(0, true);
+                store.test(fields - 1, false);
+            }
+            store.memo_reset();
+            let mut store = store.clone();
+            let mut zero = SPP::new(0);
+            assert_eq!(store.zero_at_depth(0), zero);
+            assert!(store.is_zero(zero));
+            assert!(!store.is_zero(SPP::new(1)));
+            for depth in 1..=fields {
+                zero = store.mk(zero, zero, zero, zero);
+                assert_eq!(zero, SPP::new(depth + 1));
+                assert_eq!(store.zero_at_depth(depth), zero);
+                assert!(store.is_zero(zero));
+            }
+            assert_eq!(zero, store.zero);
+            // Every node outside the reserved range has a nonempty branch.
+            for index in fields + 2..store.nodes.len() as u32 + 2 {
+                let node = store.get(SPP::new(index));
+                assert!(
+                    ![node.x00, node.x01, node.x10, node.x11]
+                        .into_iter()
+                        .all(|child| store.is_zero(child))
+                );
+                assert!(!store.is_zero(SPP::new(index)));
+            }
+        }
+    }
+
+    #[test]
+    fn zero_conversions_preserve_suffix_depth_without_filling_caches() {
+        for fields in 0..=6 {
+            let mut store = SPPstore::new(fields);
+            store.memo_reset();
+            for depth in 0..=fields {
+                let spp_zero = store.zero_at_depth(depth);
+                let sp_zero = store.sp.zero_at_depth(depth);
+                assert_eq!(spp_zero.0, sp_zero.0);
+                assert_eq!(store.fwd(spp_zero), sp_zero);
+                assert_eq!(store.bwd(spp_zero), sp_zero);
+                assert_eq!(store.ifwd(sp_zero), spp_zero);
+                assert_eq!(store.ibwd(sp_zero), spp_zero);
+            }
+            assert_eq!(store.fwd_memo.len(), 2);
+            assert_eq!(store.ifwd_memo.len(), 2);
+            assert_eq!(store.flip_memo.len(), 2);
+        }
+    }
+
+    #[test]
+    fn zero_shortcuts_preserve_suffix_depth_without_filling_caches() {
+        let mut store = SPPstore::new(6);
+        let sizes = |s: &SPPstore| {
+            (
+                s.intersect_memo.len(),
+                s.xor_memo.len(),
+                s.difference_memo.len(),
+                s.sequence_memo.len(),
+                s.flip_memo.len(),
+            )
+        };
+        let initial = sizes(&store);
+        let mut identity = SPP::new(1);
+        for depth in 0..=store.num_vars() {
+            let zero = store.zero_at_depth(depth);
+            assert_eq!(store.intersect(zero, identity), zero);
+            assert_eq!(store.intersect(identity, zero), zero);
+            assert_eq!(store.xor(zero, identity), identity);
+            assert_eq!(store.xor(identity, zero), identity);
+            assert_eq!(store.difference(zero, identity), zero);
+            assert_eq!(store.difference(identity, zero), identity);
+            assert_eq!(store.sequence(zero, identity), zero);
+            assert_eq!(store.sequence(identity, zero), zero);
+            assert_eq!(store.flip(zero), zero);
+            assert_eq!(sizes(&store), initial);
+            if depth < store.num_vars() {
+                identity = store.mk(identity, zero, zero, identity);
+            }
+        }
+    }
+
+    #[test]
+    fn union_shortcuts_zero_branches_without_memoizing_them() {
+        let mut store = SPPstore::new(2);
+        let z = store.zero_at_depth(1);
+        let one = store.mk(SPP::new(1), SPP::new(0), SPP::new(0), SPP::new(1));
+        let top = store.mk(SPP::new(1), SPP::new(1), SPP::new(1), SPP::new(1));
+        let a = store.mk(one, z, z, z);
+        let b = store.mk(z, top, z, z);
+        let expected = store.mk(one, top, z, z);
+        let entries = store.union_memo.len();
+        assert_eq!(store.union(store.zero, a), a);
+        assert_eq!(store.union(a, store.zero), a);
+        assert_eq!(store.union_memo.len(), entries);
+        assert_eq!(store.union(a, b), expected);
+        // Only the root pair needs computation; every child pair contains zero.
+        assert_eq!(store.union_memo.len(), entries + 1);
+        assert_eq!(store.union(b, a), expected);
+        assert_eq!(store.union_memo.len(), entries + 2);
     }
 
     #[test]

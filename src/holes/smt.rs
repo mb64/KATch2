@@ -647,7 +647,7 @@ impl<'a> Native<'a> {
         store: &SPPstore,
         memo: &mut HashMap<SPP, Lit>,
     ) -> Lit {
-        if relation == SPP::new(0) {
+        if store.is_zero(relation) {
             return FALSE;
         }
         if relation == SPP::new(1) {
@@ -685,7 +685,7 @@ impl<'a> Native<'a> {
         sp_store: &SPstore,
         memo: &mut HashMap<(SP, usize), Lit>,
     ) -> Lit {
-        if sp == SP::new(0) {
+        if sp_store.is_zero(sp) {
             return FALSE;
         }
         if sp == SP::new(1) {
@@ -1222,18 +1222,7 @@ mod tests {
 
     /// Singleton SP for a concrete packet (test helper, mirrors aut::singleton_sp).
     fn singleton_sp_for_test(store: &mut SPPstore, pkt: &[bool]) -> SP {
-        let mut sp_val = SP::new(1);
-        let mut zero = SP::new(0);
-        for &b in pkt.iter().rev() {
-            let next = if b {
-                store.sp.mk(zero, sp_val)
-            } else {
-                store.sp.mk(sp_val, zero)
-            };
-            zero = store.sp.mk(zero, zero);
-            sp_val = next;
-        }
-        sp_val
+        store.sp.singleton(pkt)
     }
 
     #[test]

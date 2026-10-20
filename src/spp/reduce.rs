@@ -424,6 +424,9 @@ impl TreeBuilder<'_> {
 
     /// Number of (input, output) pairs `spp` relates.
     fn count(&mut self, spp: SPP) -> f64 {
+        if self.store.is_zero(spp) {
+            return 0.0;
+        }
         if spp.as_u32() <= 1 {
             return spp.as_u32() as f64;
         }

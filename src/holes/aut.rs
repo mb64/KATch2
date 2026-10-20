@@ -1675,14 +1675,13 @@ pub(crate) fn singleton_sp(store: &mut spp::SPPstore, packet: &[bool]) -> sp::SP
 /// `p_out == packet`, regardless of `p_in`.
 fn force_output_spp(store: &mut spp::SPPstore, packet: &[bool]) -> spp::SPP {
     let mut allow = spp::SPP::new(1);
-    let mut zero = spp::SPP::new(0);
-    for &bit in packet.iter().rev() {
+    for (depth, &bit) in packet.iter().rev().enumerate() {
+        let zero = store.zero_at_depth(depth as spp::Var);
         let new_allow = if bit {
             store.mk(zero, allow, zero, allow)
         } else {
             store.mk(allow, zero, allow, zero)
         };
-        zero = store.mk(zero, zero, zero, zero);
         allow = new_allow;
     }
     allow
@@ -1692,14 +1691,13 @@ fn force_output_spp(store: &mut spp::SPPstore, packet: &[bool]) -> spp::SPP {
 /// `p_in == packet`, regardless of `p_out`.
 fn filter_input_spp(store: &mut spp::SPPstore, packet: &[bool]) -> spp::SPP {
     let mut allow = spp::SPP::new(1);
-    let mut zero = spp::SPP::new(0);
-    for &bit in packet.iter().rev() {
+    for (depth, &bit) in packet.iter().rev().enumerate() {
+        let zero = store.zero_at_depth(depth as spp::Var);
         let new_allow = if bit {
             store.mk(zero, zero, allow, allow)
         } else {
             store.mk(allow, allow, zero, zero)
         };
-        zero = store.mk(zero, zero, zero, zero);
         allow = new_allow;
     }
     allow
