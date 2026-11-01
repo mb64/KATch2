@@ -124,12 +124,13 @@ mod perf_tests {
 
     #[test]
     fn test_performance_x10_equals_0() {
+        let arena = &bumpalo::Bump::new();
         let expr_str = "x10==0";
         println!("Testing performance for expression: {}", expr_str);
 
         // Test parsing
         let start = Instant::now();
-        let expressions = parser::parse_expressions(expr_str).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
         let parse_time = start.elapsed();
         println!("Parsing time: {:?}", parse_time);
 
@@ -145,7 +146,7 @@ mod perf_tests {
 
         // Test expr to state conversion
         let start = Instant::now();
-        let state_id = aut_handler.expr_to_state(first_expr.as_ref());
+        let state_id = aut_handler.expr_to_state(first_expr);
         let expr_to_state_time = start.elapsed();
         println!(
             "Expression to state conversion time: {:?}",
@@ -183,17 +184,18 @@ mod perf_tests {
 
     #[test]
     fn test_eliminate_dup_benchmark() {
+        let arena = &bumpalo::Bump::new();
         println!("Benchmarking eliminate_dup vs is_empty for x10==0");
 
         let expr_str = "x10==0";
-        let expressions = parser::parse_expressions(expr_str).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
         let first_expr = &expressions[0];
         let num_fields = first_expr.num_fields();
 
         // Test 1: Fresh eliminate_dup call
         let start = Instant::now();
         let mut aut1 = aut::Aut::new(num_fields);
-        let state1 = aut1.expr_to_state(first_expr.as_ref());
+        let state1 = aut1.expr_to_state(first_expr);
         let aut1_creation_time = start.elapsed();
 
         let start = Instant::now();
@@ -217,7 +219,7 @@ mod perf_tests {
         // Test 3: Fresh is_empty call
         let start = Instant::now();
         let mut aut3 = aut::Aut::new(num_fields);
-        let state3 = aut3.expr_to_state(first_expr.as_ref());
+        let state3 = aut3.expr_to_state(first_expr);
         let aut3_creation_time = start.elapsed();
 
         let start = Instant::now();
@@ -232,7 +234,7 @@ mod perf_tests {
         // Test 4: Fresh random_trace call
         let start = Instant::now();
         let mut aut4 = aut::Aut::new(num_fields);
-        let state4 = aut4.expr_to_state(first_expr.as_ref());
+        let state4 = aut4.expr_to_state(first_expr);
         let aut4_creation_time = start.elapsed();
 
         let start = Instant::now();
@@ -251,7 +253,7 @@ mod perf_tests {
         for i in 0..5 {
             let start = Instant::now();
             let mut aut_fresh = aut::Aut::new(num_fields);
-            let state_fresh = aut_fresh.expr_to_state(first_expr.as_ref());
+            let state_fresh = aut_fresh.expr_to_state(first_expr);
             let dup_result = aut_fresh.eliminate_dup(state_fresh);
             let single_time = start.elapsed();
             total_eliminate_dup_time += single_time;
@@ -275,6 +277,7 @@ mod perf_tests {
 
     #[test]
     fn test_web_ui_alias_expressions() {
+        let arena = &bumpalo::Bump::new();
         // Test the specific expression that's causing errors in the web UI
         let test_cases = vec![
             ("let ip = &x[0..23] in ip==2", "Basic bit range alias"),
@@ -292,14 +295,14 @@ mod perf_tests {
             println!("\nTesting {}: {}", description, expr_str);
 
             // Test parsing
-            match parser::parse_expressions(expr_str) {
+            match parser::parse_expressions(arena, expr_str) {
                 Ok(parsed_exprs) => {
                     println!("  ✓ Parsing succeeded");
                     if let Some(expr) = parsed_exprs.first() {
                         println!("  Parsed: {:?}", expr);
 
                         // Test desugaring
-                        match desugar::desugar(expr) {
+                        match desugar::desugar(arena, expr) {
                             Ok(desugared) => {
                                 println!("  ✓ Desugaring succeeded");
                                 println!("  Desugared: {:?}", desugared);
@@ -309,7 +312,7 @@ mod perf_tests {
                                 let mut aut = aut::Aut::new(num_fields);
 
                                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    aut.expr_to_state(&desugared)
+                                    aut.expr_to_state(desugared)
                                 })) {
                                     Ok(state_id) => {
                                         println!(
@@ -341,15 +344,16 @@ mod perf_tests {
 
     #[test]
     fn test_is_empty_profiling() {
+        let arena = &bumpalo::Bump::new();
         println!("Profiling individual operations in is_empty algorithm");
 
         let expr_str = "x10==0";
-        let expressions = parser::parse_expressions(expr_str).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
         let first_expr = &expressions[0];
         let num_fields = first_expr.num_fields();
 
         let mut aut = aut::Aut::new(num_fields);
-        let state = aut.expr_to_state(first_expr.as_ref());
+        let state = aut.expr_to_state(first_expr);
 
         // Test individual SPP operations that is_empty uses
         println!("Testing SP operations on large sets...");
@@ -436,15 +440,16 @@ mod perf_tests {
 
     #[test]
     fn test_pattern_matching_cidr() {
+        let arena = &bumpalo::Bump::new();
         // Test CIDR notation pattern matching
         let expr_str = "let ip = &x[0..32] in ip ~ 192.168.1.0/24";
 
         // Parse and desugar
-        let expressions = parser::parse_expressions(expr_str).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
         assert_eq!(expressions.len(), 1);
         println!("Parsed expression: {:?}", expressions[0]);
 
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         println!("Desugared expression: {:?}", desugared);
 
         // Check that it desugars to the expected structure
@@ -456,7 +461,7 @@ mod perf_tests {
 
         // Create automaton and check it's not empty
         let mut aut = aut::Aut::new(actual_fields);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(
             !aut.is_empty(state),
             "CIDR pattern should allow some traffic"
@@ -465,18 +470,19 @@ mod perf_tests {
 
     #[test]
     fn test_pattern_matching_ip_range() {
+        let arena = &bumpalo::Bump::new();
         // Test IP range pattern matching
         let expr_str = "let src = &x[0..32] in src ~ 10.0.0.1-10.0.0.10";
 
-        let expressions = parser::parse_expressions(expr_str).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
         assert_eq!(expressions.len(), 1);
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
 
         let num_fields = desugared.num_fields();
         let actual_fields = if num_fields == 0 { 32 } else { num_fields };
 
         let mut aut = aut::Aut::new(actual_fields);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(
             !aut.is_empty(state),
             "IP range pattern should allow some traffic"
@@ -485,18 +491,19 @@ mod perf_tests {
 
     #[test]
     fn test_pattern_matching_wildcard() {
+        let arena = &bumpalo::Bump::new();
         // Test wildcard mask pattern matching
         let expr_str = "let dst = &x[32..64] in dst ~ 192.168.1.0 mask 0.0.0.255";
 
-        let expressions = parser::parse_expressions(expr_str).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
         assert_eq!(expressions.len(), 1);
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
 
         let num_fields = desugared.num_fields();
         let actual_fields = if num_fields == 0 { 64 } else { num_fields };
 
         let mut aut = aut::Aut::new(actual_fields);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(
             !aut.is_empty(state),
             "Wildcard pattern should allow some traffic"
@@ -505,18 +512,19 @@ mod perf_tests {
 
     #[test]
     fn test_pattern_matching_exact() {
+        let arena = &bumpalo::Bump::new();
         // Test exact IP pattern matching
         let expr_str = "x[0..32] ~ 192.168.1.100";
 
-        let expressions = parser::parse_expressions(expr_str).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
         assert_eq!(expressions.len(), 1);
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
 
         let num_fields = desugared.num_fields();
         let actual_fields = if num_fields == 0 { 32 } else { num_fields };
 
         let mut aut = aut::Aut::new(actual_fields);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(
             !aut.is_empty(state),
             "Exact IP pattern should allow some traffic"
@@ -525,18 +533,19 @@ mod perf_tests {
 
     #[test]
     fn test_pattern_matching_combined() {
+        let arena = &bumpalo::Bump::new();
         // Test combining pattern matching with other operations
         let expr_str = "let src = &x[0..32] in let dst = &x[32..64] in (src ~ 10.0.0.0/8) & (dst ~ 192.168.0.0/16)";
 
-        let expressions = parser::parse_expressions(expr_str).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
         assert_eq!(expressions.len(), 1);
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
 
         let num_fields = desugared.num_fields();
         let actual_fields = if num_fields == 0 { 64 } else { num_fields };
 
         let mut aut = aut::Aut::new(actual_fields);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(
             !aut.is_empty(state),
             "Combined pattern should allow some traffic"
@@ -545,18 +554,19 @@ mod perf_tests {
 
     #[test]
     fn test_pattern_matching_negation() {
+        let arena = &bumpalo::Bump::new();
         // Test complement of pattern matching (using set difference)
         let expr_str = "let ip = &x[0..32] in T - (ip ~ 192.168.1.0/24)";
 
-        let expressions = parser::parse_expressions(expr_str).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
         assert_eq!(expressions.len(), 1);
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
 
         let num_fields = desugared.num_fields();
         let actual_fields = if num_fields == 0 { 32 } else { num_fields };
 
         let mut aut = aut::Aut::new(actual_fields);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(
             !aut.is_empty(state),
             "Complement of pattern should allow some traffic"
@@ -565,6 +575,7 @@ mod perf_tests {
 
     #[test]
     fn test_large_ip_range_performance() {
+        let arena = &bumpalo::Bump::new();
         use std::time::Instant;
 
         // Test various large IP ranges to ensure efficient handling
@@ -592,13 +603,13 @@ mod perf_tests {
 
             // Parse the expression
             let start = Instant::now();
-            let expressions = parser::parse_expressions(expr_str)
+            let expressions = parser::parse_expressions(arena, expr_str)
                 .unwrap_or_else(|_| panic!("Failed to parse: {}", expr_str));
             let parse_time = start.elapsed();
 
             // Desugar the expression
             let start = Instant::now();
-            let desugared = desugar::desugar(&expressions[0])
+            let desugared = desugar::desugar(arena, expressions[0])
                 .unwrap_or_else(|_| panic!("Failed to desugar: {}", expr_str));
             let desugar_time = start.elapsed();
 
@@ -614,7 +625,7 @@ mod perf_tests {
                 }
             }
 
-            let union_count = count_unions(&desugared);
+            let union_count = count_unions(desugared);
             println!("  Parse time: {:?}", parse_time);
             println!("  Desugar time: {:?}", desugar_time);
             println!("  Union count: {}", union_count);
@@ -644,7 +655,7 @@ mod perf_tests {
 
             let start = Instant::now();
             let mut aut = aut::Aut::new(actual_fields);
-            let state = aut.expr_to_state(&desugared);
+            let state = aut.expr_to_state(desugared);
             let aut_time = start.elapsed();
 
             println!("  Automaton construction time: {:?}", aut_time);
@@ -661,58 +672,59 @@ mod perf_tests {
 
     #[test]
     fn test_tutorial_syntactic_sugar_examples() {
+        let arena = &bumpalo::Bump::new();
         // Test syntactic sugar examples from the tutorial
 
         // Basic bit range access
         let expr_str = "x[0..8] := 192";
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         assert!(
-            matches!(desugared.as_ref(), expr::Expr::Sequence(_, _)),
+            matches!(desugared, expr::Expr::Sequence(_, _)),
             "Should desugar to sequence"
         );
 
         // Bit range test
         let expr_str = "x[8..16] ~ 168";
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         assert!(
-            matches!(desugared.as_ref(), expr::Expr::Intersect(_, _)),
+            matches!(desugared, expr::Expr::Intersect(_, _)),
             "Should desugar to intersection"
         );
 
         // IP address assignment
         let expr_str = "x[0..32] := 192.168.1.1";
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(32);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(!aut.is_empty(state), "IP assignment should not be empty");
 
         // Port test
         let expr_str = "x[32..48] ~ 80";
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(48);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(!aut.is_empty(state), "Port test should not be empty");
 
         // Bit range alias basic
         let expr_str = "let ip_src = &x[0..32] in ip_src := 10.0.0.1";
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(32);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(!aut.is_empty(state), "Bit range alias should not be empty");
 
         // Multiple aliases
         let expr_str = r#"let src = &x[0..32] in
 let dst = &x[32..64] in
 src ~ 192.168.1.100 & dst ~ 8.8.8.8"#;
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(64);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(!aut.is_empty(state), "Multiple aliases should not be empty");
 
         // Readable firewall rule
@@ -720,19 +732,19 @@ src ~ 192.168.1.100 & dst ~ 8.8.8.8"#;
 let dst_port = &x[32..48] in
 src_ip ~ 192.168.1.0 + src_ip ~ 192.168.1.1;
 dst_port := 443"#;
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(48);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(!aut.is_empty(state), "Firewall rule should not be empty");
 
         // Direct bit range access (sub-ranges of aliases not supported)
         let expr_str = r#"let src_ip = &x[96..128] in
 src_ip ~ 10.0.0.1"#;
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(128);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(
             !aut.is_empty(state),
             "Direct bit range alias should not be empty"
@@ -741,11 +753,11 @@ src_ip ~ 10.0.0.1"#;
         // Combined example
         let expr_str = r#"let setup_defaults = (x[0..32] := 192.168.1.1 ; x[32..64] := 8.8.8.8) in
 x[32..40] ~ 80; setup_defaults"#;
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         // This is NOT empty - the test checks bits 32-40 for value 80, then assigns the full 32-64 range
         let mut aut = aut::Aut::new(64);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(!aut.is_empty(state), "Combined example should not be empty");
 
         // NAT example
@@ -754,40 +766,41 @@ let dst_ip = &x[32..64] in
 let is_private = src_ip ~ 192.168.1.1 + src_ip ~ 192.168.1.2 in
 let is_external = dst_ip ~ 8.8.8.8 + dst_ip ~ 1.1.1.1 in
 is_private & is_external; src_ip := 203.0.113.1"#;
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(64);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(!aut.is_empty(state), "NAT rule should not be empty");
     }
 
     #[test]
     fn test_tutorial_pattern_examples() {
+        let arena = &bumpalo::Bump::new();
         // Test all pattern matching examples from the tutorial
 
         // Exact IP matching
         let expr_str = "let src = &x[0..32] in src ~ 192.168.1.100";
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(32);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(!aut.is_empty(state), "Exact IP match should not be empty");
 
         // CIDR notation
         let expr_str = "let src = &x[0..32] in src ~ 192.168.1.0/24";
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(32);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(!aut.is_empty(state), "CIDR match should not be empty");
 
         // Multiple subnets
         let expr_str =
             "let dst = &x[32..64] in dst ~ 10.0.0.0/8 + dst ~ 172.16.0.0/12 + dst ~ 192.168.0.0/16";
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(64);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(
             !aut.is_empty(state),
             "Multiple subnet match should not be empty"
@@ -795,18 +808,18 @@ is_private & is_external; src_ip := 203.0.113.1"#;
 
         // IP range
         let expr_str = "let src = &x[0..32] in src ~ 10.0.0.1-10.0.0.10";
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(32);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(!aut.is_empty(state), "IP range match should not be empty");
 
         // Large IP ranges
         let expr_str = "let ip = &x[0..32] in ip ~ 10.0.0.0-10.255.255.255 + ip ~ 172.16.0.0-172.31.255.255 + ip ~ 192.168.0.0-192.168.255.255";
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(32);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(
             !aut.is_empty(state),
             "Large IP range match should not be empty"
@@ -814,10 +827,10 @@ is_private & is_external; src_ip := 203.0.113.1"#;
 
         // Wildcard mask
         let expr_str = "let dst = &x[32..64] in dst ~ 192.168.1.1 mask 0.0.255.0";
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(64);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(
             !aut.is_empty(state),
             "Wildcard mask match should not be empty"
@@ -830,10 +843,10 @@ port ~ 1024-65535 &
 (proto ~ 0x06 +
 proto ~ 0x11 +
 proto ~ 0x01)"#;
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(24);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(
             !aut.is_empty(state),
             "Different literal format patterns should not be empty"
@@ -849,10 +862,10 @@ let port = &x[64..80] in
 (src ~ 10.0.1.0/24) &
 (dst ~ 192.168.1.0/24) &
 (port ~ 1024-65535)"#;
-        let expressions = parser::parse_expressions(expr_str).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(80);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(
             !aut.is_empty(state),
             "Complex firewall rule should not be empty"
@@ -861,11 +874,18 @@ let port = &x[64..80] in
 
     #[test]
     fn test_pattern_range_equivalence() {
+        let arena = &bumpalo::Bump::new();
         // Test that efficient range patterns are equivalent to their expansions
         // by checking that (efficient XOR expansion) is empty
 
         // Helper to expand a range manually
-        fn expand_range(start: u32, end: u32, start_val: u128, end_val: u128) -> expr::Exp {
+        fn expand_range<'a>(
+            arena: &'a bumpalo::Bump,
+            start: u32,
+            end: u32,
+            start_val: u128,
+            end_val: u128,
+        ) -> expr::Exp<'a> {
             let mut terms = Vec::new();
             let width = (end - start) as usize;
 
@@ -875,18 +895,18 @@ let port = &x[64..80] in
                 for i in 0..width {
                     bits.push((val >> i) & 1 == 1);
                 }
-                let bit_range_test = expr::Expr::bit_range_test(start, end, bits);
-                let desugared_test = desugar::desugar(&bit_range_test).unwrap();
+                let bit_range_test = expr::Expr::bit_range_test(arena, start, end, bits);
+                let desugared_test = desugar::desugar(arena, bit_range_test).unwrap();
                 terms.push(desugared_test);
             }
 
             // Build disjunction
             if terms.is_empty() {
-                expr::Expr::zero()
+                expr::Expr::zero(arena)
             } else {
                 let mut result = terms.pop().unwrap();
                 while let Some(term) = terms.pop() {
-                    result = expr::Expr::union(term, result);
+                    result = expr::Expr::union(arena, term, result);
                 }
                 result
             }
@@ -895,20 +915,20 @@ let port = &x[64..80] in
         // Test case 1: Small IP range
         {
             let expr_str = "x[0..32] ~ 192.168.1.10-192.168.1.15";
-            let expressions = parser::parse_expressions(expr_str).unwrap();
-            let efficient = desugar::desugar(&expressions[0]).unwrap();
+            let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+            let efficient = desugar::desugar(arena, expressions[0]).unwrap();
 
             // Manually expand the same range
             let start_ip = (192u128 << 24) | (168u128 << 16) | (1u128 << 8) | 10u128;
             let end_ip = (192u128 << 24) | (168u128 << 16) | (1u128 << 8) | 15u128;
-            let expansion = expand_range(0, 32, start_ip, end_ip);
+            let expansion = expand_range(arena, 0, 32, start_ip, end_ip);
 
             // Check equivalence: (efficient XOR expansion) should be empty
-            let xor = expr::Expr::xor(efficient.clone(), expansion);
-            let xor_desugared = desugar::desugar(&xor).unwrap();
+            let xor = expr::Expr::xor(arena, efficient, expansion);
+            let xor_desugared = desugar::desugar(arena, xor).unwrap();
 
             let mut aut = aut::Aut::new(32);
-            let state = aut.expr_to_state(&xor_desugared);
+            let state = aut.expr_to_state(xor_desugared);
             assert!(
                 aut.is_empty(state),
                 "Efficient range should be equivalent to expansion"
@@ -918,18 +938,18 @@ let port = &x[64..80] in
         // Test case 2: Port range
         {
             let expr_str = "x[0..16] ~ 8080-8090";
-            let expressions = parser::parse_expressions(expr_str).unwrap();
-            let efficient = desugar::desugar(&expressions[0]).unwrap();
+            let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+            let efficient = desugar::desugar(arena, expressions[0]).unwrap();
 
             // Manually expand
-            let expansion = expand_range(0, 16, 8080, 8090);
+            let expansion = expand_range(arena, 0, 16, 8080, 8090);
 
             // Check equivalence
-            let xor = expr::Expr::xor(efficient.clone(), expansion);
-            let xor_desugared = desugar::desugar(&xor).unwrap();
+            let xor = expr::Expr::xor(arena, efficient, expansion);
+            let xor_desugared = desugar::desugar(arena, xor).unwrap();
 
             let mut aut = aut::Aut::new(16);
-            let state = aut.expr_to_state(&xor_desugared);
+            let state = aut.expr_to_state(xor_desugared);
             assert!(
                 aut.is_empty(state),
                 "Efficient port range should be equivalent to expansion"
@@ -939,18 +959,18 @@ let port = &x[64..80] in
         // Test case 3: Small range with offset (user example)
         {
             let expr_str = "x[5..9] ~ 1-4";
-            let expressions = parser::parse_expressions(expr_str).unwrap();
-            let efficient = desugar::desugar(&expressions[0]).unwrap();
+            let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+            let efficient = desugar::desugar(arena, expressions[0]).unwrap();
 
             // Manually expand
-            let expansion = expand_range(5, 9, 1, 4);
+            let expansion = expand_range(arena, 5, 9, 1, 4);
 
             // Check equivalence
-            let xor = expr::Expr::xor(efficient.clone(), expansion);
-            let xor_desugared = desugar::desugar(&xor).unwrap();
+            let xor = expr::Expr::xor(arena, efficient, expansion);
+            let xor_desugared = desugar::desugar(arena, xor).unwrap();
 
             let mut aut = aut::Aut::new(9);
-            let state = aut.expr_to_state(&xor_desugared);
+            let state = aut.expr_to_state(xor_desugared);
             assert!(
                 aut.is_empty(state),
                 "x[5..9] ~ 1-4 should be equivalent to expansion"
@@ -960,19 +980,19 @@ let port = &x[64..80] in
         // Test case 4: Power of 2 aligned range
         {
             let expr_str = "x[0..8] ~ 128-255"; // Upper half of byte
-            let expressions = parser::parse_expressions(expr_str).unwrap();
-            let efficient = desugar::desugar(&expressions[0]).unwrap();
+            let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+            let efficient = desugar::desugar(arena, expressions[0]).unwrap();
 
             // This should be equivalent to just testing the MSB
             // In LSB-first order, bit 7 is the MSB of an 8-bit value
-            let msb_test = expr::Expr::test(7, true);
+            let msb_test = expr::Expr::test(arena, 7, true);
 
             // Check equivalence
-            let xor = expr::Expr::xor(efficient.clone(), msb_test);
-            let xor_desugared = desugar::desugar(&xor).unwrap();
+            let xor = expr::Expr::xor(arena, efficient, msb_test);
+            let xor_desugared = desugar::desugar(arena, xor).unwrap();
 
             let mut aut = aut::Aut::new(8);
-            let state = aut.expr_to_state(&xor_desugared);
+            let state = aut.expr_to_state(xor_desugared);
             assert!(
                 aut.is_empty(state),
                 "Range 128-255 should be equivalent to MSB=1"
@@ -982,8 +1002,8 @@ let port = &x[64..80] in
         // Test case 4: CIDR correctly matches prefix
         {
             // 192.168.1.0/24 should match the first 24 bits only
-            let cidr_expr = parser::parse_expressions("x[0..32] ~ 192.168.1.0/24").unwrap();
-            let cidr = desugar::desugar(&cidr_expr[0]).unwrap();
+            let cidr_expr = parser::parse_expressions(arena, "x[0..32] ~ 192.168.1.0/24").unwrap();
+            let cidr = desugar::desugar(arena, cidr_expr[0]).unwrap();
 
             // It should be equivalent to just testing the high 24 bits (bits 8-31 in LSB-first)
             let ip_192_168_1 = (192u32 << 24) | (168u32 << 16) | (1u32 << 8);
@@ -992,15 +1012,15 @@ let port = &x[64..80] in
             for i in 8..32 {
                 prefix_bits.push((ip_192_168_1 >> i) & 1 == 1);
             }
-            let prefix_test = expr::Expr::bit_range_test(8, 32, prefix_bits);
-            let prefix_desugared = desugar::desugar(&prefix_test).unwrap();
+            let prefix_test = expr::Expr::bit_range_test(arena, 8, 32, prefix_bits);
+            let prefix_desugared = desugar::desugar(arena, prefix_test).unwrap();
 
             // Check equivalence
-            let xor = expr::Expr::xor(cidr, prefix_desugared);
-            let xor_desugared = desugar::desugar(&xor).unwrap();
+            let xor = expr::Expr::xor(arena, cidr, prefix_desugared);
+            let xor_desugared = desugar::desugar(arena, xor).unwrap();
 
             let mut aut = aut::Aut::new(32);
-            let state = aut.expr_to_state(&xor_desugared);
+            let state = aut.expr_to_state(xor_desugared);
             assert!(
                 aut.is_empty(state),
                 "CIDR /24 should only test first 24 bits"
@@ -1010,18 +1030,18 @@ let port = &x[64..80] in
         // Test case 5: Non-power-of-2 field widths
         {
             let expr_str = "x[0..10] ~ 1-4";
-            let expressions = parser::parse_expressions(expr_str).unwrap();
-            let efficient = desugar::desugar(&expressions[0]).unwrap();
+            let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+            let efficient = desugar::desugar(arena, expressions[0]).unwrap();
 
             // Manually expand
-            let expansion = expand_range(0, 10, 1, 4);
+            let expansion = expand_range(arena, 0, 10, 1, 4);
 
             // Check equivalence
-            let xor = expr::Expr::xor(efficient.clone(), expansion);
-            let xor_desugared = desugar::desugar(&xor).unwrap();
+            let xor = expr::Expr::xor(arena, efficient, expansion);
+            let xor_desugared = desugar::desugar(arena, xor).unwrap();
 
             let mut aut = aut::Aut::new(10);
-            let state = aut.expr_to_state(&xor_desugared);
+            let state = aut.expr_to_state(xor_desugared);
             assert!(
                 aut.is_empty(state),
                 "x[0..10] ~ 1-4 should be equivalent to expansion"
@@ -1032,8 +1052,8 @@ let port = &x[64..80] in
         {
             // This range has 100 addresses - good for testing efficiency
             let expr_str = "x[0..32] ~ 10.0.0.156-10.0.1.0"; // 156..255 + 0
-            let expressions = parser::parse_expressions(expr_str).unwrap();
-            let efficient = desugar::desugar(&expressions[0]).unwrap();
+            let expressions = parser::parse_expressions(arena, expr_str).unwrap();
+            let efficient = desugar::desugar(arena, expressions[0]).unwrap();
 
             // For this test, just verify it doesn't create too many unions
             fn count_unions(expr: &expr::Expr) -> usize {
@@ -1044,7 +1064,7 @@ let port = &x[64..80] in
                 }
             }
 
-            let union_count = count_unions(&efficient);
+            let union_count = count_unions(efficient);
             assert!(
                 union_count < 100,
                 "Should use efficient bounds, not enumerate all 101 addresses"
@@ -1052,20 +1072,21 @@ let port = &x[64..80] in
 
             // Also verify it's not empty and accepts the right values
             let mut aut = aut::Aut::new(32);
-            let state = aut.expr_to_state(&efficient);
+            let state = aut.expr_to_state(efficient);
             assert!(!aut.is_empty(state), "Range should not be empty");
         }
     }
 
     #[test]
     fn test_cidr_pattern_equivalence() {
+        let arena = &bumpalo::Bump::new();
         // Test that CIDR patterns are equivalent to their expanded ranges
         // by checking that (CIDR XOR expansion) is empty
 
         // Test case 1: /24 network matches prefix correctly
         {
-            let cidr_expr = parser::parse_expressions("x[0..32] ~ 192.168.1.0/24").unwrap();
-            let cidr = desugar::desugar(&cidr_expr[0]).unwrap();
+            let cidr_expr = parser::parse_expressions(arena, "x[0..32] ~ 192.168.1.0/24").unwrap();
+            let cidr = desugar::desugar(arena, cidr_expr[0]).unwrap();
 
             // CIDR /24 only checks the high 24 bits (bits 8-31 in LSB-first)
             let ip_prefix = (192u32 << 24) | (168u32 << 16) | (1u32 << 8);
@@ -1074,15 +1095,15 @@ let port = &x[64..80] in
             for i in 8..32 {
                 prefix_bits.push((ip_prefix >> i) & 1 == 1);
             }
-            let prefix_test = expr::Expr::bit_range_test(8, 32, prefix_bits);
-            let prefix_desugared = desugar::desugar(&prefix_test).unwrap();
+            let prefix_test = expr::Expr::bit_range_test(arena, 8, 32, prefix_bits);
+            let prefix_desugared = desugar::desugar(arena, prefix_test).unwrap();
 
             // Check equivalence
-            let xor = expr::Expr::xor(cidr.clone(), prefix_desugared);
-            let xor_desugared = desugar::desugar(&xor).unwrap();
+            let xor = expr::Expr::xor(arena, cidr, prefix_desugared);
+            let xor_desugared = desugar::desugar(arena, xor).unwrap();
 
             let mut aut = aut::Aut::new(32);
-            let state = aut.expr_to_state(&xor_desugared);
+            let state = aut.expr_to_state(xor_desugared);
             assert!(
                 aut.is_empty(state),
                 "/24 CIDR should only check 24-bit prefix"
@@ -1091,8 +1112,8 @@ let port = &x[64..80] in
 
         // Test case 2: /28 network matches prefix correctly
         {
-            let cidr_expr = parser::parse_expressions("x[0..32] ~ 10.0.0.16/28").unwrap();
-            let cidr = desugar::desugar(&cidr_expr[0]).unwrap();
+            let cidr_expr = parser::parse_expressions(arena, "x[0..32] ~ 10.0.0.16/28").unwrap();
+            let cidr = desugar::desugar(arena, cidr_expr[0]).unwrap();
 
             // CIDR /28 only checks the high 28 bits (bits 4-31 in LSB-first)
             let ip_prefix = (10u32 << 24) | (0u32 << 16) | (0u32 << 8) | 16u32;
@@ -1101,15 +1122,15 @@ let port = &x[64..80] in
             for i in 4..32 {
                 prefix_bits.push((ip_prefix >> i) & 1 == 1);
             }
-            let prefix_test = expr::Expr::bit_range_test(4, 32, prefix_bits);
-            let prefix_desugared = desugar::desugar(&prefix_test).unwrap();
+            let prefix_test = expr::Expr::bit_range_test(arena, 4, 32, prefix_bits);
+            let prefix_desugared = desugar::desugar(arena, prefix_test).unwrap();
 
             // Check equivalence
-            let xor = expr::Expr::xor(cidr.clone(), prefix_desugared);
-            let xor_desugared = desugar::desugar(&xor).unwrap();
+            let xor = expr::Expr::xor(arena, cidr, prefix_desugared);
+            let xor_desugared = desugar::desugar(arena, xor).unwrap();
 
             let mut aut = aut::Aut::new(32);
-            let state = aut.expr_to_state(&xor_desugared);
+            let state = aut.expr_to_state(xor_desugared);
             assert!(
                 aut.is_empty(state),
                 "/28 CIDR should only check 28-bit prefix"
@@ -1118,18 +1139,19 @@ let port = &x[64..80] in
 
         // Test case 3: /32 network (single host)
         {
-            let cidr_expr = parser::parse_expressions("x[0..32] ~ 192.168.1.100/32").unwrap();
-            let single_ip = parser::parse_expressions("x[0..32] ~ 192.168.1.100").unwrap();
+            let cidr_expr =
+                parser::parse_expressions(arena, "x[0..32] ~ 192.168.1.100/32").unwrap();
+            let single_ip = parser::parse_expressions(arena, "x[0..32] ~ 192.168.1.100").unwrap();
 
-            let cidr = desugar::desugar(&cidr_expr[0]).unwrap();
-            let exact = desugar::desugar(&single_ip[0]).unwrap();
+            let cidr = desugar::desugar(arena, cidr_expr[0]).unwrap();
+            let exact = desugar::desugar(arena, single_ip[0]).unwrap();
 
             // /32 should be equivalent to exact IP match
-            let xor = expr::Expr::xor(cidr, exact);
-            let xor_desugared = desugar::desugar(&xor).unwrap();
+            let xor = expr::Expr::xor(arena, cidr, exact);
+            let xor_desugared = desugar::desugar(arena, xor).unwrap();
 
             let mut aut = aut::Aut::new(32);
-            let state = aut.expr_to_state(&xor_desugared);
+            let state = aut.expr_to_state(xor_desugared);
             assert!(
                 aut.is_empty(state),
                 "/32 CIDR should be equivalent to exact IP match"
@@ -1138,8 +1160,8 @@ let port = &x[64..80] in
 
         // Test case 4: /16 network (larger test)
         {
-            let cidr_expr = parser::parse_expressions("x[0..32] ~ 172.16.0.0/16").unwrap();
-            let cidr = desugar::desugar(&cidr_expr[0]).unwrap();
+            let cidr_expr = parser::parse_expressions(arena, "x[0..32] ~ 172.16.0.0/16").unwrap();
+            let cidr = desugar::desugar(arena, cidr_expr[0]).unwrap();
 
             // For /16, we can't enumerate all 65536 addresses, but we can test samples
             // Test that some addresses inside the range match
@@ -1152,18 +1174,18 @@ let port = &x[64..80] in
             ];
 
             for test_expr in inside_tests {
-                let ip_expr = parser::parse_expressions(test_expr).unwrap();
-                let ip = desugar::desugar(&ip_expr[0]).unwrap();
+                let ip_expr = parser::parse_expressions(arena, test_expr).unwrap();
+                let ip = desugar::desugar(arena, ip_expr[0]).unwrap();
 
                 // IP AND CIDR should equal IP (meaning IP is in CIDR range)
-                let intersection = expr::Expr::intersect(cidr.clone(), ip.clone());
-                let inter_desugared = desugar::desugar(&intersection).unwrap();
+                let intersection = expr::Expr::intersect(arena, cidr, ip);
+                let inter_desugared = desugar::desugar(arena, intersection).unwrap();
 
-                let xor = expr::Expr::xor(inter_desugared, ip);
-                let xor_desugared = desugar::desugar(&xor).unwrap();
+                let xor = expr::Expr::xor(arena, inter_desugared, ip);
+                let xor_desugared = desugar::desugar(arena, xor).unwrap();
 
                 let mut aut = aut::Aut::new(32);
-                let state = aut.expr_to_state(&xor_desugared);
+                let state = aut.expr_to_state(xor_desugared);
                 assert!(
                     aut.is_empty(state),
                     "{} should be in 172.16.0.0/16",
@@ -1179,15 +1201,15 @@ let port = &x[64..80] in
             ];
 
             for test_expr in outside_tests {
-                let ip_expr = parser::parse_expressions(test_expr).unwrap();
-                let ip = desugar::desugar(&ip_expr[0]).unwrap();
+                let ip_expr = parser::parse_expressions(arena, test_expr).unwrap();
+                let ip = desugar::desugar(arena, ip_expr[0]).unwrap();
 
                 // IP AND CIDR should be empty (meaning IP is not in CIDR range)
-                let intersection = expr::Expr::intersect(cidr.clone(), ip);
-                let inter_desugared = desugar::desugar(&intersection).unwrap();
+                let intersection = expr::Expr::intersect(arena, cidr, ip);
+                let inter_desugared = desugar::desugar(arena, intersection).unwrap();
 
                 let mut aut = aut::Aut::new(32);
-                let state = aut.expr_to_state(&inter_desugared);
+                let state = aut.expr_to_state(inter_desugared);
                 assert!(
                     aut.is_empty(state),
                     "{} should NOT be in 172.16.0.0/16",
@@ -1199,43 +1221,44 @@ let port = &x[64..80] in
         // Test case 5: Special cases
         {
             // /0 should match everything
-            let cidr_all = parser::parse_expressions("x[0..32] ~ 0.0.0.0/0").unwrap();
-            let all = desugar::desugar(&cidr_all[0]).unwrap();
+            let cidr_all = parser::parse_expressions(arena, "x[0..32] ~ 0.0.0.0/0").unwrap();
+            let all = desugar::desugar(arena, cidr_all[0]).unwrap();
 
             // Should be equivalent to T (true/one)
-            let xor = expr::Expr::xor(all, expr::Expr::one());
-            let xor_desugared = desugar::desugar(&xor).unwrap();
+            let xor = expr::Expr::xor(arena, all, expr::Expr::one(arena));
+            let xor_desugared = desugar::desugar(arena, xor).unwrap();
 
             let mut aut = aut::Aut::new(32);
-            let state = aut.expr_to_state(&xor_desugared);
+            let state = aut.expr_to_state(xor_desugared);
             assert!(aut.is_empty(state), "/0 CIDR should match everything");
         }
 
         // Test case 6: CIDR with port field
         {
             let expr_str = "let ip = &x[0..32] in ip ~ 10.10.0.0/16";
-            let cidr_expr = parser::parse_expressions(expr_str).unwrap();
-            let cidr = desugar::desugar(&cidr_expr[0]).unwrap();
+            let cidr_expr = parser::parse_expressions(arena, expr_str).unwrap();
+            let cidr = desugar::desugar(arena, cidr_expr[0]).unwrap();
 
             // Test boundary addresses
             let start_ip =
-                parser::parse_expressions("let ip = &x[0..32] in ip ~ 10.10.0.0").unwrap();
+                parser::parse_expressions(arena, "let ip = &x[0..32] in ip ~ 10.10.0.0").unwrap();
             let end_ip =
-                parser::parse_expressions("let ip = &x[0..32] in ip ~ 10.10.255.255").unwrap();
+                parser::parse_expressions(arena, "let ip = &x[0..32] in ip ~ 10.10.255.255")
+                    .unwrap();
 
-            let start = desugar::desugar(&start_ip[0]).unwrap();
-            let end = desugar::desugar(&end_ip[0]).unwrap();
+            let start = desugar::desugar(arena, start_ip[0]).unwrap();
+            let end = desugar::desugar(arena, end_ip[0]).unwrap();
 
             // Both should be in the CIDR range
             for (ip, name) in [(start, "start"), (end, "end")] {
-                let intersection = expr::Expr::intersect(cidr.clone(), ip.clone());
-                let inter_desugared = desugar::desugar(&intersection).unwrap();
+                let intersection = expr::Expr::intersect(arena, cidr, ip);
+                let inter_desugared = desugar::desugar(arena, intersection).unwrap();
 
-                let xor = expr::Expr::xor(inter_desugared, ip);
-                let xor_desugared = desugar::desugar(&xor).unwrap();
+                let xor = expr::Expr::xor(arena, inter_desugared, ip);
+                let xor_desugared = desugar::desugar(arena, xor).unwrap();
 
                 let mut aut = aut::Aut::new(32);
-                let state = aut.expr_to_state(&xor_desugared);
+                let state = aut.expr_to_state(xor_desugared);
                 assert!(
                     aut.is_empty(state),
                     "{} address should be in CIDR range",
@@ -1247,30 +1270,31 @@ let port = &x[64..80] in
 
     #[test]
     fn test_pattern_matching_literals() {
+        let arena = &bumpalo::Bump::new();
         // Test pattern matching with different literal formats
 
         // Hexadecimal literal
         let hex_expr = "x[0..32] ~ 0xC0A80101"; // 192.168.1.1 in hex
-        let expressions = parser::parse_expressions(hex_expr).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, hex_expr).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(32);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(!aut.is_empty(state), "Hex pattern should allow traffic");
 
         // Binary literal
         let bin_expr = "x[0..8] ~ 0b11000000"; // 192 in binary
-        let expressions = parser::parse_expressions(bin_expr).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, bin_expr).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(8);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(!aut.is_empty(state), "Binary pattern should allow traffic");
 
         // Decimal literal
         let dec_expr = "x[0..32] ~ 3232235777"; // 192.168.1.1 as decimal
-        let expressions = parser::parse_expressions(dec_expr).unwrap();
-        let desugared = desugar::desugar(&expressions[0]).unwrap();
+        let expressions = parser::parse_expressions(arena, dec_expr).unwrap();
+        let desugared = desugar::desugar(arena, expressions[0]).unwrap();
         let mut aut = aut::Aut::new(32);
-        let state = aut.expr_to_state(&desugared);
+        let state = aut.expr_to_state(desugared);
         assert!(!aut.is_empty(state), "Decimal pattern should allow traffic");
 
         // Test that different literal formats work for exact matches

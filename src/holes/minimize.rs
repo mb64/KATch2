@@ -366,9 +366,13 @@ pub fn minimize(dfa: &ExplicitDFA, store: &mut spp::SPPstore) -> ExplicitNFA {
 /// minimizing first never gave a larger expression, and on bigger random inputs it made them several
 /// times smaller. After minimizing, Tarjan's algorithm gave slightly smaller expressions than Kleene
 /// state elimination.
-pub fn to_expr(dfa: &ExplicitDFA, store: &mut spp::SPPstore) -> Exp {
+pub fn to_expr<'a>(
+    arena: &'a bumpalo::Bump,
+    dfa: &ExplicitDFA,
+    store: &mut spp::SPPstore,
+) -> Exp<'a> {
     let small = minimize(dfa, store);
-    to_expr_tarjan(&small, store)
+    to_expr_tarjan(arena, &small, store)
 }
 
 /// Convert an NFA to an equivalent NetKAT expression, by Kleene state elimination.
@@ -379,8 +383,12 @@ pub fn to_expr(dfa: &ExplicitDFA, store: &mut spp::SPPstore) -> Exp {
 /// States are eliminated greedily, picking the one that increases the number of edges the least.
 /// Eliminating `q` adds an edge for each (incoming, outgoing) pair, and removes the incoming,
 /// outgoing, and self-loop edges of `q`.
-pub fn to_expr_kleene(aut: &ExplicitNFA, store: &mut spp::SPPstore) -> Exp {
-    let mut nfa = ExpNfa::from_nfa(aut, store);
+pub fn to_expr_kleene<'a>(
+    arena: &'a bumpalo::Bump,
+    aut: &ExplicitNFA,
+    store: &mut spp::SPPstore,
+) -> Exp<'a> {
+    let mut nfa = ExpNfa::from_nfa(arena, aut, store);
 
     let mut remaining: BTreeSet<usize> = (0..aut.num_states()).collect();
     while let Some(q) = remaining
@@ -394,7 +402,7 @@ pub fn to_expr_kleene(aut: &ExplicitNFA, store: &mut spp::SPPstore) -> Exp {
 
     nfa.edges[nfa.initial]
         .remove(&nfa.fin)
-        .unwrap_or_else(Expr::zero)
+        .unwrap_or_else(|| Expr::zero(arena))
 }
 
 /// Convert an NFA to an equivalent NetKAT expression, by Tarjan's path expression algorithm.
@@ -411,8 +419,12 @@ pub fn to_expr_kleene(aut: &ExplicitNFA, store: &mut spp::SPPstore) -> Exp {
 ///   down the dominator tree.
 /// - `dpath` is computed for the children of each node `v` together, bottom-up (see
 ///   [`solve_siblings`]).
-pub fn to_expr_tarjan(aut: &ExplicitNFA, store: &mut spp::SPPstore) -> Exp {
-    let nfa = ExpNfa::from_nfa(aut, store);
+pub fn to_expr_tarjan<'a>(
+    arena: &'a bumpalo::Bump,
+    aut: &ExplicitNFA,
+    store: &mut spp::SPPstore,
+) -> Exp<'a> {
+    let nfa = ExpNfa::from_nfa(arena, aut, store);
     let num_nodes = nfa.edges.len();
 
     let mut graph: DiGraph<(), (), usize> = DiGraph::default();
@@ -433,7 +445,7 @@ pub fn to_expr_tarjan(aut: &ExplicitNFA, store: &mut spp::SPPstore) -> Exp {
         })
         .collect();
     if idom[nfa.fin].is_none() {
-        return Expr::zero();
+        return Expr::zero(arena);
     }
 
     let mut children = vec![Vec::new(); num_nodes];
@@ -444,9 +456,9 @@ pub fn to_expr_tarjan(aut: &ExplicitNFA, store: &mut spp::SPPstore) -> Exp {
     }
 
     // Post-order, so that `dpath` is known for every node strictly below `v` when we get to `v`
-    let mut dpath = vec![Expr::zero(); num_nodes];
+    let mut dpath = vec![Expr::zero(arena); num_nodes];
     for v in post_order(&children, nfa.initial) {
-        solve_siblings(&nfa, &idom, v, &children[v], &mut dpath);
+        solve_siblings(arena, &nfa, &idom, v, &children[v], &mut dpath);
     }
 
     let mut chain = vec![];
@@ -455,8 +467,8 @@ pub fn to_expr_tarjan(aut: &ExplicitNFA, store: &mut spp::SPPstore) -> Exp {
         chain.push(q);
         q = idom[q].unwrap();
     }
-    chain.iter().rev().fold(Expr::one(), |acc, &q| {
-        Expr::sequence_simp(acc, dpath[q].clone())
+    chain.iter().rev().fold(Expr::one(arena), |acc, &q| {
+        Expr::sequence_simp(arena, acc, dpath[q])
     })
 }
 
@@ -476,12 +488,13 @@ pub fn to_expr_tarjan(aut: &ExplicitNFA, store: &mut spp::SPPstore) -> Exp {
 /// derived graph's strongly connected components. So we only need Kleene stars for the children
 /// that are actually in a cycle of the derived graph; for the others, elimination just substitutes
 /// forwards.
-fn solve_siblings(
-    nfa: &ExpNfa,
+fn solve_siblings<'a>(
+    arena: &'a bumpalo::Bump,
+    nfa: &ExpNfa<'a>,
     idom: &[Option<usize>],
     v: usize,
     kids: &[usize],
-    dpath: &mut [Exp],
+    dpath: &mut [Exp<'a>],
 ) {
     let k = kids.len();
     let index: HashMap<usize, usize> = kids.iter().enumerate().map(|(i, &c)| (c, i)).collect();
@@ -489,23 +502,32 @@ fn solve_siblings(
     // `b[j]` is the edge from `v` to `kids[j]`, and `a[i][j]` is the hops from `kids[i]` to `kids[j]`
     let mut b: Vec<Exp> = kids
         .iter()
-        .map(|c| nfa.edges[v].get(c).cloned().unwrap_or_else(Expr::zero))
+        .map(|c| {
+            nfa.edges[v]
+                .get(c)
+                .cloned()
+                .unwrap_or_else(|| Expr::zero(arena))
+        })
         .collect();
-    let mut a: Vec<Vec<Exp>> = vec![vec![Expr::zero(); k]; k];
+    let mut a: Vec<Vec<Exp>> = vec![vec![Expr::zero(arena); k]; k];
     for (j, &c) in kids.iter().enumerate() {
         for &u in &nfa.incoming[c] {
             // Skip the edge from `v` (already in `b`), and edges from unreachable states
             if u == v || idom[u].is_none() {
                 continue;
             }
-            let mut hop = nfa.edges[u][&c].clone();
+            let mut hop = nfa.edges[u][&c];
             let mut w = u;
             while idom[w] != Some(v) {
-                hop = Expr::sequence_simp(dpath[w].clone(), hop);
+                hop = Expr::sequence_simp(arena, dpath[w], hop);
                 w = idom[w].unwrap();
             }
             let i = index[&w];
-            a[i][j] = Expr::union_simp(std::mem::replace(&mut a[i][j], Expr::zero()), hop);
+            a[i][j] = Expr::union_simp(
+                arena,
+                std::mem::replace(&mut a[i][j], Expr::zero(arena)),
+                hop,
+            );
         }
     }
 
@@ -531,12 +553,12 @@ fn solve_siblings(
     let is_zero = |e: &Exp| **e == Expr::Zero;
     for &i in &order {
         // Solve equation `i` for `x_i` by Arden's rule: `x_i = (b_i + Σ_{j≠i} x_j; a_ji); a_ii*`
-        let loop_star = Expr::star_simp(std::mem::replace(&mut a[i][i], Expr::zero()));
+        let loop_star = Expr::star_simp(arena, std::mem::replace(&mut a[i][i], Expr::zero(arena)));
         if *loop_star != Expr::One {
-            b[i] = Expr::sequence_simp(b[i].clone(), loop_star.clone());
+            b[i] = Expr::sequence_simp(arena, b[i], loop_star);
             for row in a.iter_mut() {
                 if !is_zero(&row[i]) {
-                    row[i] = Expr::sequence_simp(row[i].clone(), loop_star.clone());
+                    row[i] = Expr::sequence_simp(arena, row[i], loop_star);
                 }
             }
         }
@@ -545,20 +567,20 @@ fn solve_siblings(
             if l == i || is_zero(&a[i][l]) {
                 continue;
             }
-            let a_il = std::mem::replace(&mut a[i][l], Expr::zero());
-            let via_i = Expr::sequence_simp(b[i].clone(), a_il.clone());
-            b[l] = Expr::union_simp(b[l].clone(), via_i);
+            let a_il = std::mem::replace(&mut a[i][l], Expr::zero(arena));
+            let via_i = Expr::sequence_simp(arena, b[i], a_il);
+            b[l] = Expr::union_simp(arena, b[l], via_i);
             for (j, row) in a.iter_mut().enumerate() {
                 if j != i && !is_zero(&row[i]) {
-                    let via_i = Expr::sequence_simp(row[i].clone(), a_il.clone());
-                    row[l] = Expr::union_simp(row[l].clone(), via_i);
+                    let via_i = Expr::sequence_simp(arena, row[i], a_il);
+                    row[l] = Expr::union_simp(arena, row[l], via_i);
                 }
             }
         }
     }
 
     for (j, &c) in kids.iter().enumerate() {
-        dpath[c] = std::mem::replace(&mut b[j], Expr::zero());
+        dpath[c] = std::mem::replace(&mut b[j], Expr::zero(arena));
     }
 }
 
@@ -580,9 +602,10 @@ fn post_order(children: &[Vec<usize>], root: usize) -> Vec<usize> {
 /// An NFA with edges labelled by expressions, for [`to_expr_kleene`] and [`to_expr_tarjan`].
 /// Parallel edges are merged into one by union, so there is at most one edge between each
 /// (ordered) pair of states.
-struct ExpNfa {
+struct ExpNfa<'a> {
+    arena: &'a bumpalo::Bump,
     /// `edges[p][r]` is the label of the edge from `p` to `r`.
-    edges: Vec<BTreeMap<usize, Exp>>,
+    edges: Vec<BTreeMap<usize, Exp<'a>>>,
     /// `incoming[r]` is the set of `p` with an edge from `p` to `r`.
     incoming: Vec<BTreeSet<usize>>,
     /// A fresh state with no incoming edges.
@@ -591,7 +614,7 @@ struct ExpNfa {
     fin: usize,
 }
 
-impl ExpNfa {
+impl<'a> ExpNfa<'a> {
     /// A transition `(spp, next)` means "apply `spp`, record the new packet in the trace, then
     /// continue from `next`", so each state `q` denotes
     ///
@@ -602,33 +625,38 @@ impl ExpNfa {
     /// So the NFA has the automaton's states, plus a fresh initial state with a `1` edge to the start
     /// state, an edge `spp; dup` per transition, and an edge `output_q` from each state to a fresh
     /// final state. The automaton denotes the sum of all paths from initial to final.
-    fn from_nfa(aut: &ExplicitNFA, store: &mut spp::SPPstore) -> ExpNfa {
+    fn from_nfa(
+        arena: &'a bumpalo::Bump,
+        aut: &ExplicitNFA,
+        store: &mut spp::SPPstore,
+    ) -> ExpNfa<'a> {
         let n = aut.num_states();
         let mut nfa = ExpNfa {
+            arena,
             edges: vec![BTreeMap::new(); n + 2],
             incoming: vec![BTreeSet::new(); n + 2],
             initial: n,
             fin: n + 1,
         };
 
-        nfa.add_edge(nfa.initial, aut.start, Expr::one());
+        nfa.add_edge(nfa.initial, aut.start, Expr::one(arena));
         for q in 0..n {
             for &(spp, next) in &aut.transitions[q] {
-                let label = Expr::sequence_simp(store.to_expr(spp), Expr::dup());
+                let label = Expr::sequence_simp(arena, store.to_expr(arena, spp), Expr::dup(arena));
                 nfa.add_edge(q, next, label);
             }
-            let output = store.to_expr(aut.outputs[q]);
+            let output = store.to_expr(arena, aut.outputs[q]);
             nfa.add_edge(q, nfa.fin, output);
         }
         nfa
     }
 
-    fn add_edge(&mut self, from: usize, to: usize, label: Exp) {
+    fn add_edge(&mut self, from: usize, to: usize, label: Exp<'a>) {
         if *label == Expr::Zero {
             return;
         }
         let label = match self.edges[from].remove(&to) {
-            Some(prev) => Expr::union_simp(prev, label),
+            Some(prev) => Expr::union_simp(self.arena, prev, label),
             None => label,
         };
         self.edges[from].insert(to, label);
@@ -648,8 +676,8 @@ impl ExpNfa {
         let mut outgoing = std::mem::take(&mut self.edges[q]);
         let self_loop = outgoing
             .remove(&q)
-            .map(Expr::star_simp)
-            .unwrap_or_else(Expr::one);
+            .map(|e| Expr::star_simp(self.arena, e))
+            .unwrap_or_else(|| Expr::one(self.arena));
         let incoming = std::mem::take(&mut self.incoming[q]);
 
         for &r in outgoing.keys() {
@@ -662,8 +690,9 @@ impl ExpNfa {
             let into_q = self.edges[p].remove(&q).unwrap();
             for (&r, out_of_q) in &outgoing {
                 let label = Expr::sequence_simp(
-                    Expr::sequence_simp(into_q.clone(), self_loop.clone()),
-                    out_of_q.clone(),
+                    self.arena,
+                    Expr::sequence_simp(self.arena, into_q, self_loop),
+                    out_of_q,
                 );
                 self.add_edge(p, r, label);
             }
@@ -692,18 +721,22 @@ mod tests {
 
     /// Round trip `expr -> DFA -> expr -> DFA` using `to_expr`, and check the language is
     /// preserved.
-    fn fuzz_to_expr(seed: u64, to_expr: impl Fn(&ExplicitDFA, &mut spp::SPPstore) -> Exp) {
+    fn fuzz_to_expr<'a>(
+        arena: &'a bumpalo::Bump,
+        seed: u64,
+        to_expr: impl Fn(&ExplicitDFA, &mut spp::SPPstore) -> Exp<'a>,
+    ) {
         crate::fuzz::seed_fuzzer(seed);
         let expr_depth = 3;
         let num_fields = 2;
 
         for trial in 0..200 {
-            let (expr, _) = crate::fuzz::genax(0, expr_depth, num_fields);
+            let (expr, _) = crate::fuzz::genax(arena, 0, expr_depth, num_fields);
             let mut store = spp::SPPstore::new(num_fields);
-            let dfa = aut::expr_to_dfa(&expr, &mut store);
+            let dfa = aut::expr_to_dfa(expr, &mut store);
 
             let back = to_expr(&dfa, &mut store);
-            let dfa_back = aut::expr_to_dfa(&back, &mut store);
+            let dfa_back = aut::expr_to_dfa(back, &mut store);
             assert!(
                 equivalent(&mut store, &to_nfa(&dfa), &to_nfa(&dfa_back)),
                 "to_expr changed the language on trial {trial}\n  expr: {expr}\n  back: {back}"
@@ -713,49 +746,55 @@ mod tests {
 
     #[test]
     fn fuzz_to_expr_roundtrip() {
-        fuzz_to_expr(0x5EED_0015, to_expr);
+        let arena = &bumpalo::Bump::new();
+        fuzz_to_expr(arena, 0x5EED_0015, |dfa, store| to_expr(arena, dfa, store));
     }
 
     #[test]
     fn fuzz_to_expr_kleene_roundtrip() {
-        fuzz_to_expr(0x5EED_0011, |dfa, store| {
-            to_expr_kleene(&to_nfa(dfa), store)
+        let arena = &bumpalo::Bump::new();
+        fuzz_to_expr(arena, 0x5EED_0011, |dfa, store| {
+            to_expr_kleene(arena, &to_nfa(dfa), store)
         });
     }
 
     #[test]
     fn fuzz_minimize_to_expr_kleene_roundtrip() {
-        fuzz_to_expr(0x5EED_0012, |dfa, store| {
+        let arena = &bumpalo::Bump::new();
+        fuzz_to_expr(arena, 0x5EED_0012, |dfa, store| {
             let small = minimize(dfa, store);
-            to_expr_kleene(&small, store)
+            to_expr_kleene(arena, &small, store)
         });
     }
 
     #[test]
     fn fuzz_to_expr_tarjan_roundtrip() {
-        fuzz_to_expr(0x5EED_0013, |dfa, store| {
-            to_expr_tarjan(&to_nfa(dfa), store)
+        let arena = &bumpalo::Bump::new();
+        fuzz_to_expr(arena, 0x5EED_0013, |dfa, store| {
+            to_expr_tarjan(arena, &to_nfa(dfa), store)
         });
     }
 
     #[test]
     fn fuzz_minimize_to_expr_tarjan_roundtrip() {
-        fuzz_to_expr(0x5EED_0014, |dfa, store| {
+        let arena = &bumpalo::Bump::new();
+        fuzz_to_expr(arena, 0x5EED_0014, |dfa, store| {
             let small = minimize(dfa, store);
-            to_expr_tarjan(&small, store)
+            to_expr_tarjan(arena, &small, store)
         });
     }
 
     #[test]
     fn fuzz_minimize_preserves_language() {
+        let arena = &bumpalo::Bump::new();
         crate::fuzz::seed_fuzzer(0x5EED_0010);
         let expr_depth = 4;
         let num_fields = 3;
 
         for trial in 0..300 {
-            let (expr, _) = crate::fuzz::genax(0, expr_depth, num_fields);
+            let (expr, _) = crate::fuzz::genax(arena, 0, expr_depth, num_fields);
             let mut aut = crate::aut::Aut::new(num_fields);
-            let state = aut.expr_to_state(&expr);
+            let state = aut.expr_to_state(expr);
             let dfa = aut::aut_to_dfa(&mut aut, state);
             let store = aut.spp_store_mut();
 
@@ -774,11 +813,12 @@ mod tests {
     /// Each reduce pass on its own preserves the language.
     #[test]
     fn fuzz_reduce_passes_preserve_language() {
+        let arena = &bumpalo::Bump::new();
         crate::fuzz::seed_fuzzer(0x5EED_0016);
         for trial in 0..300 {
-            let (expr, _) = crate::fuzz::genax(0, 4, 3);
+            let (expr, _) = crate::fuzz::genax(arena, 0, 4, 3);
             let mut store = spp::SPPstore::new(3);
-            let nfa = to_nfa(&aut::expr_to_dfa(&expr, &mut store));
+            let nfa = to_nfa(&aut::expr_to_dfa(expr, &mut store));
 
             let forward = reduce_forward(&nfa, &mut store);
             assert!(
@@ -798,15 +838,17 @@ mod tests {
     /// forward pass sees that the test always passes.
     #[test]
     fn minimize_simplifies_havoc_then_test() {
-        let expr = crate::parser::Parser::new(crate::parser::Lexer::new(
-            "(x0 := 0 + x0 := 1); dup; x0 == 1",
-        ))
+        let arena = &bumpalo::Bump::new();
+        let expr = crate::parser::Parser::new(
+            crate::parser::Lexer::new("(x0 := 0 + x0 := 1); dup; x0 == 1"),
+            arena,
+        )
         .parse_single_expression()
         .unwrap();
         let mut store = spp::SPPstore::new(1);
-        let dfa = aut::expr_to_dfa(&expr, &mut store);
-        let simplified = to_expr(&dfa, &mut store);
-        assert_eq!(crate::printer::pretty(&simplified), "x0 := 1; dup");
+        let dfa = aut::expr_to_dfa(expr, &mut store);
+        let simplified = to_expr(arena, &dfa, &mut store);
+        assert_eq!(crate::printer::pretty(simplified), "x0 := 1; dup");
     }
 
     /// Number of nodes in the syntax tree of `e`.
@@ -826,7 +868,7 @@ mod tests {
         }
     }
 
-    type ToExpr = fn(&ExplicitNFA, &mut spp::SPPstore) -> Exp;
+    type ToExpr = for<'a> fn(&'a bumpalo::Bump, &ExplicitNFA, &mut spp::SPPstore) -> Exp<'a>;
 
     /// Does converting to an expression give smaller results after minimizing?
     ///
@@ -835,6 +877,7 @@ mod tests {
     #[test]
     #[ignore]
     fn minimize_shrinks_exprs() {
+        let arena = &bumpalo::Bump::new();
         let algorithms: [(&str, ToExpr); 2] =
             [("kleene", to_expr_kleene), ("tarjan", to_expr_tarjan)];
         for (expr_depth, num_fields) in [(3, 2), (4, 3), (5, 3)] {
@@ -847,17 +890,17 @@ mod tests {
             let mut log_ratio = [0.0f64; 2];
 
             for _ in 0..trials {
-                let (expr, _) = crate::fuzz::genax(0, expr_depth, num_fields);
+                let (expr, _) = crate::fuzz::genax(arena, 0, expr_depth, num_fields);
                 let mut store = spp::SPPstore::new(num_fields);
-                let dfa = aut::expr_to_dfa(&expr, &mut store);
+                let dfa = aut::expr_to_dfa(expr, &mut store);
                 let small = minimize(&dfa, &mut store);
                 let dfa = to_nfa(&dfa);
                 states[0] += dfa.num_states();
                 states[1] += small.num_states();
 
                 for (k, (_, to_expr)) in algorithms.iter().enumerate() {
-                    let before = expr_size(&to_expr(&dfa, &mut store));
-                    let after = expr_size(&to_expr(&small, &mut store));
+                    let before = expr_size(to_expr(arena, &dfa, &mut store));
+                    let after = expr_size(to_expr(arena, &small, &mut store));
                     totals[k][0] += before;
                     totals[k][1] += after;
                     smaller[k] += (after < before) as usize;

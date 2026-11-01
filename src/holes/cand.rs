@@ -894,7 +894,11 @@ mod tests {
     use crate::holes::aut::expr_to_dfa;
 
     fn two_dup_dfa(store: &mut spp::SPPstore) -> ExplicitDFA {
-        expr_to_dfa(&Expr::sequence(Expr::dup(), Expr::dup()), store)
+        let arena = &bumpalo::Bump::new();
+        expr_to_dfa(
+            Expr::sequence(arena, Expr::dup(arena), Expr::dup(arena)),
+            store,
+        )
     }
 
     /// Totalize `dfa` (add a sink state) and materialize it, satisfying the
@@ -924,8 +928,9 @@ mod tests {
     /// the `Start -> Middle -> output` path (which needs no `Middle` step).
     #[test]
     fn top_cand_over_one_dup_accepts_its_length_two_trace() {
+        let arena = &bumpalo::Bump::new();
         let mut store = spp::SPPstore::new(1);
-        let raw = expr_to_dfa(&Expr::dup(), &mut store);
+        let raw = expr_to_dfa(Expr::dup(arena), &mut store);
         let dfa = complete(&mut store, &raw);
         let top = Cand::from_examples(&mut store, &dfa, &[]).unwrap();
         let p = vec![false];

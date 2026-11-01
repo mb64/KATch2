@@ -2233,8 +2233,9 @@ mod tests {
     /// states are dense `usize` indices; SPPs live in `aut`'s shared store,
     /// so multiple DFAs from the same `aut` interoperate freely.
     fn random_dfa(aut: &mut crate::aut::Aut, expr_depth: usize, num_fields: u32) -> ExplicitDFA {
-        let (expr, _) = crate::fuzz::genax(0, expr_depth, num_fields);
-        let state = aut.expr_to_state(&expr);
+        let arena = &bumpalo::Bump::new();
+        let (expr, _) = crate::fuzz::genax(arena, 0, expr_depth, num_fields);
+        let state = aut.expr_to_state(expr);
         aut_to_dfa(aut, state)
     }
 
@@ -2739,16 +2740,17 @@ mod tests {
 
     #[test]
     fn fuzz_explicit_dfa() {
+        let arena = &bumpalo::Bump::new();
         crate::fuzz::seed_fuzzer(0x5EED_0008);
         let expr_depth = 4;
         let num_fields = 3;
         let max_trials = 500;
 
         for trial in 0..max_trials {
-            let (expr, _) = crate::fuzz::genax(0, expr_depth, num_fields);
+            let (expr, _) = crate::fuzz::genax(arena, 0, expr_depth, num_fields);
 
             let mut aut = crate::aut::Aut::new(num_fields);
-            let state = aut.expr_to_state(&expr);
+            let state = aut.expr_to_state(expr);
 
             let dfa = aut_to_dfa(&mut aut, state);
 

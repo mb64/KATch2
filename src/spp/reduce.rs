@@ -260,12 +260,18 @@ impl Instantiator {
 
 /// Convert `spp` to an equivalent expression, case-splitting on fields in the order chosen by
 /// `heuristic`. May be exponentially larger than the SPP.
-pub fn to_expr_tree(store: &mut spp::SPPstore, spp: SPP, heuristic: SplitHeuristic) -> Exp {
+pub fn to_expr_tree<'a>(
+    arena: &'a bumpalo::Bump,
+    store: &mut spp::SPPstore,
+    spp: SPP,
+    heuristic: SplitHeuristic,
+) -> Exp<'a> {
     if let SplitHeuristic::LookaheadTop { width, .. } = heuristic {
         assert!(width > 0, "lookahead width must be positive");
     }
     let n = store.num_vars();
     let mut builder = TreeBuilder {
+        arena,
         zero: store.zero,
         instantiator: Instantiator::new(),
         store,
@@ -282,29 +288,30 @@ pub fn to_expr_tree(store: &mut spp::SPPstore, spp: SPP, heuristic: SplitHeurist
     builder.build(spp, (0..n).collect(), budget)
 }
 
-struct TreeBuilder<'a> {
-    store: &'a mut spp::SPPstore,
+struct TreeBuilder<'s, 'a> {
+    arena: &'a bumpalo::Bump,
+    store: &'s mut spp::SPPstore,
     heuristic: SplitHeuristic,
     /// The zero SPP (on all fields)
     zero: SPP,
     instantiator: Instantiator,
-    memo: HashMap<(SPP, Vec<spp::Var>, u32), Exp>,
+    memo: HashMap<(SPP, Vec<spp::Var>, u32), Exp<'a>>,
     /// Memo for [`TreeBuilder::count`]
     counts: HashMap<SPP, f64>,
 }
 
-impl TreeBuilder<'_> {
+impl<'a> TreeBuilder<'_, 'a> {
     /// `spp` leaves every field not in `remaining` alone. For the lookahead heuristics, `budget` is
     /// how many more splits explore alternative fields; it is ignored otherwise.
-    fn build(&mut self, spp: SPP, remaining: Vec<spp::Var>, budget: u32) -> Exp {
+    fn build(&mut self, spp: SPP, remaining: Vec<spp::Var>, budget: u32) -> Exp<'a> {
         if spp == self.zero {
-            return Expr::zero();
+            return Expr::zero(self.arena);
         }
         // A budget of at least the number of fields left means "try everything" either way
         let budget = budget.min(remaining.len() as u32);
         let key = (spp, remaining, budget);
         if let Some(e) = self.memo.get(&key) {
-            return e.clone();
+            return e;
         }
         let (spp, remaining, _) = key;
 
@@ -327,7 +334,7 @@ impl TreeBuilder<'_> {
         };
         let result = if candidates.is_empty() {
             // `spp` leaves every field alone, and isn't zero, so it's the identity
-            Expr::one()
+            Expr::one(self.arena)
         } else if budget > 0 {
             // Rank all fields cheaply, then complete only the best few trees.
             // Partial selection is O(n); sorting the shortlist is O(width log
@@ -363,7 +370,7 @@ impl TreeBuilder<'_> {
             let (field, subs) = self.choose(&candidates);
             self.split_expr(field, subs, &rest_without(field), 0)
         };
-        self.memo.insert((spp, remaining, budget), result.clone());
+        self.memo.insert((spp, remaining, budget), result);
         result
     }
 
@@ -452,15 +459,19 @@ impl TreeBuilder<'_> {
         subs: [SPP; 4],
         rest: &[spp::Var],
         budget: u32,
-    ) -> Exp {
+    ) -> Exp<'a> {
         let [s00, s01, s10, s11] = subs;
         let [z00, z01, z10, z11] = subs.map(|s| s == self.zero);
 
         // `field` is set to anything
         if s00 == s01 && s00 == s10 && s00 == s11 {
-            let havoc = Expr::union(Expr::assign(field, false), Expr::assign(field, true));
+            let havoc = Expr::union(
+                self.arena,
+                Expr::assign(self.arena, field, false),
+                Expr::assign(self.arena, field, true),
+            );
             let rest_expr = self.build(s00, rest.to_vec(), budget);
-            return Expr::sequence_simp(havoc, rest_expr);
+            return Expr::sequence_simp(self.arena, havoc, rest_expr);
         }
         // `field` is tested
         if z01 && z10 {
@@ -473,19 +484,19 @@ impl TreeBuilder<'_> {
             if !zero_other {
                 continue;
             }
-            let assign = Expr::assign(field, value);
+            let assign = Expr::assign(self.arena, field, value);
             return if if_false == if_true {
                 let rest_expr = self.build(if_false, rest.to_vec(), budget);
-                Expr::sequence_simp(assign, rest_expr)
+                Expr::sequence_simp(self.arena, assign, rest_expr)
             } else {
                 // Which fields come next depends on the input value of `field`
                 let branch = self.branch(field, if_false, if_true, rest, budget);
-                Expr::sequence(branch, assign)
+                Expr::sequence(self.arena, branch, assign)
             };
         }
 
         // General case: a sum over the (input, output) values of `field`
-        let mut result = Expr::zero();
+        let mut result = Expr::zero(self.arena);
         for (input, output, sub) in [
             (false, false, s00),
             (false, true, s01),
@@ -496,11 +507,16 @@ impl TreeBuilder<'_> {
             if *rest_expr == Expr::Zero {
                 continue;
             }
-            let mut prefix = Expr::test(field, input);
+            let mut prefix = Expr::test(self.arena, field, input);
             if input != output {
-                prefix = Expr::sequence(prefix, Expr::assign(field, output));
+                prefix =
+                    Expr::sequence(self.arena, prefix, Expr::assign(self.arena, field, output));
             }
-            result = Expr::union_simp(result, Expr::sequence_simp(prefix, rest_expr));
+            result = Expr::union_simp(
+                self.arena,
+                result,
+                Expr::sequence_simp(self.arena, prefix, rest_expr),
+            );
         }
         result
     }
@@ -513,14 +529,19 @@ impl TreeBuilder<'_> {
         if_true: SPP,
         rest: &[spp::Var],
         budget: u32,
-    ) -> Exp {
-        let mut result = Expr::zero();
+    ) -> Exp<'a> {
+        let mut result = Expr::zero(self.arena);
         for (value, sub) in [(false, if_false), (true, if_true)] {
             let rest_expr = self.build(sub, rest.to_vec(), budget);
             if *rest_expr != Expr::Zero {
                 result = Expr::union_simp(
+                    self.arena,
                     result,
-                    Expr::sequence_simp(Expr::test(field, value), rest_expr),
+                    Expr::sequence_simp(
+                        self.arena,
+                        Expr::test(self.arena, field, value),
+                        rest_expr,
+                    ),
                 );
             }
         }
@@ -594,13 +615,14 @@ mod tests {
 
     #[test]
     fn to_expr_tree_roundtrip() {
+        let arena = &bumpalo::Bump::new();
         for n in [2, 4] {
             let mut aut = crate::aut::Aut::new(n);
             for _ in 0..200 {
                 let spp = aut.spp_store_mut().rand();
                 for heuristic in HEURISTICS {
-                    let expr = to_expr_tree(aut.spp_store_mut(), spp, heuristic);
-                    let state = aut.expr_to_state(&expr);
+                    let expr = to_expr_tree(arena, aut.spp_store_mut(), spp, heuristic);
+                    let state = aut.expr_to_state(expr);
                     assert_eq!(aut.epsilon(state), spp, "{heuristic:?}: {expr}");
                 }
             }
@@ -609,34 +631,44 @@ mod tests {
 
     #[test]
     fn lookahead_endpoints() {
+        let arena = &bumpalo::Bump::new();
         let mut store = spp::SPPstore::new(4);
         for _ in 0..100 {
             let spp = store.rand();
-            let entropy = to_expr_tree(&mut store, spp, SplitHeuristic::Entropy);
-            let zero = to_expr_tree(&mut store, spp, SplitHeuristic::Lookahead(0));
+            let entropy = to_expr_tree(arena, &mut store, spp, SplitHeuristic::Entropy);
+            let zero = to_expr_tree(arena, &mut store, spp, SplitHeuristic::Lookahead(0));
             assert_eq!(entropy, zero);
             for depth in [0, 1, 3] {
                 let narrow = to_expr_tree(
+                    arena,
                     &mut store,
                     spp,
                     SplitHeuristic::LookaheadTop { depth, width: 1 },
                 );
                 assert_eq!(entropy, narrow);
             }
-            let exhaustive = to_expr_tree(&mut store, spp, SplitHeuristic::Exhaustive);
+            let exhaustive = to_expr_tree(arena, &mut store, spp, SplitHeuristic::Exhaustive);
             for k in [4, 5, 100] {
-                let lookahead = to_expr_tree(&mut store, spp, SplitHeuristic::Lookahead(k));
+                let lookahead = to_expr_tree(arena, &mut store, spp, SplitHeuristic::Lookahead(k));
                 assert_eq!(exhaustive, lookahead, "Lookahead({k})");
             }
             let unpruned = to_expr_tree(
+                arena,
                 &mut store,
                 spp,
                 SplitHeuristic::LookaheadTop { depth: 4, width: 5 },
             );
-            assert_eq!(expr_size(&exhaustive), expr_size(&unpruned));
+            assert_eq!(expr_size(exhaustive), expr_size(unpruned));
             // More lookahead never hurts
             let sizes: Vec<usize> = (0..=4)
-                .map(|k| expr_size(&to_expr_tree(&mut store, spp, SplitHeuristic::Lookahead(k))))
+                .map(|k| {
+                    expr_size(to_expr_tree(
+                        arena,
+                        &mut store,
+                        spp,
+                        SplitHeuristic::Lookahead(k),
+                    ))
+                })
                 .collect();
             assert!(sizes.windows(2).all(|w| w[1] <= w[0]), "{sizes:?}");
         }
@@ -644,16 +676,18 @@ mod tests {
 
     #[test]
     fn entropy_shortlist_preserves_relation_when_fields_are_pruned() {
+        let arena = &bumpalo::Bump::new();
         let mut aut = crate::aut::Aut::new(6);
         for _ in 0..30 {
             let spp = aut.spp_store_mut().rand();
             for width in [1, 2, 5] {
                 let expr = to_expr_tree(
+                    arena,
                     aut.spp_store_mut(),
                     spp,
                     SplitHeuristic::LookaheadTop { depth: 1, width },
                 );
-                let state = aut.expr_to_state(&expr);
+                let state = aut.expr_to_state(expr);
                 assert_eq!(aut.epsilon(state), spp, "width={width}: {expr}");
             }
         }
@@ -661,13 +695,14 @@ mod tests {
 
     #[test]
     fn size_heuristic_finds_the_relevant_field() {
+        let arena = &bumpalo::Bump::new();
         // Only field 3 does anything interesting; the others are left alone
         let mut store = spp::SPPstore::new(4);
         let test = store.test(3, true);
         let assign = store.assign(3, false);
         let spp = store.sequence(test, assign);
-        let expr = to_expr_tree(&mut store, spp, SplitHeuristic::Size);
-        assert_eq!(crate::printer::pretty(&expr), "x3 == 1; x3 := 0");
+        let expr = to_expr_tree(arena, &mut store, spp, SplitHeuristic::Size);
+        assert_eq!(crate::printer::pretty(expr), "x3 == 1; x3 := 0");
     }
 
     /// Compare expression sizes from each [`SplitHeuristic`] against [`SplitHeuristic::FirstField`].
@@ -677,6 +712,7 @@ mod tests {
     #[test]
     #[ignore]
     fn split_heuristics_compared() {
+        let arena = &bumpalo::Bump::new();
         use crate::holes::{aut as haut, minimize};
 
         // Corpus 1: random SPPs
@@ -688,8 +724,8 @@ mod tests {
         let mut aut = crate::aut::Aut::new(6);
         let mut compiled = vec![];
         while compiled.len() < 300 {
-            let (expr, _) = crate::fuzz::genax(0, 5, 6);
-            let state = aut.expr_to_state(&expr);
+            let (expr, _) = crate::fuzz::genax(arena, 0, 5, 6);
+            let state = aut.expr_to_state(expr);
             let spp = aut.epsilon(state);
             if !aut.spp_store_mut().is_zero(spp) {
                 compiled.push(spp);
@@ -701,8 +737,8 @@ mod tests {
         let mut edge_store = spp::SPPstore::new(5);
         let mut edges = vec![];
         for _ in 0..200 {
-            let (expr, _) = crate::fuzz::genax(0, 4, 5);
-            let dfa = haut::expr_to_dfa(&expr, &mut edge_store);
+            let (expr, _) = crate::fuzz::genax(arena, 0, 4, 5);
+            let dfa = haut::expr_to_dfa(expr, &mut edge_store);
             let nfa = minimize::minimize(&dfa, &mut edge_store);
             for q in 0..nfa.num_states() {
                 edges.extend(nfa.transitions[q].iter().map(|&(spp, _)| spp));
@@ -730,7 +766,7 @@ mod tests {
             println!("{name} ({} SPPs):", spps.len());
             let baseline: Vec<usize> = spps
                 .iter()
-                .map(|&spp| expr_size(&to_expr_tree(store, spp, SplitHeuristic::FirstField)))
+                .map(|&spp| expr_size(to_expr_tree(arena, store, spp, SplitHeuristic::FirstField)))
                 .collect();
             let heuristics = [
                 SplitHeuristic::FirstField,
@@ -750,7 +786,7 @@ mod tests {
                 let start = std::time::Instant::now();
                 let sizes: Vec<usize> = spps
                     .iter()
-                    .map(|&spp| expr_size(&to_expr_tree(store, spp, heuristic)))
+                    .map(|&spp| expr_size(to_expr_tree(arena, store, spp, heuristic)))
                     .collect();
                 let elapsed = start.elapsed();
                 let total: usize = sizes.iter().sum();

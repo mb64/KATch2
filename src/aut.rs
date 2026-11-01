@@ -406,7 +406,7 @@ impl Aut {
                 self.mk_spp(spp)
             }
             Expr::Union(e1, e2) => {
-                let aexp1 = self.expr_to_state(e1); // e1 is Box<Expr>, dereferences automatically
+                let aexp1 = self.expr_to_state(e1);
                 let aexp2 = self.expr_to_state(e2);
                 self.mk_union(aexp1, aexp2)
             }

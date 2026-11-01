@@ -116,14 +116,15 @@ mod tests {
     use super::*;
     use crate::parser::{Lexer, Parser};
 
-    fn parse(s: &str) -> Box<Expr> {
-        Parser::new(Lexer::new(s))
+    fn parse<'a>(arena: &'a bumpalo::Bump, s: &'a str) -> crate::expr::Exp<'a> {
+        Parser::new(Lexer::new(s), arena)
             .parse_single_expression()
             .unwrap_or_else(|e| panic!("failed to parse {s:?}: {}", e.message))
     }
 
     #[test]
     fn minimal_parentheses() {
+        let arena = &bumpalo::Bump::new();
         let cases = [
             "x0 == 1; x1 := 0 + x2 == 1",
             "(x0 == 1 + x1 == 0); dup; x1 := 1",
@@ -138,17 +139,18 @@ mod tests {
             "0 + 1 + T",
         ];
         for s in cases {
-            assert_eq!(pretty(&parse(s)), s);
+            assert_eq!(pretty(parse(arena, s)), s);
         }
     }
 
     #[test]
     fn roundtrip_random() {
+        let arena = &bumpalo::Bump::new();
         crate::fuzz::seed_fuzzer(0x5EED_0030);
         for _ in 0..1000 {
-            let (expr, _) = crate::fuzz::genax(0, 5, 3);
-            let printed = pretty(&expr);
-            assert_eq!(parse(&printed), expr, "printed as {printed}");
+            let (expr, _) = crate::fuzz::genax(arena, 0, 5, 3);
+            let printed = pretty(expr);
+            assert_eq!(parse(arena, &printed), expr, "printed as {printed}");
         }
     }
 }

@@ -23,7 +23,7 @@ use katch2::expr::Exp;
 use katch2::holes::cegis::CegisError;
 use katch2::holes::metrics::Metrics;
 use katch2::holes::minimize;
-use katch2::holes::parser::{Program, Stmt, desugar, fill_holes, parse_program};
+use katch2::holes::parser::{Stmt, desugar, fill_holes, parse_program};
 use katch2::printer::pretty;
 use rand::RngExt;
 
@@ -215,7 +215,10 @@ fn solve_file(
     timings: &mut Metrics,
 ) -> Result<(&'static str, Option<String>), String> {
     let started = timings.start();
-    let program = read_program(path)?;
+    let source = read_source(path)?;
+    let syntax_arena = bumpalo::Bump::new();
+    let program =
+        parse_program(&syntax_arena, &source).map_err(|e| format!("parse error: {}", e.message))?;
     timings.elapsed("read_parse_ns", started);
     let started = timings.start();
     let mut instance = desugar(&program).map_err(|e| format!("desugar error: {e}"))?;
@@ -225,13 +228,16 @@ fn solve_file(
     let started = timings.start();
     let names: Vec<_> = program
         .statements
-        .into_iter()
+        .iter()
         .filter_map(|stmt| match stmt {
-            Stmt::Hole(name) => Some(name),
+            Stmt::Hole(name) => Some((*name).to_owned()),
             _ => None,
         })
         .collect();
+    drop(syntax_arena);
+    drop(source);
     timings.elapsed("drop_syntax_ns", started);
+    let arena = &bumpalo::Bump::new();
 
     // Each hole's solution, as an expression, in `instance.holes` order
     let outcome: Result<Vec<Exp>, CegisError> = if full {
@@ -244,7 +250,7 @@ fn solve_file(
             let holes = instance.holes.clone();
             holes
                 .iter()
-                .map(|h| minimize::to_expr(&dfas[h], &mut instance.store))
+                .map(|h| minimize::to_expr(arena, &dfas[h], &mut instance.store))
                 .collect()
         });
         timings.elapsed("to_expr_ns", started);
@@ -259,7 +265,7 @@ fn solve_file(
             let holes = instance.holes.clone();
             holes
                 .iter()
-                .map(|h| instance.store.to_expr(spps[h]))
+                .map(|h| instance.store.to_expr(arena, spps[h]))
                 .collect()
         });
         timings.elapsed("to_expr_ns", started);
@@ -295,10 +301,14 @@ fn check_file(
     max_iters: Option<usize>,
 ) -> Result<&'static str, String> {
     let mut instance = {
-        let program = read_program(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let solution =
-            read_program(solution_path).map_err(|e| format!("{}: {e}", solution_path.display()))?;
-        let filled = fill_holes(&program, &solution)
+        let arena = &bumpalo::Bump::new();
+        let source = read_source(path)?;
+        let solution_source = read_source(solution_path)?;
+        let program = parse_program(arena, &source)
+            .map_err(|e| format!("{}: parse error: {}", path.display(), e.message))?;
+        let solution = parse_program(arena, &solution_source)
+            .map_err(|e| format!("{}: parse error: {}", solution_path.display(), e.message))?;
+        let filled = fill_holes(&program, &solution, arena)
             .map_err(|e| format!("{}: {e}", solution_path.display()))?;
         desugar(&filled).map_err(|e| format!("{}: desugar error: {e}", path.display()))?
     };
@@ -311,10 +321,9 @@ fn check_file(
     })
 }
 
-/// Read and parse a `.nksynth` file.
-fn read_program(path: &Path) -> Result<Program, String> {
-    let src = fs::read_to_string(path).map_err(|e| format!("could not read file: {e}"))?;
-    parse_program(&src).map_err(|e| format!("parse error: {}", e.message))
+/// Keep the original buffer alive until its syntax arena is released.
+fn read_source(path: &Path) -> Result<String, String> {
+    fs::read_to_string(path).map_err(|e| format!("{}: could not read file: {e}", path.display()))
 }
 
 #[cfg(test)]

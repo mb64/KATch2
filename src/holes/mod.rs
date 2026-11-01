@@ -60,12 +60,13 @@
 //!
 //! ```
 //! # use katch2::expr::Expr;
+//! # let arena = &bumpalo::Bump::new();
 //! # use katch2::holes::aut::expr_to_dfa;
 //! # use katch2::holes::nk_with_holes::{Expr as HExpr, Hole};
 //! # use katch2::holes::solve_holes;
 //! # use katch2::spp::SPPstore;
 //! let mut store = SPPstore::new(2);
-//! let target = Expr::sequence(Expr::dup(), Expr::assign(0, true));
+//! let target = Expr::sequence(arena, Expr::dup(arena), Expr::assign(arena, 0, true));
 //! let target_dfa = expr_to_dfa(&target, &mut store);
 //! let hole_expr = HExpr::sequence(HExpr::dup(), HExpr::hole(Hole(0)));
 //! let result = solve_holes(
@@ -94,13 +95,14 @@
 //!
 //! ```
 //! # use katch2::expr::Expr;
+//! # let arena = &bumpalo::Bump::new();
 //! # use katch2::holes::aut::expr_to_dfa;
 //! # use katch2::holes::cegis::CegisError;
 //! # use katch2::holes::nk_with_holes::{Expr as HExpr, Hole};
 //! # use katch2::holes::solve_holes;
 //! # use katch2::spp::SPPstore;
 //! let mut store = SPPstore::new(2);
-//! let target = expr_to_dfa(&Expr::dup(), &mut store);
+//! let target = expr_to_dfa(&Expr::dup(arena), &mut store);
 //! let hole_expr = HExpr::hole(Hole(0));   // no `dup` — length-1 traces only
 //! let result = solve_holes(
 //!     &hole_expr, &[Hole(0)], &target, &target, &mut store, None,
@@ -113,12 +115,13 @@
 //!
 //! ```
 //! # use katch2::expr::Expr;
+//! # let arena = &bumpalo::Bump::new();
 //! # use katch2::holes::aut::expr_to_dfa;
 //! # use katch2::holes::nk_with_holes::{Expr as HExpr, Hole};
 //! # use katch2::holes::{full_reference_dfa, solve_holes_full};
 //! # use katch2::spp::SPPstore;
 //! let mut store = SPPstore::new(2);
-//! let target = expr_to_dfa(&Expr::dup(), &mut store);
+//! let target = expr_to_dfa(&Expr::dup(arena), &mut store);
 //! let hole_expr = HExpr::hole(Hole(0));
 //! // The reference DFA grounds the Cand candidates; the caller owns it.
 //! let rdfa = full_reference_dfa(&mut store, &hole_expr, &target, &target);
@@ -294,8 +297,9 @@ mod test {
 
     #[test]
     fn two_holes() {
+        let arena = &bumpalo::Bump::new();
         let mut store = SPPstore::new(1);
-        let target_dfa = expr_to_dfa(&Expr::one(), &mut store);
+        let target_dfa = expr_to_dfa(Expr::one(arena), &mut store);
         let spp_0 = store.test(0, true);
         let spp_1 = store.test(0, false);
         let spp_01 = store.union(spp_0, spp_1);
@@ -323,9 +327,9 @@ mod test {
     /// That is, Hole0 must be an injective function from 2^`n` pigeons into 2^`n` - 1 holes.
     ///
     /// This is of course UNSAT, but figuring that out is slow.
-    fn slow(n_fields: u32) {
+    fn slow(arena: &bumpalo::Bump, n_fields: u32) {
         let mut store = SPPstore::new(n_fields);
-        let target_dfa = expr_to_dfa(&Expr::one(), &mut store);
+        let target_dfa = expr_to_dfa(Expr::one(arena), &mut store);
         let mut spp = store.zero;
         for i in 0..n_fields {
             let spp_i = store.test(i, true);
@@ -349,20 +353,23 @@ mod test {
     /// 4 pigeons: essentially instant
     #[test]
     fn slightly_slow_test() {
-        slow(2);
+        let arena = &bumpalo::Bump::new();
+        slow(arena, 2);
     }
 
     /// 8 pigeons: a couple seconds
     #[test]
     fn slow_test() {
-        slow(3);
+        let arena = &bumpalo::Bump::new();
+        slow(arena, 3);
     }
 
     /// 16 pigeons: may hit the 1000-round refinement cap.
     #[test]
     #[ignore]
     fn slower_test() {
-        slow(4);
+        let arena = &bumpalo::Bump::new();
+        slow(arena, 4);
     }
 
     use crate::holes::cegis::CegisError;
@@ -373,9 +380,10 @@ mod test {
     /// The synthesized `Hole(0)` is the assignment `x0 := 1`.
     #[test]
     fn full_solves_spp_problem() {
+        let arena = &bumpalo::Bump::new();
         let mut store = SPPstore::new(2);
-        let target = Expr::sequence(Expr::dup(), Expr::assign(0, true));
-        let target_dfa = expr_to_dfa(&target, &mut store);
+        let target = Expr::sequence(arena, Expr::dup(arena), Expr::assign(arena, 0, true));
+        let target_dfa = expr_to_dfa(target, &mut store);
         let hole_expr = HExpr::sequence(HExpr::dup(), HExpr::hole(Hole(0)));
         let rdfa = full_reference_dfa(&mut store, &hole_expr, &target_dfa, &target_dfa);
         let result = solve_holes_full(
@@ -397,8 +405,9 @@ mod test {
     /// full solver over the SPP-only one.
     #[test]
     fn full_solves_dup_where_spp_cannot() {
+        let arena = &bumpalo::Bump::new();
         let mut store = SPPstore::new(2);
-        let target = expr_to_dfa(&Expr::dup(), &mut store);
+        let target = expr_to_dfa(Expr::dup(arena), &mut store);
         let hole_expr = HExpr::hole(Hole(0));
 
         // SPP-only is infeasible.
@@ -431,9 +440,10 @@ mod test {
     /// report `Infeasible`.
     #[test]
     fn full_infeasible_bounds() {
+        let arena = &bumpalo::Bump::new();
         let mut store = SPPstore::new(1);
-        let lower = expr_to_dfa(&Expr::one(), &mut store);
-        let upper = expr_to_dfa(&Expr::zero(), &mut store);
+        let lower = expr_to_dfa(Expr::one(arena), &mut store);
+        let upper = expr_to_dfa(Expr::zero(arena), &mut store);
         let hole_expr = HExpr::hole(Hole(0));
         let rdfa = full_reference_dfa(&mut store, &hole_expr, &lower, &upper);
         let result = solve_holes_full(
@@ -487,19 +497,27 @@ mod test {
     /// A random dup-free expression: leaves are `0`/`1`/`test`/`assign`, joined
     /// by `union`/`sequence`/`star`.  No `dup`, so it denotes a single SPP and
     /// is a valid `solve_holes` candidate.
-    fn random_dup_free(depth: u32) -> Exp {
+    fn random_dup_free<'a>(arena: &'a bumpalo::Bump, depth: u32) -> Exp<'a> {
         if depth == 0 || rand::random::<f64>() < 0.4 {
             return match rand::random_range(0..4u32) {
-                0 => Expr::one(),
-                1 => Expr::zero(),
-                2 => Expr::test(rand::random_range(0..FUZZ_FIELDS), rand::random()),
-                _ => Expr::assign(rand::random_range(0..FUZZ_FIELDS), rand::random()),
+                0 => Expr::one(arena),
+                1 => Expr::zero(arena),
+                2 => Expr::test(arena, rand::random_range(0..FUZZ_FIELDS), rand::random()),
+                _ => Expr::assign(arena, rand::random_range(0..FUZZ_FIELDS), rand::random()),
             };
         }
         match rand::random_range(0..3u32) {
-            0 => Expr::union(random_dup_free(depth - 1), random_dup_free(depth - 1)),
-            1 => Expr::sequence(random_dup_free(depth - 1), random_dup_free(depth - 1)),
-            _ => Expr::star(random_dup_free(depth - 1)),
+            0 => Expr::union(
+                arena,
+                random_dup_free(arena, depth - 1),
+                random_dup_free(arena, depth - 1),
+            ),
+            1 => Expr::sequence(
+                arena,
+                random_dup_free(arena, depth - 1),
+                random_dup_free(arena, depth - 1),
+            ),
+            _ => Expr::star(arena, random_dup_free(arena, depth - 1)),
         }
     }
 
@@ -507,26 +525,28 @@ mod test {
     /// multi-step, dup-ful program.  Leaves add `dup` to the `random_dup_free`
     /// repertoire; combinators are the same `union`/`sequence`/`star`.  This is
     /// the candidate kind `solve_holes_full` searches.
-    fn random_maybe_dupful(depth: u32) -> Exp {
+    fn random_maybe_dupful<'a>(arena: &'a bumpalo::Bump, depth: u32) -> Exp<'a> {
         if depth == 0 || rand::random::<f64>() < 0.4 {
             return match rand::random_range(0..5u32) {
-                0 => Expr::one(),
-                1 => Expr::zero(),
-                2 => Expr::test(rand::random_range(0..FUZZ_FIELDS), rand::random()),
-                3 => Expr::assign(rand::random_range(0..FUZZ_FIELDS), rand::random()),
-                _ => Expr::dup(),
+                0 => Expr::one(arena),
+                1 => Expr::zero(arena),
+                2 => Expr::test(arena, rand::random_range(0..FUZZ_FIELDS), rand::random()),
+                3 => Expr::assign(arena, rand::random_range(0..FUZZ_FIELDS), rand::random()),
+                _ => Expr::dup(arena),
             };
         }
         match rand::random_range(0..3u32) {
             0 => Expr::union(
-                random_maybe_dupful(depth - 1),
-                random_maybe_dupful(depth - 1),
+                arena,
+                random_maybe_dupful(arena, depth - 1),
+                random_maybe_dupful(arena, depth - 1),
             ),
             1 => Expr::sequence(
-                random_maybe_dupful(depth - 1),
-                random_maybe_dupful(depth - 1),
+                arena,
+                random_maybe_dupful(arena, depth - 1),
+                random_maybe_dupful(arena, depth - 1),
             ),
-            _ => Expr::star(random_maybe_dupful(depth - 1)),
+            _ => Expr::star(arena, random_maybe_dupful(arena, depth - 1)),
         }
     }
 
@@ -535,30 +555,35 @@ mod test {
     /// primitive leaf is either a hole or `dup`, so all concrete packet-shuffling
     /// in the target flows in through the instantiations.  Records which holes
     /// actually appear in `used`.
-    fn random_template(depth: u32, insts: &[Exp], used: &mut BTreeSet<Hole>) -> (HExpr, Exp) {
+    fn random_template<'a>(
+        arena: &'a bumpalo::Bump,
+        depth: u32,
+        insts: &[Exp<'a>],
+        used: &mut BTreeSet<Hole>,
+    ) -> (HExpr, Exp<'a>) {
         if depth == 0 || rand::random::<f64>() < 0.4 {
             // A leaf: usually a hole, occasionally a `dup`.
             if rand::random::<f64>() < 0.85 {
                 let i = rand::random_range(0..insts.len());
                 used.insert(Hole(i as u32));
-                return (HExpr::hole(Hole(i as u32)), insts[i].clone());
+                return (HExpr::hole(Hole(i as u32)), insts[i]);
             }
-            return (HExpr::dup(), Expr::dup());
+            return (HExpr::dup(), Expr::dup(arena));
         }
         match rand::random_range(0..3u32) {
             0 => {
-                let (a1, a2) = random_template(depth - 1, insts, used);
-                let (b1, b2) = random_template(depth - 1, insts, used);
-                (HExpr::union(a1, b1), Expr::union(a2, b2))
+                let (a1, a2) = random_template(arena, depth - 1, insts, used);
+                let (b1, b2) = random_template(arena, depth - 1, insts, used);
+                (HExpr::union(a1, b1), Expr::union(arena, a2, b2))
             }
             1 => {
-                let (a1, a2) = random_template(depth - 1, insts, used);
-                let (b1, b2) = random_template(depth - 1, insts, used);
-                (HExpr::sequence(a1, b1), Expr::sequence(a2, b2))
+                let (a1, a2) = random_template(arena, depth - 1, insts, used);
+                let (b1, b2) = random_template(arena, depth - 1, insts, used);
+                (HExpr::sequence(a1, b1), Expr::sequence(arena, a2, b2))
             }
             _ => {
-                let (a1, a2) = random_template(depth - 1, insts, used);
-                (HExpr::star(a1), Expr::star(a2))
+                let (a1, a2) = random_template(arena, depth - 1, insts, used);
+                (HExpr::star(a1), Expr::star(arena, a2))
             }
         }
     }
@@ -567,15 +592,18 @@ mod test {
     /// substituted target, the holes that actually appear, and the per-hole
     /// instantiations (kept for failure messages).  `inst_gen` chooses the
     /// candidate kind — `random_dup_free` or `random_maybe_dupful`.
-    fn random_instance(
+    fn random_instance<'a>(
+        arena: &'a bumpalo::Bump,
         template_depth: u32,
         inst_depth: u32,
-        inst_gen: fn(u32) -> Exp,
-    ) -> (HExpr, Exp, Vec<Hole>, Vec<Exp>) {
+        inst_gen: fn(&'a bumpalo::Bump, u32) -> Exp<'a>,
+    ) -> (HExpr, Exp<'a>, Vec<Hole>, Vec<Exp<'a>>) {
         let num_holes = 1 + rand::random_range(0..3usize); // 1..=3 holes
-        let insts: Vec<Exp> = (0..num_holes).map(|_| inst_gen(inst_depth)).collect();
+        let insts: Vec<Exp> = (0..num_holes)
+            .map(|_| inst_gen(arena, inst_depth))
+            .collect();
         let mut used = BTreeSet::new();
-        let (hole_expr, target_expr) = random_template(template_depth, &insts, &mut used);
+        let (hole_expr, target_expr) = random_template(arena, template_depth, &insts, &mut used);
         let holes: Vec<Hole> = used.into_iter().collect();
         (hole_expr, target_expr, holes, insts)
     }
@@ -612,10 +640,12 @@ mod test {
     /// bug is now fixed, so the fuzzer runs by default again.
     #[test]
     fn fuzz_solve_holes_roundtrip() {
+        let arena = &bumpalo::Bump::new();
         for trial in 0..40 {
             let mut store = SPPstore::new(FUZZ_FIELDS);
-            let (hole_expr, target_expr, holes, insts) = random_instance(3, 2, random_dup_free);
-            let target_dfa = expr_to_dfa(&target_expr, &mut store);
+            let (hole_expr, target_expr, holes, insts) =
+                random_instance(arena, 3, 2, random_dup_free);
+            let target_dfa = expr_to_dfa(target_expr, &mut store);
             let result = solve_holes(
                 &hole_expr,
                 &holes,
@@ -641,10 +671,12 @@ mod test {
     #[test]
     #[ignore]
     fn fuzz_solve_holes_roundtrip_deep() {
+        let arena = &bumpalo::Bump::new();
         for trial in 0..40 {
             let mut store = SPPstore::new(FUZZ_FIELDS);
-            let (hole_expr, target_expr, holes, insts) = random_instance(4, 3, random_dup_free);
-            let target_dfa = expr_to_dfa(&target_expr, &mut store);
+            let (hole_expr, target_expr, holes, insts) =
+                random_instance(arena, 4, 3, random_dup_free);
+            let target_dfa = expr_to_dfa(target_expr, &mut store);
             let result = solve_holes(
                 &hole_expr,
                 &holes,
@@ -678,10 +710,12 @@ mod test {
     /// so this runs by default again.
     #[test]
     fn fuzz_solve_holes_full_roundtrip() {
+        let arena = &bumpalo::Bump::new();
         for trial in 0..30 {
             let mut store = SPPstore::new(FUZZ_FIELDS);
-            let (hole_expr, target_expr, holes, insts) = random_instance(3, 2, random_maybe_dupful);
-            let target_dfa = expr_to_dfa(&target_expr, &mut store);
+            let (hole_expr, target_expr, holes, insts) =
+                random_instance(arena, 3, 2, random_maybe_dupful);
+            let target_dfa = expr_to_dfa(target_expr, &mut store);
             let rdfa = full_reference_dfa(&mut store, &hole_expr, &target_dfa, &target_dfa);
             let result = solve_holes_full(
                 &hole_expr,
@@ -712,10 +746,12 @@ mod test {
     #[test]
     #[ignore]
     fn fuzz_solve_holes_full_roundtrip_deep() {
+        let arena = &bumpalo::Bump::new();
         for trial in 0..30 {
             let mut store = SPPstore::new(FUZZ_FIELDS);
-            let (hole_expr, target_expr, holes, insts) = random_instance(4, 3, random_maybe_dupful);
-            let target_dfa = expr_to_dfa(&target_expr, &mut store);
+            let (hole_expr, target_expr, holes, insts) =
+                random_instance(arena, 4, 3, random_maybe_dupful);
+            let target_dfa = expr_to_dfa(target_expr, &mut store);
             let rdfa = full_reference_dfa(&mut store, &hole_expr, &target_dfa, &target_dfa);
             let result = solve_holes_full(
                 &hole_expr,
@@ -747,6 +783,7 @@ mod test {
     /// equation is satisfiable by construction, so `solve_holes` must succeed.
     #[test]
     fn roundtrip_nondeterministic_hole_fill() {
+        let arena = &bumpalo::Bump::new();
         let mut store = SPPstore::new(2);
         // hole_expr = (Hole(1)* ; Hole(2)*)*
         let hole_expr = HExpr::star(HExpr::sequence(
@@ -755,10 +792,24 @@ mod test {
         ));
         // Hole(1) := (1==true ; 1==false)*  (denotes identity),
         // Hole(2) := (0:=false) + (1==true)  (a nondeterministic SPP).
-        let h1 = Expr::star(Expr::sequence(Expr::test(1, true), Expr::test(1, false)));
-        let h2 = Expr::union(Expr::assign(0, false), Expr::test(1, true));
-        let target = Expr::star(Expr::sequence(Expr::star(h1), Expr::star(h2)));
-        let target_dfa = expr_to_dfa(&target, &mut store);
+        let h1 = Expr::star(
+            arena,
+            Expr::sequence(
+                arena,
+                Expr::test(arena, 1, true),
+                Expr::test(arena, 1, false),
+            ),
+        );
+        let h2 = Expr::union(
+            arena,
+            Expr::assign(arena, 0, false),
+            Expr::test(arena, 1, true),
+        );
+        let target = Expr::star(
+            arena,
+            Expr::sequence(arena, Expr::star(arena, h1), Expr::star(arena, h2)),
+        );
+        let target_dfa = expr_to_dfa(target, &mut store);
         let result = solve_holes(
             &hole_expr,
             &[Hole(1), Hole(2)],
@@ -791,6 +842,7 @@ mod test {
     /// `Ok`.
     #[test]
     fn roundtrip_three_hole_chain_blowup() {
+        let arena = &bumpalo::Bump::new();
         // `Ha ; Hb ; Hc`
         let chain = |a: Hole, b: Hole, c: Hole| {
             HExpr::sequence(
@@ -798,9 +850,9 @@ mod test {
                 HExpr::hole(c),
             )
         };
-        let dup = Expr::dup();
-        let dup2 = Expr::sequence(dup.clone(), dup.clone());
-        let dup3 = Expr::sequence(dup2.clone(), dup.clone());
+        let dup = Expr::dup(arena);
+        let dup2 = Expr::sequence(arena, dup, dup);
+        let dup3 = Expr::sequence(arena, dup2, dup);
         // Run `chain == target` (target as both bounds) under the chosen solver.
         let run = |full: bool, he: &HExpr, holes: &[Hole], target: &Expr| {
             let mut store = SPPstore::new(2);
@@ -832,12 +884,17 @@ mod test {
         };
 
         let [h0, h1, h2] = [Hole(0), Hole(1), Hole(2)];
-        assert_sat(run(true, &chain(h0, h2, h2), &[h0, h2], &dup));
-        assert_sat(run(false, &chain(h0, h1, h2), &[h0, h1, h2], &Expr::one()));
-        assert_sat(run(false, &chain(h0, h0, h0), &[h0], &Expr::one()));
+        assert_sat(run(true, &chain(h0, h2, h2), &[h0, h2], dup));
+        assert_sat(run(
+            false,
+            &chain(h0, h1, h2),
+            &[h0, h1, h2],
+            Expr::one(arena),
+        ));
+        assert_sat(run(false, &chain(h0, h0, h0), &[h0], Expr::one(arena)));
         // Unsatisfiable: must never converge to `Ok` (cap-hit or `Infeasible`).
-        assert!(run(true, &chain(h0, h0, h0), &[h0], &dup).is_err());
-        assert_sat(run(true, &chain(h0, h0, h0), &[h0], &dup3));
+        assert!(run(true, &chain(h0, h0, h0), &[h0], dup).is_err());
+        assert_sat(run(true, &chain(h0, h0, h0), &[h0], dup3));
     }
 
     /// This is unsatisfiable:
@@ -847,10 +904,11 @@ mod test {
     /// ```
     #[test]
     fn sqrt_of_dup() {
+        let arena = &bumpalo::Bump::new();
         let mut store = SPPstore::new(1);
         // hole_expr = Hole(0) ; Hole(0)
         let hole_expr = HExpr::sequence(HExpr::hole(Hole(0)), HExpr::hole(Hole(0)));
-        let target = expr_to_dfa(&Expr::dup(), &mut store);
+        let target = expr_to_dfa(Expr::dup(arena), &mut store);
 
         let rdfa = full_reference_dfa(&mut store, &hole_expr, &target, &target);
         let result = solve_holes_full(
@@ -880,9 +938,10 @@ mod test {
     /// (witness `dup; dup`).
     #[test]
     fn full_solves_chained_dup() {
+        let arena = &bumpalo::Bump::new();
         let mut store = SPPstore::new(1);
-        let target = Expr::sequence(Expr::dup(), Expr::dup());
-        let target_dfa = expr_to_dfa(&target, &mut store);
+        let target = Expr::sequence(arena, Expr::dup(arena), Expr::dup(arena));
+        let target_dfa = expr_to_dfa(target, &mut store);
         let hole_expr = HExpr::hole(Hole(0));
         let rdfa = full_reference_dfa(&mut store, &hole_expr, &target_dfa, &target_dfa);
         let result = solve_holes_full(
@@ -907,6 +966,7 @@ mod test {
     /// has been fixed.
     #[test]
     fn dup_in_a_loop() {
+        let arena = &bumpalo::Bump::new();
         let mut store = SPPstore::new(2);
         // (dup* ; (Hole(0) ; dup))*
         let hole_expr = HExpr::star(HExpr::sequence(
@@ -914,11 +974,15 @@ mod test {
             HExpr::sequence(HExpr::hole(Hole(0)), HExpr::dup()),
         ));
         // target with Hole(0) := 0:=false
-        let target = Expr::star(Expr::sequence(
-            Expr::star(Expr::dup()),
-            Expr::sequence(Expr::assign(0, false), Expr::dup()),
-        ));
-        let target_dfa = expr_to_dfa(&target, &mut store);
+        let target = Expr::star(
+            arena,
+            Expr::sequence(
+                arena,
+                Expr::star(arena, Expr::dup(arena)),
+                Expr::sequence(arena, Expr::assign(arena, 0, false), Expr::dup(arena)),
+            ),
+        );
+        let target_dfa = expr_to_dfa(target, &mut store);
         let result = solve_holes(
             &hole_expr,
             &[Hole(0)],
@@ -940,11 +1004,15 @@ mod test {
     /// Caused by a bug in the `cegis` lower-bound clause builder, since fixed.
     #[test]
     fn full_solves_assign_dup_under_star() {
+        let arena = &bumpalo::Bump::new();
         let mut store = SPPstore::new(1);
         // Hole(0)*  ==  (0:=true; dup)*
         let hole_expr = HExpr::star(HExpr::hole(Hole(0)));
-        let target = Expr::star(Expr::sequence(Expr::assign(0, true), Expr::dup()));
-        let target_dfa = expr_to_dfa(&target, &mut store);
+        let target = Expr::star(
+            arena,
+            Expr::sequence(arena, Expr::assign(arena, 0, true), Expr::dup(arena)),
+        );
+        let target_dfa = expr_to_dfa(target, &mut store);
         let rdfa = full_reference_dfa(&mut store, &hole_expr, &target_dfa, &target_dfa);
         let result = solve_holes_full(
             &hole_expr,
@@ -969,9 +1037,10 @@ mod test {
     /// fixed.
     #[test]
     fn repro_fuzz_wrong_infeasible() {
+        let arena = &bumpalo::Bump::new();
         // Hole programs (the fuzzer's, simplified: dup∪dup = dup, dup;1 = dup).
-        let h0: Exp = Expr::sequence(Expr::dup(), Expr::assign(0, false)); // dup ; 0:=false
-        let h1: Exp = Expr::dup();
+        let h0: Exp = Expr::sequence(arena, Expr::dup(arena), Expr::assign(arena, 0, false)); // dup ; 0:=false
+        let h1: Exp = Expr::dup(arena);
 
         // hole_expr = ((H1 ∪ H0) ; H0) ∪ H0
         let hole_expr = HExpr::union(
@@ -983,12 +1052,13 @@ mod test {
         );
         // target = hole_expr with H0 := h0, H1 := h1.
         let target = Expr::union(
-            Expr::sequence(Expr::union(h1.clone(), h0.clone()), h0.clone()),
-            h0.clone(),
+            arena,
+            Expr::sequence(arena, Expr::union(arena, h1, h0), h0),
+            h0,
         );
 
         let mut store = SPPstore::new(2);
-        let target_dfa = expr_to_dfa(&target, &mut store);
+        let target_dfa = expr_to_dfa(target, &mut store);
         let rdfa = full_reference_dfa(&mut store, &hole_expr, &target_dfa, &target_dfa);
         let result = solve_holes_full(
             &hole_expr,
@@ -1015,7 +1085,9 @@ mod end_to_end {
     /// `h == (x0 := 1)`: the dup-free solver finds the assignment SPP directly.
     #[test]
     fn solves_equality_with_spp() {
+        let arena = &bumpalo::Bump::new();
         let prog = parse_program(
+            arena,
             "hole h\n\
              def target = x0 := 1\n\
              assert h == target\n",
@@ -1030,7 +1102,9 @@ mod end_to_end {
     /// `a ; b == (x0 := 1)` with two holes: still solvable with SPP candidates.
     #[test]
     fn solves_two_hole_sequence() {
+        let arena = &bumpalo::Bump::new();
         let prog = parse_program(
+            arena,
             "hole a\n\
              hole b\n\
              assert (a ; b) == (x0 := 1)\n",
@@ -1046,7 +1120,8 @@ mod end_to_end {
     /// valid filling, so the dup-free solver succeeds.
     #[test]
     fn solves_upper_bound() {
-        let prog = parse_program("hole h\nassert h <= (x0 == 1)\n").unwrap();
+        let arena = &bumpalo::Bump::new();
+        let prog = parse_program(arena, "hole h\nassert h <= (x0 == 1)\n").unwrap();
         let mut pi = desugar(&prog).unwrap();
         assert!(pi.solve(None).is_ok());
     }
@@ -1056,7 +1131,9 @@ mod end_to_end {
     /// `solve_full` synthesizes it (returning the hole as a DFA).
     #[test]
     fn full_solver_handles_dup() {
+        let arena = &bumpalo::Bump::new();
         let prog = parse_program(
+            arena,
             "hole h\n\
              def target = (x0 := 1) ; dup\n\
              assert h == target\n",

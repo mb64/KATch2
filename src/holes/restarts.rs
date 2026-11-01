@@ -147,6 +147,7 @@ mod tests {
 
     #[test]
     fn restarts_preserve_the_template_and_return_valid_handles() {
+        let arena = &bumpalo::Bump::new();
         crate::experiment::with_seed(17, || {
             let csv_path = std::env::temp_dir().join(format!(
                 "nksynth-restarts-{}-{}.csv",
@@ -160,7 +161,7 @@ mod tests {
             experiment.candidate_stats = Some(csv_path.clone());
             crate::experiment::configure(experiment);
             let mut problem =
-                desugar(&parse_program("hole h\nassert h == (x0 := 1)").unwrap()).unwrap();
+                desugar(&parse_program(arena, "hole h\nassert h == (x0 := 1)").unwrap()).unwrap();
             let reference = SPP::make_reference_dfa(&mut problem.store, &problem.constraints);
             let config = Config {
                 initial_cutoff: NonZeroUsize::new(1).unwrap(),
@@ -225,13 +226,14 @@ mod tests {
 
     #[test]
     fn zero_budget_still_reports_proven_infeasibility() {
-        let mut problem = desugar(&parse_program("assert 1 == 0").unwrap()).unwrap();
+        let arena = &bumpalo::Bump::new();
+        let mut problem = desugar(&parse_program(arena, "assert 1 == 0").unwrap()).unwrap();
         assert_eq!(problem.solve(Some(0)), Err(CegisError::Infeasible));
         assert!(matches!(
             problem.solve_full(Some(0)),
             Err(CegisError::Infeasible)
         ));
-        let mut problem = desugar(&parse_program("hole h\nassert h == 1").unwrap()).unwrap();
+        let mut problem = desugar(&parse_program(arena, "hole h\nassert h == 1").unwrap()).unwrap();
         assert_eq!(problem.solve(Some(0)), Err(CegisError::IterationLimit));
         assert!(matches!(
             problem.solve_full(Some(0)),
@@ -240,9 +242,10 @@ mod tests {
     }
     #[test]
     fn retained_bounds_make_progress_even_with_one_round_attempts() {
+        let arena = &bumpalo::Bump::new();
         crate::experiment::with_seed(17, || {
             let mut problem =
-                desugar(&parse_program("hole h\nassert h == (x0 := 1)").unwrap()).unwrap();
+                desugar(&parse_program(arena, "hole h\nassert h == (x0 := 1)").unwrap()).unwrap();
             let reference = SPP::make_reference_dfa(&mut problem.store, &problem.constraints);
             let mut bounds = Vec::new();
             let first = cegis::run_with_bounds::<SPP, Native>(

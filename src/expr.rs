@@ -1,4 +1,5 @@
 use crate::pre::{Field, Value};
+use bumpalo::Bump;
 
 /// A formal hole standing for an unknown sub-expression (an unknown SPP once
 /// compiled).  Holes are introduced by the `.nksynth` synthesis front-end and
@@ -8,182 +9,220 @@ use crate::pre::{Field, Value};
 pub struct Hole(pub u32);
 
 /// Represents different pattern types for matching
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Pattern {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pattern<'a> {
     /// CIDR notation: 192.168.1.0/24
     Cidr {
-        address: Vec<bool>, // Base IP address as bits
-        prefix_len: usize,  // Number of bits in prefix
+        address: &'a [bool], // Base IP address as bits
+        prefix_len: usize,   // Number of bits in prefix
     },
     /// IP range: 192.168.1.10-192.168.1.20
     IpRange {
-        start: Vec<bool>, // Start IP as bits
-        end: Vec<bool>,   // End IP as bits
+        start: &'a [bool], // Start IP as bits
+        end: &'a [bool],   // End IP as bits
     },
     /// Wildcard mask: 192.168.1.0 with mask 0.0.0.255
     Wildcard {
-        address: Vec<bool>, // Base IP address as bits
-        mask: Vec<bool>,    // Wildcard mask as bits (1 = don't care)
+        address: &'a [bool], // Base IP address as bits
+        mask: &'a [bool],    // Wildcard mask as bits (1 = don't care)
     },
     /// Exact match (for consistency)
-    Exact(Vec<bool>),
+    Exact(&'a [bool]),
 }
 
-/// Represents NetKAT expressions with LTL extensions
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Expr {
-    Zero,                                    // 0
-    One,                                     // 1
-    Top,                                     // T
-    Assign(Field, Value),                    // field := value
-    Test(Field, Value),                      // field == value
-    VarAssign(String, Vec<bool>),            // var := value (for aliases)
-    VarTest(String, Vec<bool>),              // var == value (for aliases)
-    BitRangeAssign(Field, Field, Vec<bool>), // x[start..end] := value (as bits)
-    BitRangeTest(Field, Field, Vec<bool>),   // x[start..end] == value (as bits)
-    BitRangeMatch(Field, Field, Pattern),    // x[start..end] ~ pattern
-    VarMatch(String, Pattern),               // var ~ pattern (for aliases)
-    Union(Exp, Exp),                         // e1 + e2
-    Intersect(Exp, Exp),                     // e1 & e2
-    Xor(Exp, Exp),                           // e1 ^ e2
-    Difference(Exp, Exp),                    // e1 - e2
-    Complement(Exp),                         // ~e1
-    TestNegation(Exp),                       // !e (test fragment only)
-    IfThenElse(Exp, Exp, Exp),               // if e1 then e2 else e3 (e1 must be test fragment)
-    Var(String),                             // Variable reference
-    Let(String, Exp, Exp),                   // let x = e1 in e2
-    LetBitRange(String, Field, Field, Exp),  // let alias = x[start..end] in e
-    Sequence(Exp, Exp),                      // e1; e2
-    Star(Exp),                               // e*
-    Dup,                                     // dup
-    LtlNext(Exp),                            // X e
-    LtlUntil(Exp, Exp),                      // e1 U e2
-    End,                                     // end
+/// NetKAT syntax with LTL extensions, borrowing all storage for one lifetime.
+///
+/// Child nodes and bit slices live in the parser's [`Bump`]; names are slices of
+/// the original input. Neither this enum nor [`Pattern`] owns heap allocations,
+/// so releasing the arena needs no recursive traversal or node destructors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expr<'a> {
+    Zero,                                        // 0
+    One,                                         // 1
+    Top,                                         // T
+    Assign(Field, Value),                        // field := value
+    Test(Field, Value),                          // field == value
+    VarAssign(&'a str, &'a [bool]),              // var := value (for aliases)
+    VarTest(&'a str, &'a [bool]),                // var == value (for aliases)
+    BitRangeAssign(Field, Field, &'a [bool]),    // x[start..end] := value (as bits)
+    BitRangeTest(Field, Field, &'a [bool]),      // x[start..end] == value (as bits)
+    BitRangeMatch(Field, Field, Pattern<'a>),    // x[start..end] ~ pattern
+    VarMatch(&'a str, Pattern<'a>),              // var ~ pattern (for aliases)
+    Union(Exp<'a>, Exp<'a>),                     // e1 + e2
+    Intersect(Exp<'a>, Exp<'a>),                 // e1 & e2
+    Xor(Exp<'a>, Exp<'a>),                       // e1 ^ e2
+    Difference(Exp<'a>, Exp<'a>),                // e1 - e2
+    Complement(Exp<'a>),                         // ~e1
+    TestNegation(Exp<'a>),                       // !e (test fragment only)
+    IfThenElse(Exp<'a>, Exp<'a>, Exp<'a>),       // if e1 then e2 else e3 (e1 must be test fragment)
+    Var(&'a str),                                // Variable reference
+    Let(&'a str, Exp<'a>, Exp<'a>),              // let x = e1 in e2
+    LetBitRange(&'a str, Field, Field, Exp<'a>), // let alias = x[start..end] in e
+    Sequence(Exp<'a>, Exp<'a>),                  // e1; e2
+    Star(Exp<'a>),                               // e*
+    Dup,                                         // dup
+    LtlNext(Exp<'a>),                            // X e
+    LtlUntil(Exp<'a>, Exp<'a>),                  // e1 U e2
+    End,                                         // end
     Hole(Hole), // a synthesis hole (filled in before automaton construction)
 }
 
-/// Represents a boxed expression
-pub type Exp = Box<Expr>;
+/// An immutable expression allocated in a caller-owned arena.
+pub type Exp<'a> = &'a Expr<'a>;
 
-impl Expr {
-    pub fn zero() -> Exp {
-        Box::new(Expr::Zero)
+impl<'a> Expr<'a> {
+    pub fn zero(arena: &'a Bump) -> Exp<'a> {
+        arena.alloc(Expr::Zero)
     }
-    pub fn one() -> Exp {
-        Box::new(Expr::One)
+    pub fn one(arena: &'a Bump) -> Exp<'a> {
+        arena.alloc(Expr::One)
     }
-    pub fn top() -> Exp {
-        Box::new(Expr::Top)
+    pub fn top(arena: &'a Bump) -> Exp<'a> {
+        arena.alloc(Expr::Top)
     }
-    pub fn assign(field: Field, value: Value) -> Exp {
-        Box::new(Expr::Assign(field, value))
+    pub fn assign(arena: &'a Bump, field: Field, value: Value) -> Exp<'a> {
+        arena.alloc(Expr::Assign(field, value))
     }
-    pub fn test(field: Field, value: Value) -> Exp {
-        Box::new(Expr::Test(field, value))
+    pub fn test(arena: &'a Bump, field: Field, value: Value) -> Exp<'a> {
+        arena.alloc(Expr::Test(field, value))
     }
-    pub fn var_assign(var: String, bits: Vec<bool>) -> Exp {
-        Box::new(Expr::VarAssign(var, bits))
+    pub fn var_assign(arena: &'a Bump, var: &'a str, bits: impl AsRef<[bool]>) -> Exp<'a> {
+        arena.alloc(Expr::VarAssign(var, arena.alloc_slice_copy(bits.as_ref())))
     }
-    pub fn var_test(var: String, bits: Vec<bool>) -> Exp {
-        Box::new(Expr::VarTest(var, bits))
+    pub fn var_test(arena: &'a Bump, var: &'a str, bits: impl AsRef<[bool]>) -> Exp<'a> {
+        arena.alloc(Expr::VarTest(var, arena.alloc_slice_copy(bits.as_ref())))
     }
-    pub fn bit_range_assign(start: Field, end: Field, bits: Vec<bool>) -> Exp {
-        Box::new(Expr::BitRangeAssign(start, end, bits))
+    pub fn bit_range_assign(
+        arena: &'a Bump,
+        start: Field,
+        end: Field,
+        bits: impl AsRef<[bool]>,
+    ) -> Exp<'a> {
+        arena.alloc(Expr::BitRangeAssign(
+            start,
+            end,
+            arena.alloc_slice_copy(bits.as_ref()),
+        ))
     }
-    pub fn bit_range_test(start: Field, end: Field, bits: Vec<bool>) -> Exp {
-        Box::new(Expr::BitRangeTest(start, end, bits))
+    pub fn bit_range_test(
+        arena: &'a Bump,
+        start: Field,
+        end: Field,
+        bits: impl AsRef<[bool]>,
+    ) -> Exp<'a> {
+        arena.alloc(Expr::BitRangeTest(
+            start,
+            end,
+            arena.alloc_slice_copy(bits.as_ref()),
+        ))
     }
-    pub fn bit_range_match(start: Field, end: Field, pattern: Pattern) -> Exp {
-        Box::new(Expr::BitRangeMatch(start, end, pattern))
+    pub fn bit_range_match(
+        arena: &'a Bump,
+        start: Field,
+        end: Field,
+        pattern: Pattern<'a>,
+    ) -> Exp<'a> {
+        arena.alloc(Expr::BitRangeMatch(start, end, pattern))
     }
-    pub fn var_match(var: String, pattern: Pattern) -> Exp {
-        Box::new(Expr::VarMatch(var, pattern))
+    pub fn var_match(arena: &'a Bump, var: &'a str, pattern: Pattern<'a>) -> Exp<'a> {
+        arena.alloc(Expr::VarMatch(var, pattern))
     }
-    pub fn union(e1: Exp, e2: Exp) -> Exp {
-        Box::new(Expr::Union(e1, e2))
+    pub fn union(arena: &'a Bump, e1: Exp<'a>, e2: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::Union(e1, e2))
     }
-    pub fn intersect(e1: Exp, e2: Exp) -> Exp {
-        Box::new(Expr::Intersect(e1, e2))
+    pub fn intersect(arena: &'a Bump, e1: Exp<'a>, e2: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::Intersect(e1, e2))
     }
-    pub fn xor(e1: Exp, e2: Exp) -> Exp {
-        Box::new(Expr::Xor(e1, e2))
+    pub fn xor(arena: &'a Bump, e1: Exp<'a>, e2: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::Xor(e1, e2))
     }
-    pub fn difference(e1: Exp, e2: Exp) -> Exp {
-        Box::new(Expr::Difference(e1, e2))
+    pub fn difference(arena: &'a Bump, e1: Exp<'a>, e2: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::Difference(e1, e2))
     }
-    pub fn complement(e: Exp) -> Exp {
-        Box::new(Expr::Complement(e))
+    pub fn complement(arena: &'a Bump, e: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::Complement(e))
     }
-    pub fn test_negation(e: Exp) -> Exp {
-        Box::new(Expr::TestNegation(e))
+    pub fn test_negation(arena: &'a Bump, e: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::TestNegation(e))
     }
-    pub fn if_then_else(cond: Exp, then_expr: Exp, else_expr: Exp) -> Exp {
-        Box::new(Expr::IfThenElse(cond, then_expr, else_expr))
+    pub fn if_then_else(
+        arena: &'a Bump,
+        cond: Exp<'a>,
+        then_expr: Exp<'a>,
+        else_expr: Exp<'a>,
+    ) -> Exp<'a> {
+        arena.alloc(Expr::IfThenElse(cond, then_expr, else_expr))
     }
-    pub fn var(name: String) -> Exp {
-        Box::new(Expr::Var(name))
+    pub fn var(arena: &'a Bump, name: &'a str) -> Exp<'a> {
+        arena.alloc(Expr::Var(name))
     }
-    pub fn let_in(var_name: String, def: Exp, body: Exp) -> Exp {
-        Box::new(Expr::Let(var_name, def, body))
+    pub fn let_in(arena: &'a Bump, var_name: &'a str, def: Exp<'a>, body: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::Let(var_name, def, body))
     }
-    pub fn let_bit_range(alias_name: String, start: Field, end: Field, body: Exp) -> Exp {
-        Box::new(Expr::LetBitRange(alias_name, start, end, body))
+    pub fn let_bit_range(
+        arena: &'a Bump,
+        alias_name: &'a str,
+        start: Field,
+        end: Field,
+        body: Exp<'a>,
+    ) -> Exp<'a> {
+        arena.alloc(Expr::LetBitRange(alias_name, start, end, body))
     }
-    pub fn sequence(e1: Exp, e2: Exp) -> Exp {
-        Box::new(Expr::Sequence(e1, e2))
+    pub fn sequence(arena: &'a Bump, e1: Exp<'a>, e2: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::Sequence(e1, e2))
     }
-    pub fn star(e: Exp) -> Exp {
-        Box::new(Expr::Star(e))
+    pub fn star(arena: &'a Bump, e: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::Star(e))
     }
     /// `e1 + e2`, but simplifying away `0`.
-    pub fn union_simp(e1: Exp, e2: Exp) -> Exp {
-        match (&*e1, &*e2) {
+    pub fn union_simp(arena: &'a Bump, e1: Exp<'a>, e2: Exp<'a>) -> Exp<'a> {
+        match (e1, e2) {
             (Expr::Zero, _) => e2,
             (_, Expr::Zero) => e1,
-            _ => Expr::union(e1, e2),
+            _ => Expr::union(arena, e1, e2),
         }
     }
     /// `e1; e2`, but simplifying away `0` and `1`.
-    pub fn sequence_simp(e1: Exp, e2: Exp) -> Exp {
-        match (&*e1, &*e2) {
-            (Expr::Zero, _) | (_, Expr::Zero) => Expr::zero(),
+    pub fn sequence_simp(arena: &'a Bump, e1: Exp<'a>, e2: Exp<'a>) -> Exp<'a> {
+        match (e1, e2) {
+            (Expr::Zero, _) | (_, Expr::Zero) => Expr::zero(arena),
             (Expr::One, _) => e2,
             (_, Expr::One) => e1,
-            _ => Expr::sequence(e1, e2),
+            _ => Expr::sequence(arena, e1, e2),
         }
     }
     /// `e*`, but simplifying `0*` and `1*` to `1`.
-    pub fn star_simp(e: Exp) -> Exp {
-        match &*e {
-            Expr::Zero | Expr::One => Expr::one(),
-            _ => Expr::star(e),
+    pub fn star_simp(arena: &'a Bump, e: Exp<'a>) -> Exp<'a> {
+        match e {
+            Expr::Zero | Expr::One => Expr::one(arena),
+            _ => Expr::star(arena, e),
         }
     }
-    pub fn dup() -> Exp {
-        Box::new(Expr::Dup)
+    pub fn dup(arena: &'a Bump) -> Exp<'a> {
+        arena.alloc(Expr::Dup)
     }
-    pub fn ltl_next(e: Exp) -> Exp {
-        Box::new(Expr::LtlNext(e))
+    pub fn ltl_next(arena: &'a Bump, e: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::LtlNext(e))
     }
     /// Weak next operator `(X' e = X e \/ end)`
-    pub fn ltl_weak_next(e: Exp) -> Exp {
-        Box::new(Expr::Union(Expr::ltl_next(e), Expr::end()))
+    pub fn ltl_weak_next(arena: &'a Bump, e: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::Union(Expr::ltl_next(arena, e), Expr::end(arena)))
     }
-    pub fn ltl_until(e1: Exp, e2: Exp) -> Exp {
-        Box::new(Expr::LtlUntil(e1, e2))
+    pub fn ltl_until(arena: &'a Bump, e1: Exp<'a>, e2: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::LtlUntil(e1, e2))
     }
     /// Weak until operator `(e1 W e2 = e1 U e2 \/ G e1)`
-    pub fn ltl_weak_until(e1: Exp, e2: Exp) -> Exp {
-        Box::new(Expr::Union(
-            Expr::ltl_until(e1.clone(), e2),
-            Expr::ltl_globally(e1),
+    pub fn ltl_weak_until(arena: &'a Bump, e1: Exp<'a>, e2: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::Union(
+            Expr::ltl_until(arena, e1, e2),
+            Expr::ltl_globally(arena, e1),
         ))
     }
-    pub fn end() -> Exp {
-        Box::new(Expr::End)
+    pub fn end(arena: &'a Bump) -> Exp<'a> {
+        arena.alloc(Expr::End)
     }
-    pub fn hole(hole: Hole) -> Exp {
-        Box::new(Expr::Hole(hole))
+    pub fn hole(arena: &'a Bump, hole: Hole) -> Exp<'a> {
+        arena.alloc(Expr::Hole(hole))
     }
 
     /// Check if an expression is in the test fragment
@@ -251,142 +290,154 @@ impl Expr {
     }
 
     /// Helper function for constructing `F e` using the equivalence `F e ≡ true U e`
-    pub fn ltl_finally(e: Exp) -> Exp {
-        Box::new(Expr::LtlUntil(Expr::top(), e))
+    pub fn ltl_finally(arena: &'a Bump, e: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::LtlUntil(Expr::top(arena), e))
     }
 
     // Helper function for constructing `G e` using the equivalence `G e ≡ ¬(true U ¬e)`
-    pub fn ltl_globally(e: Exp) -> Exp {
-        let until_expr = Expr::ltl_until(Expr::top(), Expr::complement(e));
-        Box::new(Expr::Complement(until_expr))
+    pub fn ltl_globally(arena: &'a Bump, e: Exp<'a>) -> Exp<'a> {
+        let until_expr = Expr::ltl_until(arena, Expr::top(arena), Expr::complement(arena, e));
+        arena.alloc(Expr::Complement(until_expr))
     }
 
     // Helper function for constructing `e1 R e2` (weak release) using the equivalence `e1 R e2 ≡ ¬(¬e1 U ¬e2)`
-    pub fn ltl_release(e1: Exp, e2: Exp) -> Exp {
-        let not_e1 = Expr::complement(e1);
-        let not_e2 = Expr::complement(e2);
-        let until_expr = Expr::ltl_until(not_e1, not_e2);
-        Box::new(Expr::Complement(until_expr))
+    pub fn ltl_release(arena: &'a Bump, e1: Exp<'a>, e2: Exp<'a>) -> Exp<'a> {
+        let not_e1 = Expr::complement(arena, e1);
+        let not_e2 = Expr::complement(arena, e2);
+        let until_expr = Expr::ltl_until(arena, not_e1, not_e2);
+        arena.alloc(Expr::Complement(until_expr))
     }
 
     /// Strong release operator `(e1 M e2 = e1 R e2 /\ F e1)`
-    pub fn ltl_strong_release(e1: Exp, e2: Exp) -> Exp {
-        Box::new(Expr::Intersect(
-            Expr::ltl_release(e1.clone(), e2),
-            Expr::ltl_finally(e1),
+    pub fn ltl_strong_release(arena: &'a Bump, e1: Exp<'a>, e2: Exp<'a>) -> Exp<'a> {
+        arena.alloc(Expr::Intersect(
+            Expr::ltl_release(arena, e1, e2),
+            Expr::ltl_finally(arena, e1),
         ))
     }
 
     /// Substitute all occurrences of variable `var` with expression `replacement` in `self`
-    pub fn substitute(&self, var: &str, replacement: &Expr) -> Exp {
+    pub fn substitute(&self, arena: &'a Bump, var: &str, replacement: Exp<'a>) -> Exp<'a> {
         match self {
             // Base cases
-            Expr::Zero => Expr::zero(),
-            Expr::One => Expr::one(),
-            Expr::Top => Expr::top(),
-            Expr::Dup => Expr::dup(),
-            Expr::End => Expr::end(),
-            Expr::Hole(h) => Expr::hole(*h),
-            Expr::Assign(f, v) => Expr::assign(*f, *v),
-            Expr::Test(f, v) => Expr::test(*f, *v),
-            Expr::VarAssign(var, bits) => Expr::var_assign(var.clone(), bits.clone()),
-            Expr::VarTest(var, bits) => Expr::var_test(var.clone(), bits.clone()),
+            Expr::Zero => Expr::zero(arena),
+            Expr::One => Expr::one(arena),
+            Expr::Top => Expr::top(arena),
+            Expr::Dup => Expr::dup(arena),
+            Expr::End => Expr::end(arena),
+            Expr::Hole(h) => Expr::hole(arena, *h),
+            Expr::Assign(f, v) => Expr::assign(arena, *f, *v),
+            Expr::Test(f, v) => Expr::test(arena, *f, *v),
+            Expr::VarAssign(var, bits) => Expr::var_assign(arena, var, bits),
+            Expr::VarTest(var, bits) => Expr::var_test(arena, var, bits),
 
             // Variable case - this is where substitution happens
             Expr::Var(name) => {
-                if name == var {
-                    Box::new(replacement.clone())
+                if *name == var {
+                    replacement
                 } else {
-                    Expr::var(name.clone())
+                    Expr::var(arena, name)
                 }
             }
 
             // Recursive cases
             Expr::Union(e1, e2) => Expr::union(
-                e1.substitute(var, replacement),
-                e2.substitute(var, replacement),
+                arena,
+                e1.substitute(arena, var, replacement),
+                e2.substitute(arena, var, replacement),
             ),
             Expr::Intersect(e1, e2) => Expr::intersect(
-                e1.substitute(var, replacement),
-                e2.substitute(var, replacement),
+                arena,
+                e1.substitute(arena, var, replacement),
+                e2.substitute(arena, var, replacement),
             ),
             Expr::Xor(e1, e2) => Expr::xor(
-                e1.substitute(var, replacement),
-                e2.substitute(var, replacement),
+                arena,
+                e1.substitute(arena, var, replacement),
+                e2.substitute(arena, var, replacement),
             ),
             Expr::Difference(e1, e2) => Expr::difference(
-                e1.substitute(var, replacement),
-                e2.substitute(var, replacement),
+                arena,
+                e1.substitute(arena, var, replacement),
+                e2.substitute(arena, var, replacement),
             ),
             Expr::Sequence(e1, e2) => Expr::sequence(
-                e1.substitute(var, replacement),
-                e2.substitute(var, replacement),
+                arena,
+                e1.substitute(arena, var, replacement),
+                e2.substitute(arena, var, replacement),
             ),
-            Expr::Complement(e) => Expr::complement(e.substitute(var, replacement)),
-            Expr::TestNegation(e) => Expr::test_negation(e.substitute(var, replacement)),
-            Expr::Star(e) => Expr::star(e.substitute(var, replacement)),
-            Expr::LtlNext(e) => Expr::ltl_next(e.substitute(var, replacement)),
+            Expr::Complement(e) => Expr::complement(arena, e.substitute(arena, var, replacement)),
+            Expr::TestNegation(e) => {
+                Expr::test_negation(arena, e.substitute(arena, var, replacement))
+            }
+            Expr::Star(e) => Expr::star(arena, e.substitute(arena, var, replacement)),
+            Expr::LtlNext(e) => Expr::ltl_next(arena, e.substitute(arena, var, replacement)),
             Expr::LtlUntil(e1, e2) => Expr::ltl_until(
-                e1.substitute(var, replacement),
-                e2.substitute(var, replacement),
+                arena,
+                e1.substitute(arena, var, replacement),
+                e2.substitute(arena, var, replacement),
             ),
             Expr::IfThenElse(c, t, e) => Expr::if_then_else(
-                c.substitute(var, replacement),
-                t.substitute(var, replacement),
-                e.substitute(var, replacement),
+                arena,
+                c.substitute(arena, var, replacement),
+                t.substitute(arena, var, replacement),
+                e.substitute(arena, var, replacement),
             ),
 
             // Let binding case - careful with variable shadowing
             Expr::Let(bound_var, def, body) => {
-                if bound_var == var {
+                if *bound_var == var {
                     // Variable is shadowed, don't substitute in body
                     Expr::let_in(
-                        bound_var.clone(),
-                        def.substitute(var, replacement),
-                        body.clone(),
+                        arena,
+                        bound_var,
+                        def.substitute(arena, var, replacement),
+                        body,
                     )
                 } else {
                     // Substitute in both definition and body
                     Expr::let_in(
-                        bound_var.clone(),
-                        def.substitute(var, replacement),
-                        body.substitute(var, replacement),
+                        arena,
+                        bound_var,
+                        def.substitute(arena, var, replacement),
+                        body.substitute(arena, var, replacement),
                     )
                 }
             }
 
             // Let bit range case - careful with variable shadowing
             Expr::LetBitRange(alias_name, start, end, body) => {
-                if alias_name == var {
+                if *alias_name == var {
                     // Alias is shadowed, don't substitute in body
-                    Expr::let_bit_range(alias_name.clone(), *start, *end, body.clone())
+                    Expr::let_bit_range(arena, alias_name, *start, *end, body)
                 } else {
                     // Substitute in body
                     Expr::let_bit_range(
-                        alias_name.clone(),
+                        arena,
+                        alias_name,
                         *start,
                         *end,
-                        body.substitute(var, replacement),
+                        body.substitute(arena, var, replacement),
                     )
                 }
             }
 
             // Bit range operations don't contain variables
             Expr::BitRangeAssign(start, end, value) => {
-                Expr::bit_range_assign(*start, *end, value.clone())
+                Expr::bit_range_assign(arena, *start, *end, value)
             }
             Expr::BitRangeTest(start, end, value) => {
-                Expr::bit_range_test(*start, *end, value.clone())
+                Expr::bit_range_test(arena, *start, *end, value)
             }
             Expr::BitRangeMatch(start, end, pattern) => {
-                Expr::bit_range_match(*start, *end, pattern.clone())
+                Expr::bit_range_match(arena, *start, *end, *pattern)
             }
-            Expr::VarMatch(var_name, pattern) => Expr::var_match(var_name.clone(), pattern.clone()),
+            Expr::VarMatch(var_name, pattern) => Expr::var_match(arena, var_name, *pattern),
         }
     }
 }
 
-impl std::fmt::Display for Expr {
+impl std::fmt::Display for Expr<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Expr::Zero => write!(f, "0"),
@@ -455,7 +506,7 @@ fn bits_to_number(bits: &[bool]) -> u128 {
     )
 }
 
-impl std::fmt::Display for Pattern {
+impl std::fmt::Display for Pattern<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Pattern::Exact(bits) => {

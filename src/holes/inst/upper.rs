@@ -295,6 +295,7 @@ mod tests {
 
     #[test]
     fn generalized_trace_context_is_sound_before_between_and_after_dups() {
+        let arena = &bumpalo::Bump::new();
         let mut store = SPPstore::new(1);
         // Explore hole-containing transition segments and final output
         // segments, as well as prefix/suffix products with multiple DFA states.
@@ -324,19 +325,23 @@ mod tests {
                         ),
                     );
                     let upper_expr = crate::expr::Expr::sequence(
-                        crate::expr::Expr::one(),
+                        arena,
+                        crate::expr::Expr::one(arena),
                         crate::expr::Expr::sequence(
-                            crate::expr::Expr::dup(),
+                            arena,
+                            crate::expr::Expr::dup(arena),
                             crate::expr::Expr::sequence(
-                                crate::expr::Expr::one(),
+                                arena,
+                                crate::expr::Expr::one(arena),
                                 crate::expr::Expr::sequence(
-                                    crate::expr::Expr::dup(),
-                                    crate::expr::Expr::one(),
+                                    arena,
+                                    crate::expr::Expr::dup(arena),
+                                    crate::expr::Expr::one(arena),
                                 ),
                             ),
                         ),
                     );
-                    let upper = expr_to_dfa(&upper_expr, &mut store);
+                    let upper = expr_to_dfa(upper_expr, &mut store);
                     let top = store.top;
                     let inst = instantiate(&mut store, &expr, top);
                     let Err(cex) = inst.check_upper_bound(&mut store, &upper, &HashMap::new())

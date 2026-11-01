@@ -61,105 +61,113 @@ const CORPUS_SIZE: usize = 40;
 /// A reusable recipe for one instance; cheap to clone, rebuilt into a fresh
 /// (store-owning) [`ProblemInstance`] per measured solve.
 #[derive(Clone)]
-struct Recipe {
+struct Recipe<'a> {
     hole_expr: HExpr,
     holes: Vec<Hole>,
-    target: Exp,
+    target: Exp<'a>,
 }
 
 /// A random dup-free expression (a single-SPP candidate for `solve`).
-fn random_dup_free(rng: &mut StdRng, depth: u32) -> Exp {
+fn random_dup_free<'a>(arena: &'a bumpalo::Bump, rng: &mut StdRng, depth: u32) -> Exp<'a> {
     if depth == 0 || rng.random::<f64>() < 0.4 {
         return match rng.random_range(0..4u32) {
-            0 => Expr::one(),
-            1 => Expr::zero(),
-            2 => Expr::test(rng.random_range(0..FIELDS), rng.random()),
-            _ => Expr::assign(rng.random_range(0..FIELDS), rng.random()),
+            0 => Expr::one(arena),
+            1 => Expr::zero(arena),
+            2 => Expr::test(arena, rng.random_range(0..FIELDS), rng.random()),
+            _ => Expr::assign(arena, rng.random_range(0..FIELDS), rng.random()),
         };
     }
     match rng.random_range(0..3u32) {
         0 => Expr::union(
-            random_dup_free(rng, depth - 1),
-            random_dup_free(rng, depth - 1),
+            arena,
+            random_dup_free(arena, rng, depth - 1),
+            random_dup_free(arena, rng, depth - 1),
         ),
         1 => Expr::sequence(
-            random_dup_free(rng, depth - 1),
-            random_dup_free(rng, depth - 1),
+            arena,
+            random_dup_free(arena, rng, depth - 1),
+            random_dup_free(arena, rng, depth - 1),
         ),
-        _ => Expr::star(random_dup_free(rng, depth - 1)),
+        _ => Expr::star(arena, random_dup_free(arena, rng, depth - 1)),
     }
 }
 
 /// A random expression that may contain `dup` (a dup-ful candidate for
 /// `solve_full`).
-fn random_maybe_dupful(rng: &mut StdRng, depth: u32) -> Exp {
+fn random_maybe_dupful<'a>(arena: &'a bumpalo::Bump, rng: &mut StdRng, depth: u32) -> Exp<'a> {
     if depth == 0 || rng.random::<f64>() < 0.4 {
         return match rng.random_range(0..5u32) {
-            0 => Expr::one(),
-            1 => Expr::zero(),
-            2 => Expr::test(rng.random_range(0..FIELDS), rng.random()),
-            3 => Expr::assign(rng.random_range(0..FIELDS), rng.random()),
-            _ => Expr::dup(),
+            0 => Expr::one(arena),
+            1 => Expr::zero(arena),
+            2 => Expr::test(arena, rng.random_range(0..FIELDS), rng.random()),
+            3 => Expr::assign(arena, rng.random_range(0..FIELDS), rng.random()),
+            _ => Expr::dup(arena),
         };
     }
     match rng.random_range(0..3u32) {
         0 => Expr::union(
-            random_maybe_dupful(rng, depth - 1),
-            random_maybe_dupful(rng, depth - 1),
+            arena,
+            random_maybe_dupful(arena, rng, depth - 1),
+            random_maybe_dupful(arena, rng, depth - 1),
         ),
         1 => Expr::sequence(
-            random_maybe_dupful(rng, depth - 1),
-            random_maybe_dupful(rng, depth - 1),
+            arena,
+            random_maybe_dupful(arena, rng, depth - 1),
+            random_maybe_dupful(arena, rng, depth - 1),
         ),
-        _ => Expr::star(random_maybe_dupful(rng, depth - 1)),
+        _ => Expr::star(arena, random_maybe_dupful(arena, rng, depth - 1)),
     }
 }
 
 /// Build a random hole-bearing expression and, in lock-step, the concrete
 /// target it becomes once each `Hole(i)` is replaced by `insts[i]`.
-fn random_template(
+fn random_template<'a>(
+    arena: &'a bumpalo::Bump,
     rng: &mut StdRng,
     depth: u32,
-    insts: &[Exp],
+    insts: &[Exp<'a>],
     used: &mut BTreeSet<Hole>,
-) -> (HExpr, Exp) {
+) -> (HExpr, Exp<'a>) {
     if depth == 0 || rng.random::<f64>() < 0.4 {
         if rng.random::<f64>() < 0.85 {
             let i = rng.random_range(0..insts.len());
             used.insert(Hole(i as u32));
-            return (HExpr::hole(Hole(i as u32)), insts[i].clone());
+            return (HExpr::hole(Hole(i as u32)), insts[i]);
         }
-        return (HExpr::dup(), Expr::dup());
+        return (HExpr::dup(), Expr::dup(arena));
     }
     match rng.random_range(0..3u32) {
         0 => {
-            let (a1, a2) = random_template(rng, depth - 1, insts, used);
-            let (b1, b2) = random_template(rng, depth - 1, insts, used);
-            (HExpr::union(a1, b1), Expr::union(a2, b2))
+            let (a1, a2) = random_template(arena, rng, depth - 1, insts, used);
+            let (b1, b2) = random_template(arena, rng, depth - 1, insts, used);
+            (HExpr::union(a1, b1), Expr::union(arena, a2, b2))
         }
         1 => {
-            let (a1, a2) = random_template(rng, depth - 1, insts, used);
-            let (b1, b2) = random_template(rng, depth - 1, insts, used);
-            (HExpr::sequence(a1, b1), Expr::sequence(a2, b2))
+            let (a1, a2) = random_template(arena, rng, depth - 1, insts, used);
+            let (b1, b2) = random_template(arena, rng, depth - 1, insts, used);
+            (HExpr::sequence(a1, b1), Expr::sequence(arena, a2, b2))
         }
         _ => {
-            let (a1, a2) = random_template(rng, depth - 1, insts, used);
-            (HExpr::star(a1), Expr::star(a2))
+            let (a1, a2) = random_template(arena, rng, depth - 1, insts, used);
+            (HExpr::star(a1), Expr::star(arena, a2))
         }
     }
 }
 
 /// One satisfiable-by-construction instance.
-fn random_instance(
+fn random_instance<'a>(
+    arena: &'a bumpalo::Bump,
     rng: &mut StdRng,
     template_depth: u32,
     inst_depth: u32,
-    inst_gen: fn(&mut StdRng, u32) -> Exp,
-) -> Recipe {
+    inst_gen: fn(&'a bumpalo::Bump, &mut StdRng, u32) -> Exp<'a>,
+) -> Recipe<'a> {
     let num_holes = 1 + rng.random_range(0..3usize); // 1..=3 holes
-    let insts: Vec<Exp> = (0..num_holes).map(|_| inst_gen(rng, inst_depth)).collect();
+    let insts: Vec<Exp> = (0..num_holes)
+        .map(|_| inst_gen(arena, rng, inst_depth))
+        .collect();
     let mut used = BTreeSet::new();
-    let (hole_expr, target) = random_template(rng, template_depth, &insts, &mut used);
+    let (hole_expr, target) = random_template(arena, rng, template_depth, &insts, &mut used);
     Recipe {
         hole_expr,
         holes: used.into_iter().collect(),
@@ -168,17 +176,20 @@ fn random_instance(
 }
 
 /// A deterministic corpus of `CORPUS_SIZE` instances.
-fn corpus(inst_gen: fn(&mut StdRng, u32) -> Exp) -> Vec<Recipe> {
+fn corpus<'a>(
+    arena: &'a bumpalo::Bump,
+    inst_gen: fn(&'a bumpalo::Bump, &mut StdRng, u32) -> Exp<'a>,
+) -> Vec<Recipe<'a>> {
     let mut rng = StdRng::seed_from_u64(CORPUS_SEED);
     (0..CORPUS_SIZE)
-        .map(|_| random_instance(&mut rng, 3, 2, inst_gen))
+        .map(|_| random_instance(arena, &mut rng, 3, 2, inst_gen))
         .collect()
 }
 
 /// Materialize a recipe into a fresh, unsolved problem (`hole_expr == target`).
 fn build(r: &Recipe) -> ProblemInstance {
     let mut store = SPPstore::new(FIELDS);
-    let target_dfa = expr_to_dfa(&r.target, &mut store);
+    let target_dfa = expr_to_dfa(r.target, &mut store);
     let constraints = vec![Constraint::equality(&mut store, &r.hole_expr, target_dfa)];
     ProblemInstance {
         store,
@@ -191,8 +202,9 @@ fn build(r: &Recipe) -> ProblemInstance {
 /// `Hole(0)` would have to inject 2^`n` pigeons into 2^`n`−1 holes — impossible,
 /// but the learner needs many lower-bound refinement rounds to prove it.
 fn pigeon(n: u32) -> ProblemInstance {
+    let arena = &bumpalo::Bump::new();
     let mut store = SPPstore::new(n);
-    let target_dfa = expr_to_dfa(&Expr::one(), &mut store);
+    let target_dfa = expr_to_dfa(Expr::one(arena), &mut store);
     let mut spp = store.zero;
     for i in 0..n {
         let spp_i = store.test(i, true);
@@ -215,8 +227,9 @@ fn pigeon(n: u32) -> ProblemInstance {
 // ────────────────────────────────────────────────────────────────────────────
 
 fn bench_corpus(c: &mut Criterion) {
-    let spp_corpus = corpus(random_dup_free);
-    let full_corpus = corpus(random_maybe_dupful);
+    let arena = &bumpalo::Bump::new();
+    let spp_corpus = corpus(arena, random_dup_free);
+    let full_corpus = corpus(arena, random_maybe_dupful);
 
     let mut g = c.benchmark_group("corpus");
     g.sample_size(20).measurement_time(Duration::from_secs(20));

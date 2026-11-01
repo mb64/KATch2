@@ -1,4 +1,5 @@
 use crate::expr::{Exp, Expr, Pattern};
+use bumpalo::Bump;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::iter::Peekable;
@@ -95,55 +96,55 @@ impl ParseError {
 // --- Token Definition ---
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum TokenKind {
-    Top,                   // T
-    Assign,                // :=
-    Eq,                    // ==
-    Lte,                   // <=
-    Plus,                  // +
-    And,                   // &
-    Xor,                   // ^
-    Minus,                 // -
-    Tilde,                 // ~
-    Not,                   // !
-    Semicolon,             // ;
-    Star,                  // *
-    Dup,                   // dup
-    LtlX,                  // X
-    LtlU,                  // U
-    LtlF,                  // F
-    LtlG,                  // G
-    LtlR,                  // R
-    LParen,                // (
-    RParen,                // )
-    LBracket,              // [
-    RBracket,              // ]
-    DotDot,                // ..
-    Field(u32),            // x followed by digits
-    Number(String),        // Decimal numeric literal
-    BinaryLiteral(String), // Binary literal (0b1010)
-    HexLiteral(String),    // Hexadecimal literal (0xFF)
-    IpLiteral(String),     // IP address literal (192.168.1.1)
-    Ident(String),         // Variable identifier
-    If,                    // if keyword
-    Then,                  // then keyword
-    Else,                  // else keyword
-    Let,                   // let keyword
-    In,                    // in keyword
-    End,                   // end keyword (for multiple expressions parsing)
-    Hole,                  // hole keyword (.nksynth hole declarations)
-    Def,                   // def keyword (.nksynth definitions)
-    Eof,                   // End of input
+pub enum TokenKind<'a> {
+    Top,                    // T
+    Assign,                 // :=
+    Eq,                     // ==
+    Lte,                    // <=
+    Plus,                   // +
+    And,                    // &
+    Xor,                    // ^
+    Minus,                  // -
+    Tilde,                  // ~
+    Not,                    // !
+    Semicolon,              // ;
+    Star,                   // *
+    Dup,                    // dup
+    LtlX,                   // X
+    LtlU,                   // U
+    LtlF,                   // F
+    LtlG,                   // G
+    LtlR,                   // R
+    LParen,                 // (
+    RParen,                 // )
+    LBracket,               // [
+    RBracket,               // ]
+    DotDot,                 // ..
+    Field(u32),             // x followed by digits
+    Number(&'a str),        // Decimal numeric literal
+    BinaryLiteral(&'a str), // Binary literal (0b1010)
+    HexLiteral(&'a str),    // Hexadecimal literal (0xFF)
+    IpLiteral(&'a str),     // IP address literal (192.168.1.1)
+    Ident(&'a str),         // Variable identifier
+    If,                     // if keyword
+    Then,                   // then keyword
+    Else,                   // else keyword
+    Let,                    // let keyword
+    In,                     // in keyword
+    End,                    // end keyword (for multiple expressions parsing)
+    Hole,                   // hole keyword (.nksynth hole declarations)
+    Def,                    // def keyword (.nksynth definitions)
+    Eof,                    // End of input
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Token {
-    pub kind: TokenKind,
+pub struct Token<'a> {
+    pub kind: TokenKind<'a>,
     pub span: Span,
 }
 
-impl Token {
-    fn new(kind: TokenKind, span: Span) -> Self {
+impl<'a> Token<'a> {
+    fn new(kind: TokenKind<'a>, span: Span) -> Self {
         Token { kind, span }
     }
 }
@@ -153,7 +154,7 @@ impl Token {
 pub struct Lexer<'a> {
     iter: Peekable<Chars<'a>>,
     current_pos: Position,
-    // input_str: &'a str, // Keep a reference to the input for slicing if needed for error context
+    input_str: &'a str,
     iterator_has_yielded_eof: bool, // New field to track EOF iteration state
 }
 
@@ -162,7 +163,7 @@ impl<'a> Lexer<'a> {
         Lexer {
             iter: input.chars().peekable(),
             current_pos: Position::new(0, 1, 1),
-            // input_str: input,
+            input_str: input,
             iterator_has_yielded_eof: false, // Initialize the new field
         }
     }
@@ -183,58 +184,42 @@ impl<'a> Lexer<'a> {
         self.iter.peek()
     }
 
-    fn parse_number_or_ip(
-        &mut self,
-        mut num_str: String,
-        _start_pos: Position,
-    ) -> Result<TokenKind, ParseError> {
+    fn parse_number_or_ip(&mut self, start_pos: Position) -> Result<TokenKind<'a>, ParseError> {
         while let Some(&next_c) = self.peek_char() {
+            let literal = &self.input_str[start_pos.offset..self.current_pos.offset];
             if next_c.is_ascii_digit() {
-                num_str.push(self.next_char_with_pos().unwrap().0);
+                self.next_char_with_pos();
             } else if next_c == '.' {
-                // Look ahead to see if this is ".." (range operator) or part of IP
-                let mut temp_iter = self.iter.clone();
-                temp_iter.next(); // Skip the first '.'
-                if temp_iter.peek() == Some(&'.') {
-                    // This is "..", don't consume it
+                let mut lookahead = self.iter.clone();
+                lookahead.next();
+                if lookahead.peek() == Some(&'.') {
                     break;
-                } else {
-                    // This might be part of an IP address
-                    num_str.push(self.next_char_with_pos().unwrap().0);
                 }
-            } else if next_c == '/' && num_str.contains('.') {
-                // CIDR notation
-                num_str.push(self.next_char_with_pos().unwrap().0);
-                // Continue reading the prefix length
-                while let Some(&c) = self.peek_char() {
-                    if c.is_ascii_digit() {
-                        num_str.push(self.next_char_with_pos().unwrap().0);
-                    } else {
-                        break;
-                    }
+                self.next_char_with_pos();
+            } else if next_c == '/' && literal.contains('.') {
+                self.next_char_with_pos();
+                while self.peek_char().is_some_and(|c| c.is_ascii_digit()) {
+                    self.next_char_with_pos();
                 }
                 break;
-            } else if next_c == '-' && num_str.contains('.') {
-                // IP range
-                num_str.push(self.next_char_with_pos().unwrap().0);
-                // Continue reading the second IP
-                while let Some(&c) = self.peek_char() {
-                    if c.is_ascii_digit() || c == '.' {
-                        num_str.push(self.next_char_with_pos().unwrap().0);
-                    } else {
-                        break;
-                    }
+            } else if next_c == '-' && literal.contains('.') {
+                self.next_char_with_pos();
+                while self
+                    .peek_char()
+                    .is_some_and(|c| c.is_ascii_digit() || *c == '.')
+                {
+                    self.next_char_with_pos();
                 }
                 break;
             } else {
                 break;
             }
         }
-        // Check if this looks like an IP address (contains dots)
-        if num_str.contains('.') && self.is_valid_ip_format(&num_str) {
-            Ok(TokenKind::IpLiteral(num_str))
+        let literal = &self.input_str[start_pos.offset..self.current_pos.offset];
+        if literal.contains('.') && self.is_valid_ip_format(literal) {
+            Ok(TokenKind::IpLiteral(literal))
         } else {
-            Ok(TokenKind::Number(num_str.replace(".", "")))
+            Ok(TokenKind::Number(literal))
         }
     }
 
@@ -257,8 +242,8 @@ impl<'a> Lexer<'a> {
             ip_part
         } else if s.contains('-') {
             // Handle IP range (e.g., 192.168.1.10-192.168.1.20)
-            let parts: Vec<&str> = s.split('-').collect();
-            if parts.len() != 2 {
+            let parts = s.split('-');
+            if parts.clone().count() != 2 {
                 return false;
             }
             // Validate both IPs in the range
@@ -276,8 +261,8 @@ impl<'a> Lexer<'a> {
     }
 
     fn is_valid_single_ip(&self, s: &str) -> bool {
-        let parts: Vec<&str> = s.split('.').collect();
-        if parts.len() != 4 {
+        let parts = s.split('.');
+        if parts.clone().count() != 4 {
             return false;
         }
 
@@ -347,7 +332,7 @@ impl<'a> Lexer<'a> {
     }
 
     // This is the main tokenizing function that will need careful span management
-    pub fn next_token(&mut self) -> Result<Token, ParseError> {
+    pub fn next_token(&mut self) -> Result<Token<'a>, ParseError> {
         self.skip_whitespace()?;
 
         let start_pos = self.current_pos;
@@ -366,47 +351,49 @@ impl<'a> Lexer<'a> {
                             Some(&'b') => {
                                 // Binary literal
                                 self.next_char_with_pos(); // Consume 'b'
-                                let mut binary_str = String::new();
+                                let digits_start = self.current_pos.offset;
                                 while let Some(&next_c) = self.peek_char() {
                                     if next_c == '0' || next_c == '1' {
-                                        binary_str.push(self.next_char_with_pos().unwrap().0);
+                                        self.next_char_with_pos();
                                     } else {
                                         break;
                                     }
                                 }
-                                if binary_str.is_empty() {
+                                if self.current_pos.offset == digits_start {
                                     return Err(ParseError::new(
                                         "Expected binary digits after '0b'".to_string(),
                                         Span::new(start_pos, self.current_pos),
                                     ));
                                 }
-                                TokenKind::BinaryLiteral(binary_str)
+                                TokenKind::BinaryLiteral(
+                                    &self.input_str[start_pos.offset + 2..self.current_pos.offset],
+                                )
                             }
                             Some(&'x') | Some(&'X') => {
                                 // Hexadecimal literal
                                 self.next_char_with_pos(); // Consume 'x' or 'X'
-                                let mut hex_str = String::new();
+                                let digits_start = self.current_pos.offset;
                                 while let Some(&next_c) = self.peek_char() {
                                     if next_c.is_ascii_hexdigit() {
-                                        hex_str.push(self.next_char_with_pos().unwrap().0);
+                                        self.next_char_with_pos();
                                     } else {
                                         break;
                                     }
                                 }
-                                if hex_str.is_empty() {
+                                if self.current_pos.offset == digits_start {
                                     return Err(ParseError::new(
                                         "Expected hexadecimal digits after '0x'".to_string(),
                                         Span::new(start_pos, self.current_pos),
                                     ));
                                 }
-                                TokenKind::HexLiteral(hex_str)
+                                TokenKind::HexLiteral(
+                                    &self.input_str[start_pos.offset + 2..self.current_pos.offset],
+                                )
                             }
                             _ => {
                                 // Just a regular '0', continue to digit parsing
-                                let mut num_str = String::new();
-                                num_str.push(c);
                                 // Continue with the same logic as other digits
-                                self.parse_number_or_ip(num_str, start_pos)?
+                                self.parse_number_or_ip(start_pos)?
                             }
                         }
                     }
@@ -468,24 +455,21 @@ impl<'a> Lexer<'a> {
                     _ => {
                         // Check if it's a digit that could start a number
                         if c.is_ascii_digit() {
-                            let mut num_str = String::new();
-                            num_str.push(c);
-                            self.parse_number_or_ip(num_str, start_pos)?
+                            self.parse_number_or_ip(start_pos)?
                         }
                         // Check if it's a letter that could start an identifier
                         else if c.is_alphabetic() {
-                            let mut ident = String::new();
-                            ident.push(c);
                             while let Some(&next_c) = self.peek_char() {
                                 if next_c.is_alphanumeric() || next_c == '_' {
-                                    ident.push(self.next_char_with_pos().unwrap().0);
+                                    self.next_char_with_pos();
                                 } else {
                                     break;
                                 }
                             }
 
                             // Check for reserved words
-                            match ident.as_str() {
+                            let ident = &self.input_str[start_pos.offset..self.current_pos.offset];
+                            match ident {
                                 "in" => TokenKind::In,
                                 "if" => TokenKind::If,
                                 "then" => TokenKind::Then,
@@ -529,9 +513,9 @@ impl<'a> Lexer<'a> {
 }
 
 // --- Iterator for Lexer ---
-// This now yields Result<Token, ParseError> where Token includes its span.
+// This now yields Result<Token<'a>, ParseError> where Token includes its span.
 impl<'a> Iterator for Lexer<'a> {
-    type Item = Result<Token, ParseError>;
+    type Item = Result<Token<'a>, ParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.iterator_has_yielded_eof {
@@ -613,15 +597,17 @@ at the primary level and have the highest precedence.
 */
 
 pub struct Parser<'a> {
-    // The lexer now yields Result<Token, ParseError>, where Token is SpannedToken
+    // The lexer now yields Result<Token<'a>, ParseError>, where Token is SpannedToken
     lexer: Peekable<Lexer<'a>>,
+    arena: &'a Bump,
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(lexer: Lexer<'a>) -> Self {
+    pub fn new(lexer: Lexer<'a>, arena: &'a Bump) -> Self {
         // Takes Lexer directly
         Parser {
             lexer: lexer.peekable(),
+            arena,
         }
     }
 
@@ -630,17 +616,17 @@ impl<'a> Parser<'a> {
     /// Exposed so clients (e.g. the `.nksynth` front-end in
     /// `crate::holes::parser`) can build a statement-level grammar on top of
     /// [`Parser::parse_single_expression`] while driving the same lexer.
-    pub fn peek_cloned(&mut self) -> Result<Token, ParseError> {
+    pub fn peek_cloned(&mut self) -> Result<Token<'a>, ParseError> {
         self.peek_token().cloned()
     }
 
     /// Consume and return the next token.
-    pub fn advance(&mut self) -> Result<Token, ParseError> {
+    pub fn advance(&mut self) -> Result<Token<'a>, ParseError> {
         self.consume_token()
     }
 
     /// Parses a single complete expression.
-    pub fn parse_single_expression(&mut self) -> Result<Exp, ParseError> {
+    pub fn parse_single_expression(&mut self) -> Result<Exp<'a>, ParseError> {
         // Returns ParseError
         let expr = self.parse_until()?; // Start with lowest precedence
         // Here, we might check for trailing tokens if a single expression is expected to consume all input.
@@ -650,7 +636,7 @@ impl<'a> Parser<'a> {
 
     // Helper to get the next token
     // Consumes the token from the lexer.
-    fn next_token_internal(&mut self) -> Result<Token, ParseError> {
+    fn next_token_internal(&mut self) -> Result<Token<'a>, ParseError> {
         // Returns full Token
         // The iterator's next() already wraps Lexer's next_token result.
         // If lexer.next() is None (because Eof was hit and made None), we synthesize an Eof token.
@@ -705,14 +691,14 @@ impl<'a> Parser<'a> {
     }
 
     // Renaming to avoid conflict and signify it's the one the parser methods should use
-    fn consume_token(&mut self) -> Result<Token, ParseError> {
+    fn consume_token(&mut self) -> Result<Token<'a>, ParseError> {
         self.next_token_internal()
     }
 
     // Helper to peek at the next token without consuming it.
     // Returns a Result containing a reference to the Token or a cloned ParseError.
     // This now needs to handle the possibility of the lexer returning an error on peek.
-    fn peek_token_internal(&mut self) -> Result<&Token, ParseError> {
+    fn peek_token_internal(&mut self) -> Result<&Token<'a>, ParseError> {
         match self.lexer.peek() {
             Some(Ok(token_ref)) => Ok(token_ref),
             Some(Err(parse_error)) => Err(parse_error.clone()), // Clone error to return owned
@@ -733,11 +719,11 @@ impl<'a> Parser<'a> {
     }
 
     // Renaming for clarity
-    fn peek_kind(&mut self) -> Result<&TokenKind, ParseError> {
+    fn peek_kind(&mut self) -> Result<&TokenKind<'a>, ParseError> {
         self.peek_token_internal().map(|token| &token.kind)
     }
 
-    fn peek_token(&mut self) -> Result<&Token, ParseError> {
+    fn peek_token(&mut self) -> Result<&Token<'a>, ParseError> {
         // Expose this one for parser methods
         self.peek_token_internal()
     }
@@ -751,7 +737,7 @@ impl<'a> Parser<'a> {
     // 5. Additive: +, ^, - (left-associative)
     // 6. Until/Release: U, R (right-associative)
 
-    fn parse_until(&mut self) -> Result<Exp, ParseError> {
+    fn parse_until(&mut self) -> Result<Exp<'a>, ParseError> {
         let left = self.parse_additive()?;
         // Peek at the kind directly, to keep the token for its span if needed for error
         // This loop structure is for right-associativity. A single check is enough.
@@ -784,7 +770,7 @@ impl<'a> Parser<'a> {
                             Ok(_) => {
                                 // Other token, parse it
                                 let right = self.parse_until()?;
-                                Ok(Expr::ltl_until(left, right))
+                                Ok(Expr::ltl_until(self.arena, left, right))
                             }
                             Err(pe) => Err(pe.clone()), // Propagate other peek errors
                         }
@@ -815,10 +801,10 @@ impl<'a> Parser<'a> {
                             Ok(_) => {
                                 // Other token, parse it
                                 let right = self.parse_until()?;
-                                let not_left = Expr::complement(left);
-                                let not_right = Expr::complement(right);
-                                let until = Expr::ltl_until(not_left, not_right);
-                                Ok(Expr::complement(until))
+                                let not_left = Expr::complement(self.arena, left);
+                                let not_right = Expr::complement(self.arena, right);
+                                let until = Expr::ltl_until(self.arena, not_left, not_right);
+                                Ok(Expr::complement(self.arena, until))
                             }
                             Err(pe) => Err(pe.clone()), // Propagate other peek errors
                         }
@@ -830,7 +816,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_additive(&mut self) -> Result<Exp, ParseError> {
+    fn parse_additive(&mut self) -> Result<Exp<'a>, ParseError> {
         let mut left = self.parse_sequence()?;
         loop {
             // Peek at the kind directly, to keep the token for its span if needed for error
@@ -852,7 +838,7 @@ impl<'a> Parser<'a> {
                                 ));
                             }
                             let right = self.parse_sequence()?;
-                            left = Expr::union(left, right);
+                            left = Expr::union(self.arena, left, right);
                         }
                         TokenKind::Xor => {
                             let op_token = self.consume_token()?; // Consume '^'
@@ -867,7 +853,7 @@ impl<'a> Parser<'a> {
                                 ));
                             }
                             let right = self.parse_sequence()?;
-                            left = Expr::xor(left, right);
+                            left = Expr::xor(self.arena, left, right);
                         }
                         TokenKind::Minus => {
                             let op_token = self.consume_token()?; // Consume '-'
@@ -882,7 +868,7 @@ impl<'a> Parser<'a> {
                                 ));
                             }
                             let right = self.parse_sequence()?;
-                            left = Expr::difference(left, right);
+                            left = Expr::difference(self.arena, left, right);
                         }
                         _ => break, // Not Plus, Xor, or Minus
                     }
@@ -893,27 +879,27 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    fn parse_sequence(&mut self) -> Result<Exp, ParseError> {
+    fn parse_sequence(&mut self) -> Result<Exp<'a>, ParseError> {
         let mut left = self.parse_intersect()?;
         while self.peek_kind()? == &TokenKind::Semicolon {
             let _op_token = self.consume_token()?; // Consume ';'
             let right = self.parse_intersect()?;
-            left = Expr::sequence(left, right);
+            left = Expr::sequence(self.arena, left, right);
         }
         Ok(left)
     }
 
-    fn parse_intersect(&mut self) -> Result<Exp, ParseError> {
+    fn parse_intersect(&mut self) -> Result<Exp<'a>, ParseError> {
         let mut left = self.parse_prefix()?;
         while self.peek_kind()? == &TokenKind::And {
             self.consume_token()?; // Consume '&'
             let right = self.parse_prefix()?;
-            left = Expr::intersect(left, right);
+            left = Expr::intersect(self.arena, left, right);
         }
         Ok(left)
     }
 
-    fn parse_prefix(&mut self) -> Result<Exp, ParseError> {
+    fn parse_prefix(&mut self) -> Result<Exp<'a>, ParseError> {
         match self.peek_kind()? {
             TokenKind::Tilde => {
                 let op_token = self.consume_token()?; // Consume '~'
@@ -928,7 +914,7 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 let operand = self.parse_prefix()?; // Right-associative
-                Ok(Expr::complement(operand))
+                Ok(Expr::complement(self.arena, operand))
             }
             TokenKind::Not => {
                 let op_token = self.consume_token()?; // Consume '!'
@@ -944,7 +930,7 @@ impl<'a> Parser<'a> {
                 }
                 let operand = self.parse_prefix()?; // Right-associative
                 // We'll validate that operand is in test fragment during desugaring
-                Ok(Expr::test_negation(operand))
+                Ok(Expr::test_negation(self.arena, operand))
             }
             TokenKind::LtlX => {
                 // LTL Next
@@ -960,7 +946,7 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 let operand = self.parse_prefix()?;
-                Ok(Expr::ltl_next(operand))
+                Ok(Expr::ltl_next(self.arena, operand))
             }
             TokenKind::LtlF => {
                 // LTL Future: F e ≡ T U e
@@ -976,7 +962,7 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 let operand = self.parse_prefix()?;
-                Ok(Expr::ltl_until(Expr::top(), operand)) // Uses helper from expr.rs
+                Ok(Expr::ltl_until(self.arena, Expr::top(self.arena), operand)) // Uses helper from expr.rs
             }
             TokenKind::LtlG => {
                 // LTL Globally: G e ≡ ¬F¬e ≡ ¬(T U ¬e)
@@ -992,7 +978,7 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 let operand = self.parse_prefix()?;
-                Ok(Expr::ltl_globally(operand)) // Uses helper from expr.rs
+                Ok(Expr::ltl_globally(self.arena, operand)) // Uses helper from expr.rs
             }
             _ => {
                 // No prefix operator, parse postfix
@@ -1001,20 +987,20 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_postfix(&mut self) -> Result<Exp, ParseError> {
+    fn parse_postfix(&mut self) -> Result<Exp<'a>, ParseError> {
         let mut base_expr = self.parse_atom_or_field_expression()?;
 
         // Handle postfix star (left-associative, though only one postfix operator exists)
         while self.peek_kind()? == &TokenKind::Star {
             let _star_token = self.consume_token()?; // Consume '*'
-            base_expr = Expr::star(base_expr);
+            base_expr = Expr::star(self.arena, base_expr);
         }
         Ok(base_expr)
     }
 
     // This function replaces the old parse_primary_and_assign_eq and parts of parse_primary.
     // It parses atomic literals, dup, parenthesized expressions, and field assignments/tests.
-    fn parse_atom_or_field_expression(&mut self) -> Result<Exp, ParseError> {
+    fn parse_atom_or_field_expression(&mut self) -> Result<Exp<'a>, ParseError> {
         let current_token = self.peek_token()?.clone(); // Clone to avoid lifetime issues if we consume
 
         match current_token.kind {
@@ -1123,8 +1109,9 @@ impl<'a> Parser<'a> {
                                 };
 
                                 // Convert number to bit vector
-                                let bits = number_to_bits(&value_str, (end - start) as usize)?;
-                                Ok(Expr::bit_range_assign(start, end, bits))
+                                let bits =
+                                    number_to_bits(self.arena, value_str, (end - start) as usize)?;
+                                Ok(self.arena.alloc(Expr::BitRangeAssign(start, end, bits)))
                             }
                             TokenKind::Tilde => {
                                 // Pattern match operator x[start..end] ~ pattern
@@ -1133,7 +1120,7 @@ impl<'a> Parser<'a> {
                                 // Parse pattern with field width
                                 let field_width = (end - start) as usize;
                                 let pattern = self.parse_pattern(Some(field_width))?;
-                                Ok(Expr::bit_range_match(start, end, pattern))
+                                Ok(Expr::bit_range_match(self.arena, start, end, pattern))
                             }
                             _ => Err(ParseError::new(
                                 format!(
@@ -1176,7 +1163,7 @@ impl<'a> Parser<'a> {
                                 ));
                             }
                         };
-                        Ok(Expr::assign(index, value_bool))
+                        Ok(Expr::assign(self.arena, index, value_bool))
                     }
                     TokenKind::Eq => {
                         self.consume_token()?; // Consume '=='
@@ -1206,7 +1193,7 @@ impl<'a> Parser<'a> {
                                 ));
                             }
                         };
-                        Ok(Expr::test(index, value_bool))
+                        Ok(Expr::test(self.arena, index, value_bool))
                     }
                     TokenKind::Tilde => {
                         // Pattern match: xN ~ pattern
@@ -1219,7 +1206,7 @@ impl<'a> Parser<'a> {
                         match pattern {
                             Pattern::Exact(bits) if bits.len() == 1 => {
                                 // Single bit pattern, convert to test
-                                Ok(Expr::test(index, bits[0]))
+                                Ok(Expr::test(self.arena, index, bits[0]))
                             }
                             _ => Err(ParseError::new(
                                 format!(
@@ -1283,7 +1270,7 @@ impl<'a> Parser<'a> {
 
                 let else_expr = self.parse_until()?; // Parse else branch
 
-                Ok(Expr::if_then_else(cond, then_expr, else_expr))
+                Ok(Expr::if_then_else(self.arena, cond, then_expr, else_expr))
             }
             // Let expression
             TokenKind::Let => {
@@ -1331,7 +1318,7 @@ impl<'a> Parser<'a> {
                     // Expect identifier (x or alias name)
                     let base_token = self.consume_token()?;
                     let base_name = match &base_token.kind {
-                        TokenKind::Ident(name) => name.clone(),
+                        TokenKind::Ident(name) => name,
                         _ => {
                             return Err(ParseError::new(
                                 format!(
@@ -1448,7 +1435,7 @@ impl<'a> Parser<'a> {
                     let body = self.parse_until()?; // Parse body
 
                     // For now, only support 'x' as the base
-                    if base_name != "x" {
+                    if *base_name != "x" {
                         return Err(ParseError::new(
                             format!(
                                 "Sub-ranges of aliases not yet supported. Use &x[start..end] instead of &{}[start..end]",
@@ -1458,7 +1445,7 @@ impl<'a> Parser<'a> {
                         ));
                     }
 
-                    Ok(Expr::let_bit_range(var_name, start, end, body))
+                    Ok(Expr::let_bit_range(self.arena, var_name, start, end, body))
                 } else {
                     // Regular let binding
                     let def = self.parse_until()?; // Parse definition
@@ -1482,7 +1469,7 @@ impl<'a> Parser<'a> {
 
                     let body = self.parse_until()?; // Parse body
 
-                    Ok(Expr::let_in(var_name, def, body))
+                    Ok(Expr::let_in(self.arena, var_name, def, body))
                 }
             }
             // Variable reference or bit range
@@ -1604,11 +1591,12 @@ impl<'a> Parser<'a> {
 
                                 // Convert literal to bit vector
                                 let bits = literal_to_bits(
-                                    &value_str,
+                                    self.arena,
+                                    value_str,
                                     literal_type,
                                     (end - start) as usize,
                                 )?;
-                                Ok(Expr::bit_range_assign(start, end, bits))
+                                Ok(self.arena.alloc(Expr::BitRangeAssign(start, end, bits)))
                             }
                             TokenKind::Tilde => {
                                 // Pattern match operator x[start..end] ~ pattern
@@ -1617,7 +1605,7 @@ impl<'a> Parser<'a> {
                                 // Parse pattern with field width
                                 let field_width = (end - start) as usize;
                                 let pattern = self.parse_pattern(Some(field_width))?;
-                                Ok(Expr::bit_range_match(start, end, pattern))
+                                Ok(Expr::bit_range_match(self.arena, start, end, pattern))
                             }
                             _ => Err(ParseError::new(
                                 format!(
@@ -1629,7 +1617,7 @@ impl<'a> Parser<'a> {
                         }
                     } else {
                         // Not a bit range, 'x' is already consumed, just return it as a variable
-                        Ok(Expr::var(name))
+                        Ok(Expr::var(self.arena, name))
                     }
                 } else {
                     // Check if this identifier is followed by := or ==
@@ -1662,9 +1650,14 @@ impl<'a> Parser<'a> {
                             };
 
                             // For variable assignment, infer bit width from literal format
-                            let inferred_bits = infer_literal_bit_width(&value_str, literal_type)?;
-                            let bits = literal_to_bits(&value_str, literal_type, inferred_bits)?;
-                            Ok(Expr::var_assign(name, bits))
+                            let inferred_bits = infer_literal_bit_width(value_str, literal_type)?;
+                            let bits = literal_to_bits(
+                                self.arena,
+                                value_str,
+                                literal_type,
+                                inferred_bits,
+                            )?;
+                            Ok(self.arena.alloc(Expr::VarAssign(name, bits)))
                         }
                         TokenKind::Tilde => {
                             // Pattern match: var ~ pattern
@@ -1672,17 +1665,17 @@ impl<'a> Parser<'a> {
 
                             // Parse pattern (no field width for variables)
                             let pattern = self.parse_pattern(None)?;
-                            Ok(Expr::var_match(name, pattern))
+                            Ok(Expr::var_match(self.arena, name, pattern))
                         }
                         _ => {
                             // Just a variable reference
-                            Ok(Expr::var(name))
+                            Ok(Expr::var(self.arena, name))
                         }
                     }
                 }
             }
             // These are simple primaries, handled by the simplified parse_primary
-            TokenKind::Number(ref n) if n == "0" || n == "1" => self.parse_primary(),
+            TokenKind::Number(n) if n == "0" || n == "1" => self.parse_primary(),
             TokenKind::Top | TokenKind::Dup | TokenKind::LParen | TokenKind::End => {
                 self.parse_primary()
             }
@@ -1699,13 +1692,13 @@ impl<'a> Parser<'a> {
 
     // Simplified parse_primary: handles only 0, 1, T, dup, and parenthesized expressions.
     // Field-related constructs are now handled by parse_atom_or_field_expression.
-    fn parse_primary(&mut self) -> Result<Exp, ParseError> {
+    fn parse_primary(&mut self) -> Result<Exp<'a>, ParseError> {
         let token = self.consume_token()?; // Consume the token for the primary
         match token.kind {
-            TokenKind::Number(ref n) if n == "0" => Ok(Expr::zero()),
-            TokenKind::Number(ref n) if n == "1" => Ok(Expr::one()),
-            TokenKind::Top => Ok(Expr::top()),
-            TokenKind::Dup => Ok(Expr::dup()),
+            TokenKind::Number("0") => Ok(Expr::zero(self.arena)),
+            TokenKind::Number("1") => Ok(Expr::one(self.arena)),
+            TokenKind::Top => Ok(Expr::top(self.arena)),
+            TokenKind::Dup => Ok(Expr::dup(self.arena)),
             TokenKind::LParen => {
                 let expr = self.parse_until()?;
                 match self.consume_token()? {
@@ -1768,12 +1761,12 @@ impl<'a> Parser<'a> {
                     token.span,
                 ))
             }
-            TokenKind::End => Ok(Expr::end()), // Moved here to be last, resolves unreachable_patterns for End.
+            TokenKind::End => Ok(Expr::end(self.arena)), // Moved here to be last, resolves unreachable_patterns for End.
         }
     }
 
     /// Parse a pattern for pattern matching expressions
-    fn parse_pattern(&mut self, field_width: Option<usize>) -> Result<Pattern, ParseError> {
+    fn parse_pattern(&mut self, field_width: Option<usize>) -> Result<Pattern<'a>, ParseError> {
         let token = self.consume_token()?;
 
         match token.kind {
@@ -1784,7 +1777,7 @@ impl<'a> Parser<'a> {
                     let prefix_str = &prefix_str[1..]; // Skip the '/'
 
                     // Parse IP address
-                    let addr_bits = ip_to_bits(addr_str)?;
+                    let addr_bits = ip_to_bits(self.arena, addr_str)?;
 
                     // Parse prefix length
                     let prefix_len = prefix_str.parse::<usize>().map_err(|_| {
@@ -1807,7 +1800,8 @@ impl<'a> Parser<'a> {
                     })
                 } else if ip_str.contains('-') {
                     // IP range: start-end
-                    let parts: Vec<&str> = ip_str.split('-').collect();
+                    let parts: bumpalo::collections::Vec<_> =
+                        bumpalo::collections::Vec::from_iter_in(ip_str.split('-'), self.arena);
                     if parts.len() != 2 {
                         return Err(ParseError::new(
                             format!("Invalid range format: {}", ip_str),
@@ -1815,8 +1809,8 @@ impl<'a> Parser<'a> {
                         ));
                     }
 
-                    let start_bits = ip_to_bits(parts[0])?;
-                    let end_bits = ip_to_bits(parts[1])?;
+                    let start_bits = ip_to_bits(self.arena, parts[0])?;
+                    let end_bits = ip_to_bits(self.arena, parts[1])?;
 
                     Ok(Pattern::IpRange {
                         start: start_bits,
@@ -1824,18 +1818,18 @@ impl<'a> Parser<'a> {
                     })
                 } else {
                     // Check if next token is "mask" for wildcard syntax
-                    if matches!(self.peek_kind(), Ok(TokenKind::Ident(s)) if s == "mask") {
+                    if matches!(self.peek_kind(), Ok(TokenKind::Ident(s)) if *s == "mask") {
                         self.consume_token()?; // Consume "mask"
 
                         // Parse mask value
                         let mask_token = self.consume_token()?;
                         let mask_bits = match mask_token.kind {
-                            TokenKind::IpLiteral(mask_str) => ip_to_bits(&mask_str)?,
+                            TokenKind::IpLiteral(mask_str) => ip_to_bits(self.arena, mask_str)?,
                             TokenKind::Number(num_str) => {
-                                literal_to_bits(&num_str, LiteralType::Decimal, 32)?
+                                literal_to_bits(self.arena, num_str, LiteralType::Decimal, 32)?
                             }
                             TokenKind::HexLiteral(hex_str) => {
-                                literal_to_bits(&hex_str, LiteralType::Hexadecimal, 32)?
+                                literal_to_bits(self.arena, hex_str, LiteralType::Hexadecimal, 32)?
                             }
                             _ => {
                                 return Err(ParseError::new(
@@ -1848,14 +1842,14 @@ impl<'a> Parser<'a> {
                             }
                         };
 
-                        let addr_bits = ip_to_bits(&ip_str)?;
+                        let addr_bits = ip_to_bits(self.arena, ip_str)?;
                         Ok(Pattern::Wildcard {
                             address: addr_bits,
                             mask: mask_bits,
                         })
                     } else {
                         // Just an exact IP match - use ip_to_bits for consistent MSB-first order
-                        let bits = ip_to_bits(&ip_str)?;
+                        let bits = ip_to_bits(self.arena, ip_str)?;
                         Ok(Pattern::Exact(bits))
                     }
                 }
@@ -1887,8 +1881,8 @@ impl<'a> Parser<'a> {
                     })?;
                     let end_val = if end_str.contains('.') {
                         // This is an IP address end point, parse it as IP
-                        let end_bits = ip_to_bits(&end_str)?;
-                        bits_to_u128(&end_bits).map_err(|_| {
+                        let end_bits = ip_to_bits(self.arena, end_str)?;
+                        bits_to_u128(end_bits).map_err(|_| {
                             ParseError::new(
                                 "IP address too large for range".to_string(),
                                 end_token.span,
@@ -1914,11 +1908,12 @@ impl<'a> Parser<'a> {
                         _ => min_width,
                     };
 
-                    let start_bits = literal_to_bits(&num_str, LiteralType::Decimal, width)?;
+                    let start_bits =
+                        literal_to_bits(self.arena, num_str, LiteralType::Decimal, width)?;
                     let end_bits = if end_str.contains('.') {
-                        ip_to_bits(&end_str)?
+                        ip_to_bits(self.arena, end_str)?
                     } else {
-                        literal_to_bits(&end_str, LiteralType::Decimal, width)?
+                        literal_to_bits(self.arena, end_str, LiteralType::Decimal, width)?
                     };
 
                     Ok(Pattern::IpRange {
@@ -1943,18 +1938,24 @@ impl<'a> Parser<'a> {
                         _ => min_width,
                     };
 
-                    let bits = literal_to_bits(&num_str, LiteralType::Decimal, width)?;
+                    let bits = literal_to_bits(self.arena, num_str, LiteralType::Decimal, width)?;
                     Ok(Pattern::Exact(bits))
                 }
             }
             TokenKind::BinaryLiteral(bin_str) => {
-                let inferred_width = infer_literal_bit_width(&bin_str, LiteralType::Binary)?;
-                let bits = literal_to_bits(&bin_str, LiteralType::Binary, inferred_width)?;
+                let inferred_width = infer_literal_bit_width(bin_str, LiteralType::Binary)?;
+                let bits =
+                    literal_to_bits(self.arena, bin_str, LiteralType::Binary, inferred_width)?;
                 Ok(Pattern::Exact(bits))
             }
             TokenKind::HexLiteral(hex_str) => {
-                let inferred_width = infer_literal_bit_width(&hex_str, LiteralType::Hexadecimal)?;
-                let bits = literal_to_bits(&hex_str, LiteralType::Hexadecimal, inferred_width)?;
+                let inferred_width = infer_literal_bit_width(hex_str, LiteralType::Hexadecimal)?;
+                let bits = literal_to_bits(
+                    self.arena,
+                    hex_str,
+                    LiteralType::Hexadecimal,
+                    inferred_width,
+                )?;
                 Ok(Pattern::Exact(bits))
             }
             _ => Err(ParseError::new(
@@ -1986,31 +1987,27 @@ fn bits_to_u128(bits: &[bool]) -> Result<u128, ParseError> {
     Ok(val)
 }
 
-fn ip_to_bits(ip_str: &str) -> Result<Vec<bool>, ParseError> {
-    let parts: Vec<&str> = ip_str.split('.').collect();
-    if parts.len() != 4 {
+fn ip_to_number(ip_str: &str) -> Result<u32, ParseError> {
+    let parts = ip_str.split('.');
+    if parts.clone().count() != 4 {
         return Err(ParseError::new(
             format!("Invalid IP address format: {}", ip_str),
             Default::default(),
         ));
     }
-
-    // Convert IP to 32-bit number first
     let mut ip_num = 0u32;
-    for (i, part) in parts.iter().enumerate() {
+    for (i, part) in parts.enumerate() {
         let octet = part.parse::<u8>().map_err(|_| {
             ParseError::new(format!("Invalid IP octet: {}", part), Default::default())
         })?;
         ip_num |= (octet as u32) << (8 * (3 - i));
     }
+    Ok(ip_num)
+}
 
-    // Generate bits in LSB-first order (consistent with literal_to_bits)
-    let mut bits = Vec::with_capacity(32);
-    for i in 0..32 {
-        bits.push((ip_num >> i) & 1 == 1);
-    }
-
-    Ok(bits)
+fn ip_to_bits<'a>(arena: &'a Bump, ip_str: &str) -> Result<&'a [bool], ParseError> {
+    let num = ip_to_number(ip_str)?;
+    Ok(arena.alloc_slice_fill_iter((0..32).map(|i| (num >> i) & 1 == 1)))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2060,11 +2057,12 @@ fn infer_literal_bit_width(
     }
 }
 
-fn literal_to_bits(
+fn literal_to_bits<'a>(
+    arena: &'a Bump,
     literal_str: &str,
     literal_type: LiteralType,
     expected_bits: usize,
-) -> Result<Vec<bool>, ParseError> {
+) -> Result<&'a [bool], ParseError> {
     let num = match literal_type {
         LiteralType::Decimal => literal_str.parse::<u128>().map_err(|_| {
             ParseError::new(
@@ -2084,68 +2082,55 @@ fn literal_to_bits(
                 Default::default(),
             )
         })?,
-        LiteralType::IpAddress => {
-            // Convert IP address to 32-bit integer
-            let parts: Vec<&str> = literal_str.split('.').collect();
-            if parts.len() != 4 {
-                return Err(ParseError::new(
-                    format!("Invalid IP address format: {}", literal_str),
-                    Default::default(),
-                ));
-            }
-
-            let mut ip_num = 0u128;
-            for (i, part) in parts.iter().enumerate() {
-                let octet = part.parse::<u8>().map_err(|_| {
-                    ParseError::new(format!("Invalid IP octet: {}", part), Default::default())
-                })?;
-                ip_num |= (octet as u128) << (8 * (3 - i));
-            }
-            ip_num
-        }
+        LiteralType::IpAddress => ip_to_number(literal_str)? as u128,
     };
 
-    let mut bits = Vec::with_capacity(expected_bits);
-    for i in 0..expected_bits {
-        bits.push((num >> i) & 1 == 1);
-    }
-
     // Check if the number fits in the expected bits
-    if num >= (1u128 << expected_bits) {
+    if expected_bits < 128 && num >= (1u128 << expected_bits) {
         return Err(ParseError::new(
             format!("Number {} requires more than {} bits", num, expected_bits),
             Default::default(),
         ));
     }
 
-    Ok(bits)
+    Ok(arena.alloc_slice_fill_iter((0..expected_bits).map(|i| i < 128 && (num >> i) & 1 == 1)))
 }
 
 // Helper function to convert a number string to a bit vector (for backward compatibility)
-fn number_to_bits(num_str: &str, expected_bits: usize) -> Result<Vec<bool>, ParseError> {
-    literal_to_bits(num_str, LiteralType::Decimal, expected_bits)
+fn number_to_bits<'a>(
+    arena: &'a Bump,
+    num_str: &str,
+    expected_bits: usize,
+) -> Result<&'a [bool], ParseError> {
+    literal_to_bits(arena, num_str, LiteralType::Decimal, expected_bits)
 }
 
-// Main public parsing function
-// It needs to convert the internal ParseError (with its 0-indexed Span)
-// into the lib::ParseErrorDetails (with its 1-indexed ErrorSpan) for src/lib.rs.
-pub fn parse_expressions(input: &str) -> Result<Vec<Exp>, ParseErrorDetails> {
+/// Parse into caller-owned arena storage, borrowing names from `input`.
+///
+/// The shared lifetime is the intersection of the input and arena lifetimes;
+/// neither must have the same original scope as the other. The returned slice
+/// is empty for whitespace/comments, or contains the single parsed expression.
+pub fn parse_expressions<'a>(
+    arena: &'a Bump,
+    input: &'a str,
+) -> Result<&'a [Exp<'a>], ParseErrorDetails> {
     let lexer = Lexer::new(input);
-    let mut parser = Parser::new(lexer);
-    let mut expressions = Vec::new();
+    let mut parser = Parser::new(lexer, arena);
+    let mut expressions = bumpalo::collections::Vec::new_in(arena);
 
-    // Note: this parses at most one top-level expression. The `Vec<Exp>` return
-    // type and trailing peek-for-Eof are vestigial: every caller reads only
+    // This parses at most one top-level expression. The slice is empty for
+    // whitespace/comments; otherwise it contains one expression. Historically
+    // callers expected a collection, and the trailing peek-for-Eof remains: every caller reads only
     // `expressions[0]`, and any token after the first expression is reported
     // as "Expected operator". The empty result is the "input was just
     // whitespace/comments" case.
     match parser.peek_kind() {
-        Ok(&TokenKind::Eof) => return Ok(expressions),
+        Ok(&TokenKind::Eof) => return Ok(expressions.into_bump_slice()),
         Err(ref pe)
             if pe.message.contains("Peeked beyond EOF")
                 || pe.message.contains("Unexpected end of token stream") =>
         {
-            return Ok(expressions);
+            return Ok(expressions.into_bump_slice());
         }
         Err(pe) => return Err(convert_parse_error(pe.clone(), input)),
         _ => {}
@@ -2157,12 +2142,12 @@ pub fn parse_expressions(input: &str) -> Result<Vec<Exp>, ParseErrorDetails> {
     }
 
     match parser.peek_kind() {
-        Ok(&TokenKind::Eof) => Ok(expressions),
+        Ok(&TokenKind::Eof) => Ok(expressions.into_bump_slice()),
         Err(ref pe)
             if pe.message.contains("Peeked beyond EOF")
                 || pe.message.contains("Unexpected end of token stream") =>
         {
-            Ok(expressions)
+            Ok(expressions.into_bump_slice())
         }
         Ok(kind_from_first_peek) => {
             let owned_kind = kind_from_first_peek.clone();
@@ -2261,22 +2246,76 @@ mod tests {
     use super::{Exp, parse_expressions}; // Removed Lexer, Parser, TokenKind
     use crate::expr::{Expr, Pattern};
 
+    #[test]
+    fn identifiers_borrow_the_original_utf8_source() {
+        let source = String::from("let café = 1 in café");
+        let arena = bumpalo::Bump::new();
+        let parsed = parse_expressions(&arena, &source).unwrap();
+        let Expr::Let(name, _, body) = parsed[0] else {
+            panic!("expected let")
+        };
+        let Expr::Var(reference) = body else {
+            panic!("expected variable")
+        };
+        for (name, offset) in [
+            (*name, source.find("café").unwrap()),
+            (*reference, source.rfind("café").unwrap()),
+        ] {
+            assert_eq!(name, "café");
+            assert_eq!(name.as_ptr(), source[offset..].as_ptr());
+        }
+    }
+
+    #[test]
+    fn syntax_has_no_owned_heap_storage_or_recursive_drop() {
+        use crate::holes::parser::{Program, Stmt};
+        assert!(!std::mem::needs_drop::<Expr<'_>>());
+        assert!(!std::mem::needs_drop::<Pattern<'_>>());
+        assert!(!std::mem::needs_drop::<Program<'_>>());
+        assert!(!std::mem::needs_drop::<Stmt<'_>>());
+        let arena = bumpalo::Bump::new();
+        let mut expr = Expr::one(&arena);
+        for _ in 0..100_000 {
+            expr = Expr::union(&arena, expr, Expr::zero(&arena));
+        }
+        assert!(matches!(expr, Expr::Union(..)));
+        drop(arena); // A boxed tree this deep would need recursive destruction.
+    }
+
+    #[test]
+    fn arena_bit_literals_support_full_width_and_zero_padding() {
+        let arena = bumpalo::Bump::new();
+        let parsed =
+            parse_expressions(&arena, "x[0..128] := 0xffffffffffffffffffffffffffffffff").unwrap();
+        let Expr::BitRangeAssign(0, 128, bits) = parsed[0] else {
+            panic!("expected assignment")
+        };
+        assert_eq!(bits.len(), 128);
+        assert!(bits.iter().all(|bit| *bit));
+        let parsed = parse_expressions(&arena, "x[0..129] := 1").unwrap();
+        let Expr::BitRangeAssign(0, 129, bits) = parsed[0] else {
+            panic!("expected assignment")
+        };
+        assert!(bits[0]);
+        assert!(bits[1..].iter().all(|bit| !bit));
+    }
+
     // Helper to parse all expressions from a string and get a Vec<Exp>
     // Maps error to String for test assertion convenience.
-    fn parse_all(s: &str) -> Result<Vec<Exp>, String> {
-        match parse_expressions(s) {
-            Ok(exprs) => Ok(exprs),
+    fn parse_all<'a>(arena: &'a bumpalo::Bump, s: &'a str) -> Result<Vec<Exp<'a>>, String> {
+        match parse_expressions(arena, s) {
+            Ok(exprs) => Ok(exprs.to_vec()),
             Err(details) => Err(details.message), // Using the message from ParseErrorDetails
         }
     }
 
     // Helper to parse a single expression expected from a string.
     // Fails if zero or more than one expression is parsed.
-    fn parse_single_unwrap(s: &str) -> Exp {
-        match parse_expressions(s) {
-            Ok(mut exprs) => {
+    fn parse_single_unwrap<'a>(arena: &'a bumpalo::Bump, s: &'a str) -> Exp<'a> {
+        match parse_expressions(arena, s) {
+            Ok(exprs) => {
                 if exprs.len() == 1 {
-                    exprs.remove(0)
+                    exprs[0]
                 } else {
                     panic!(
                         "Expected single expression, found {} for input: {}",
@@ -2291,127 +2330,175 @@ mod tests {
 
     #[test]
     fn test_simple_literals() {
-        assert_eq!(parse_single_unwrap("0"), Expr::zero());
-        assert_eq!(parse_single_unwrap("1"), Expr::one());
-        assert_eq!(parse_single_unwrap("T"), Expr::top());
-        assert_eq!(parse_single_unwrap("dup"), Expr::dup());
+        let arena = &bumpalo::Bump::new();
+        assert_eq!(parse_single_unwrap(arena, "0"), Expr::zero(arena));
+        assert_eq!(parse_single_unwrap(arena, "1"), Expr::one(arena));
+        assert_eq!(parse_single_unwrap(arena, "T"), Expr::top(arena));
+        assert_eq!(parse_single_unwrap(arena, "dup"), Expr::dup(arena));
     }
 
     #[test]
     fn test_field_operations() {
-        assert_eq!(parse_single_unwrap("x1 := 0"), Expr::assign(1, false));
-        assert_eq!(parse_single_unwrap("x2 == 1"), Expr::test(2, true));
+        let arena = &bumpalo::Bump::new();
+        assert_eq!(
+            parse_single_unwrap(arena, "x1 := 0"),
+            Expr::assign(arena, 1, false)
+        );
+        assert_eq!(
+            parse_single_unwrap(arena, "x2 == 1"),
+            Expr::test(arena, 2, true)
+        );
     }
 
     #[test]
     fn test_sequence() {
+        let arena = &bumpalo::Bump::new();
         assert_eq!(
-            parse_single_unwrap("x0==1 ; x1==0"),
-            Expr::sequence(Expr::test(0, true), Expr::test(1, false))
+            parse_single_unwrap(arena, "x0==1 ; x1==0"),
+            Expr::sequence(
+                arena,
+                Expr::test(arena, 0, true),
+                Expr::test(arena, 1, false)
+            )
         );
     }
 
     #[test]
     fn test_union() {
+        let arena = &bumpalo::Bump::new();
         assert_eq!(
-            parse_single_unwrap("0 + 1"),
-            Expr::union(Expr::zero(), Expr::one())
+            parse_single_unwrap(arena, "0 + 1"),
+            Expr::union(arena, Expr::zero(arena), Expr::one(arena))
         );
     }
 
     #[test]
     fn test_parentheses() {
+        let arena = &bumpalo::Bump::new();
         assert_eq!(
-            parse_single_unwrap("(0+1)"),
-            Expr::union(Expr::zero(), Expr::one())
+            parse_single_unwrap(arena, "(0+1)"),
+            Expr::union(arena, Expr::zero(arena), Expr::one(arena))
         );
-        assert_eq!(parse_single_unwrap("~(0)"), Expr::complement(Expr::zero()));
+        assert_eq!(
+            parse_single_unwrap(arena, "~(0)"),
+            Expr::complement(arena, Expr::zero(arena))
+        );
     }
 
     #[test]
     fn test_star() {
-        assert_eq!(parse_single_unwrap("0*"), Expr::star(Expr::zero()));
+        let arena = &bumpalo::Bump::new();
         assert_eq!(
-            parse_single_unwrap("(x1==0)*"),
-            Expr::star(Expr::test(1, false))
+            parse_single_unwrap(arena, "0*"),
+            Expr::star(arena, Expr::zero(arena))
+        );
+        assert_eq!(
+            parse_single_unwrap(arena, "(x1==0)*"),
+            Expr::star(arena, Expr::test(arena, 1, false))
         );
     }
 
     #[test]
     fn test_ltl_operators() {
-        assert_eq!(parse_single_unwrap("X 0"), Expr::ltl_next(Expr::zero()));
+        let arena = &bumpalo::Bump::new();
+        assert_eq!(
+            parse_single_unwrap(arena, "X 0"),
+            Expr::ltl_next(arena, Expr::zero(arena))
+        );
         // F e = T U e
         assert_eq!(
-            parse_single_unwrap("F 0"),
-            Expr::ltl_until(Expr::top(), Expr::zero())
+            parse_single_unwrap(arena, "F 0"),
+            Expr::ltl_until(arena, Expr::top(arena), Expr::zero(arena))
         );
         // G e = !F!e = !(T U !e)
-        assert_eq!(parse_single_unwrap("G 0"), Expr::ltl_globally(Expr::zero()));
         assert_eq!(
-            parse_single_unwrap("0 U 1"),
-            Expr::ltl_until(Expr::zero(), Expr::one())
+            parse_single_unwrap(arena, "G 0"),
+            Expr::ltl_globally(arena, Expr::zero(arena))
+        );
+        assert_eq!(
+            parse_single_unwrap(arena, "0 U 1"),
+            Expr::ltl_until(arena, Expr::zero(arena), Expr::one(arena))
         );
         // e1 R e2 = !( !e1 U !e2 )
         assert_eq!(
-            parse_single_unwrap("0 R 1"),
-            Expr::complement(Expr::ltl_until(
-                Expr::complement(Expr::zero()),
-                Expr::complement(Expr::one())
-            ))
+            parse_single_unwrap(arena, "0 R 1"),
+            Expr::complement(
+                arena,
+                Expr::ltl_until(
+                    arena,
+                    Expr::complement(arena, Expr::zero(arena)),
+                    Expr::complement(arena, Expr::one(arena))
+                )
+            )
         );
     }
 
     #[test]
     fn test_empty_input() {
-        assert!(parse_all("").unwrap().is_empty());
-        assert!(parse_all("   ").unwrap().is_empty()); // Whitespace only
+        let arena = &bumpalo::Bump::new();
+        assert!(parse_all(arena, "").unwrap().is_empty());
+        assert!(parse_all(arena, "   ").unwrap().is_empty()); // Whitespace only
     }
 
     #[test]
     fn test_comments_only() {
-        assert!(parse_all("// this is a comment").unwrap().is_empty());
-        assert!(parse_all("// comment 1\n// comment 2").unwrap().is_empty());
+        let arena = &bumpalo::Bump::new();
+        assert!(parse_all(arena, "// this is a comment").unwrap().is_empty());
+        assert!(
+            parse_all(arena, "// comment 1\n// comment 2")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn test_expression_then_eof() {
-        assert_eq!(parse_single_unwrap("x7 == 0"), Expr::test(7, false));
+        let arena = &bumpalo::Bump::new();
+        assert_eq!(
+            parse_single_unwrap(arena, "x7 == 0"),
+            Expr::test(arena, 7, false)
+        );
     }
 
     #[test]
     fn test_invalid_token() {
-        assert!(parse_all("$").is_err());
-        assert!(parse_all("0 $").is_err());
+        let arena = &bumpalo::Bump::new();
+        assert!(parse_all(arena, "$").is_err());
+        assert!(parse_all(arena, "0 $").is_err());
     }
 
     #[test]
     fn test_incomplete_expressions() {
-        assert!(parse_all("x1 :=").is_err(), "Incomplete assignment");
-        assert!(parse_all("x1 ==").is_err(), "Incomplete test");
-        assert!(parse_all("0 +").is_err(), "Incomplete addition");
-        assert!(parse_all("(").is_err(), "Unclosed parenthesis");
-        assert!(parse_all("0 U").is_err(), "Incomplete Until");
+        let arena = &bumpalo::Bump::new();
+        assert!(parse_all(arena, "x1 :=").is_err(), "Incomplete assignment");
+        assert!(parse_all(arena, "x1 ==").is_err(), "Incomplete test");
+        assert!(parse_all(arena, "0 +").is_err(), "Incomplete addition");
+        assert!(parse_all(arena, "(").is_err(), "Unclosed parenthesis");
+        assert!(parse_all(arena, "0 U").is_err(), "Incomplete Until");
     }
 
     #[test]
     fn test_unexpected_token_after_expr() {
+        let arena = &bumpalo::Bump::new();
         // parse_expressions expects 'end' or EOF after an expression if there are multiple.
         // If single expression, it should be fine.
         assert!(
-            parse_all("0 1").is_err(),
+            parse_all(arena, "0 1").is_err(),
             "Expected 'end' or EOF after expr, not another expr"
         );
     }
 
     #[test]
     fn test_complex_expression() {
+        let arena = &bumpalo::Bump::new();
         let expr_str = "(x1:=0 ; (T* & ~(x2==1))) + F (x3==0 U x4==1)";
-        assert!(parse_all(expr_str).is_ok());
+        assert!(parse_all(arena, expr_str).is_ok());
         // More detailed check if needed by comparing the resulting Exp structure.
     }
 
     #[test]
     fn test_syntax_errors() {
+        let arena = &bumpalo::Bump::new();
         let test_cases = vec![
             "x := 0",
             "x1 :=",
@@ -2444,11 +2531,11 @@ mod tests {
 
         println!("--- Checking Syntax Error Messages ---");
         for (i, input) in test_cases.iter().enumerate() {
-            match parse_all(input) {
+            match parse_all(arena, input) {
                 Ok(exprs) => {
                     if input.trim() == "0 // comment" {
                         // This one is valid
-                        if exprs.len() == 1 && exprs[0] == Expr::zero() {
+                        if exprs.len() == 1 && exprs[0] == Expr::zero(arena) {
                             println!(
                                 "{}. Input: {:<15} -> PASSED (Correctly parsed)",
                                 i + 1,
@@ -2483,378 +2570,439 @@ mod tests {
 
     #[test]
     fn test_precedence_postfix_vs_prefix() {
+        let arena = &bumpalo::Bump::new();
         // Postfix should bind tighter than prefix
         // !a* should be !(a*), not (!a)*
-        assert_eq!(parse_single_unwrap("~0*"), parse_single_unwrap("~(0*)"));
-        assert_eq!(parse_single_unwrap("X 1*"), parse_single_unwrap("X (1*)"));
-        assert_eq!(parse_single_unwrap("F T*"), parse_single_unwrap("F (T*)"));
         assert_eq!(
-            parse_single_unwrap("G dup*"),
-            parse_single_unwrap("G (dup*)")
+            parse_single_unwrap(arena, "~0*"),
+            parse_single_unwrap(arena, "~(0*)")
+        );
+        assert_eq!(
+            parse_single_unwrap(arena, "X 1*"),
+            parse_single_unwrap(arena, "X (1*)")
+        );
+        assert_eq!(
+            parse_single_unwrap(arena, "F T*"),
+            parse_single_unwrap(arena, "F (T*)")
+        );
+        assert_eq!(
+            parse_single_unwrap(arena, "G dup*"),
+            parse_single_unwrap(arena, "G (dup*)")
         );
     }
 
     #[test]
     fn test_precedence_prefix_vs_infix() {
+        let arena = &bumpalo::Bump::new();
         // Prefix should bind tighter than infix
         // !a + b should be (!a) + b, not !(a + b)
         assert_eq!(
-            parse_single_unwrap("~0 + 1"),
-            parse_single_unwrap("(~0) + 1")
+            parse_single_unwrap(arena, "~0 + 1"),
+            parse_single_unwrap(arena, "(~0) + 1")
         );
         assert_eq!(
-            parse_single_unwrap("X 0 & 1"),
-            parse_single_unwrap("(X 0) & 1")
+            parse_single_unwrap(arena, "X 0 & 1"),
+            parse_single_unwrap(arena, "(X 0) & 1")
         );
         assert_eq!(
-            parse_single_unwrap("F 0 ; 1"),
-            parse_single_unwrap("(F 0) ; 1")
+            parse_single_unwrap(arena, "F 0 ; 1"),
+            parse_single_unwrap(arena, "(F 0) ; 1")
         );
         assert_eq!(
-            parse_single_unwrap("G 0 U 1"),
-            parse_single_unwrap("(G 0) U 1")
+            parse_single_unwrap(arena, "G 0 U 1"),
+            parse_single_unwrap(arena, "(G 0) U 1")
         );
     }
 
     #[test]
     fn test_precedence_infix_vs_postfix() {
+        let arena = &bumpalo::Bump::new();
         // Postfix should bind tighter than infix
         // a + b* should be a + (b*), not (a + b)*
         assert_eq!(
-            parse_single_unwrap("0 + 1*"),
-            parse_single_unwrap("0 + (1*)")
+            parse_single_unwrap(arena, "0 + 1*"),
+            parse_single_unwrap(arena, "0 + (1*)")
         );
         assert_eq!(
-            parse_single_unwrap("0 & T*"),
-            parse_single_unwrap("0 & (T*)")
+            parse_single_unwrap(arena, "0 & T*"),
+            parse_single_unwrap(arena, "0 & (T*)")
         );
         assert_eq!(
-            parse_single_unwrap("0 ; dup*"),
-            parse_single_unwrap("0 ; (dup*)")
+            parse_single_unwrap(arena, "0 ; dup*"),
+            parse_single_unwrap(arena, "0 ; (dup*)")
         );
         assert_eq!(
-            parse_single_unwrap("0 U 1*"),
-            parse_single_unwrap("0 U (1*)")
+            parse_single_unwrap(arena, "0 U 1*"),
+            parse_single_unwrap(arena, "0 U (1*)")
         );
     }
 
     #[test]
     fn test_precedence_intersection_vs_sequence() {
+        let arena = &bumpalo::Bump::new();
         // Intersection should bind tighter than sequence
         // a & b ; c should be (a & b) ; c
         assert_eq!(
-            parse_single_unwrap("0 & 1 ; T"),
-            parse_single_unwrap("(0 & 1) ; T")
+            parse_single_unwrap(arena, "0 & 1 ; T"),
+            parse_single_unwrap(arena, "(0 & 1) ; T")
         );
         // a ; b & c should be a ; (b & c)
         assert_eq!(
-            parse_single_unwrap("0 ; 1 & T"),
-            parse_single_unwrap("0 ; (1 & T)")
+            parse_single_unwrap(arena, "0 ; 1 & T"),
+            parse_single_unwrap(arena, "0 ; (1 & T)")
         );
     }
 
     #[test]
     fn test_precedence_sequence_vs_additive() {
+        let arena = &bumpalo::Bump::new();
         // Sequence should bind tighter than additive (this was the original issue)
         // a ; b + c should be (a ; b) + c
         assert_eq!(
-            parse_single_unwrap("0 ; 1 + T"),
-            parse_single_unwrap("(0 ; 1) + T")
+            parse_single_unwrap(arena, "0 ; 1 + T"),
+            parse_single_unwrap(arena, "(0 ; 1) + T")
         );
         // a + b ; c should be a + (b ; c)
         assert_eq!(
-            parse_single_unwrap("0 + 1 ; T"),
-            parse_single_unwrap("0 + (1 ; T)")
+            parse_single_unwrap(arena, "0 + 1 ; T"),
+            parse_single_unwrap(arena, "0 + (1 ; T)")
         );
 
         // Same for other additive operators
         assert_eq!(
-            parse_single_unwrap("0 ; 1 ^ T"),
-            parse_single_unwrap("(0 ; 1) ^ T")
+            parse_single_unwrap(arena, "0 ; 1 ^ T"),
+            parse_single_unwrap(arena, "(0 ; 1) ^ T")
         );
         assert_eq!(
-            parse_single_unwrap("0 ; 1 - T"),
-            parse_single_unwrap("(0 ; 1) - T")
+            parse_single_unwrap(arena, "0 ; 1 - T"),
+            parse_single_unwrap(arena, "(0 ; 1) - T")
         );
     }
 
     #[test]
     fn test_precedence_additive_vs_until() {
+        let arena = &bumpalo::Bump::new();
         // Additive should bind tighter than until/release
         // a + b U c should be (a + b) U c
         assert_eq!(
-            parse_single_unwrap("0 + 1 U T"),
-            parse_single_unwrap("(0 + 1) U T")
+            parse_single_unwrap(arena, "0 + 1 U T"),
+            parse_single_unwrap(arena, "(0 + 1) U T")
         );
         // a U b + c should be a U (b + c)
         assert_eq!(
-            parse_single_unwrap("0 U 1 + T"),
-            parse_single_unwrap("0 U (1 + T)")
+            parse_single_unwrap(arena, "0 U 1 + T"),
+            parse_single_unwrap(arena, "0 U (1 + T)")
         );
 
         // Same for release
         assert_eq!(
-            parse_single_unwrap("0 + 1 R T"),
-            parse_single_unwrap("(0 + 1) R T")
+            parse_single_unwrap(arena, "0 + 1 R T"),
+            parse_single_unwrap(arena, "(0 + 1) R T")
         );
     }
 
     #[test]
     fn test_associativity_left_associative() {
+        let arena = &bumpalo::Bump::new();
         // Left-associative operators: &, ;, +, ^, -
 
         // Intersection
         assert_eq!(
-            parse_single_unwrap("0 & 1 & T"),
-            parse_single_unwrap("(0 & 1) & T")
+            parse_single_unwrap(arena, "0 & 1 & T"),
+            parse_single_unwrap(arena, "(0 & 1) & T")
         );
 
         // Sequence
         assert_eq!(
-            parse_single_unwrap("0 ; 1 ; T"),
-            parse_single_unwrap("(0 ; 1) ; T")
+            parse_single_unwrap(arena, "0 ; 1 ; T"),
+            parse_single_unwrap(arena, "(0 ; 1) ; T")
         );
 
         // Union
         assert_eq!(
-            parse_single_unwrap("0 + 1 + T"),
-            parse_single_unwrap("(0 + 1) + T")
+            parse_single_unwrap(arena, "0 + 1 + T"),
+            parse_single_unwrap(arena, "(0 + 1) + T")
         );
 
         // XOR
         assert_eq!(
-            parse_single_unwrap("0 ^ 1 ^ T"),
-            parse_single_unwrap("(0 ^ 1) ^ T")
+            parse_single_unwrap(arena, "0 ^ 1 ^ T"),
+            parse_single_unwrap(arena, "(0 ^ 1) ^ T")
         );
 
         // Difference
         assert_eq!(
-            parse_single_unwrap("0 - 1 - T"),
-            parse_single_unwrap("(0 - 1) - T")
+            parse_single_unwrap(arena, "0 - 1 - T"),
+            parse_single_unwrap(arena, "(0 - 1) - T")
         );
     }
 
     #[test]
     fn test_associativity_right_associative() {
+        let arena = &bumpalo::Bump::new();
         // Right-associative operators: U, R, prefix operators
 
         // Until
         assert_eq!(
-            parse_single_unwrap("0 U 1 U T"),
-            parse_single_unwrap("0 U (1 U T)")
+            parse_single_unwrap(arena, "0 U 1 U T"),
+            parse_single_unwrap(arena, "0 U (1 U T)")
         );
 
         // Release
         assert_eq!(
-            parse_single_unwrap("0 R 1 R T"),
-            parse_single_unwrap("0 R (1 R T)")
+            parse_single_unwrap(arena, "0 R 1 R T"),
+            parse_single_unwrap(arena, "0 R (1 R T)")
         );
 
         // Prefix operators
-        assert_eq!(parse_single_unwrap("~~0"), parse_single_unwrap("~(~0)"));
-        assert_eq!(parse_single_unwrap("~X 0"), parse_single_unwrap("~(X 0)"));
-        assert_eq!(parse_single_unwrap("X F 0"), parse_single_unwrap("X (F 0)"));
+        assert_eq!(
+            parse_single_unwrap(arena, "~~0"),
+            parse_single_unwrap(arena, "~(~0)")
+        );
+        assert_eq!(
+            parse_single_unwrap(arena, "~X 0"),
+            parse_single_unwrap(arena, "~(X 0)")
+        );
+        assert_eq!(
+            parse_single_unwrap(arena, "X F 0"),
+            parse_single_unwrap(arena, "X (F 0)")
+        );
     }
 
     #[test]
     fn test_associativity_postfix() {
+        let arena = &bumpalo::Bump::new();
         // Multiple stars should be left-associative: a** = (a*)*
-        assert_eq!(parse_single_unwrap("0**"), parse_single_unwrap("(0*)*"));
-        assert_eq!(parse_single_unwrap("T***"), parse_single_unwrap("((T*)*)*"));
+        assert_eq!(
+            parse_single_unwrap(arena, "0**"),
+            parse_single_unwrap(arena, "(0*)*")
+        );
+        assert_eq!(
+            parse_single_unwrap(arena, "T***"),
+            parse_single_unwrap(arena, "((T*)*)*")
+        );
     }
 
     #[test]
     fn test_mixed_precedence_complex() {
+        let arena = &bumpalo::Bump::new();
         // Complex mixed precedence tests
 
         // !a* + b ; c & d U e should be ((!((a)*)) + (b ; (c & d))) U e
         assert_eq!(
-            parse_single_unwrap("~0* + 1 ; T & dup U x1==0"),
-            parse_single_unwrap("(~(0*) + (1 ; (T & dup))) U x1==0")
+            parse_single_unwrap(arena, "~0* + 1 ; T & dup U x1==0"),
+            parse_single_unwrap(arena, "(~(0*) + (1 ; (T & dup))) U x1==0")
         );
 
         // a & !b* ; c + d should be ((a & (!(b*))) ; c) + d
         // Precedence: postfix (*), prefix (!), intersection (&), sequence (;), additive (+)
         assert_eq!(
-            parse_single_unwrap("0 & ~1* ; T + dup"),
-            parse_single_unwrap("((0 & ~(1*)) ; T) + dup")
+            parse_single_unwrap(arena, "0 & ~1* ; T + dup"),
+            parse_single_unwrap(arena, "((0 & ~(1*)) ; T) + dup")
         );
     }
 
     #[test]
     fn test_parentheses_override_precedence() {
+        let arena = &bumpalo::Bump::new();
         // Parentheses should override precedence - test meaningful differences
 
         // Show that parentheses change the default precedence behavior
         assert_ne!(
-            parse_single_unwrap("(0 + 1) ; T"),
-            parse_single_unwrap("0 + 1 ; T")
+            parse_single_unwrap(arena, "(0 + 1) ; T"),
+            parse_single_unwrap(arena, "0 + 1 ; T")
         ); // Default: 0 + (1 ; T)
 
         assert_ne!(
-            parse_single_unwrap("0 + (1 ; T)"),
-            parse_single_unwrap("0 ; 1 + T")
+            parse_single_unwrap(arena, "0 + (1 ; T)"),
+            parse_single_unwrap(arena, "0 ; 1 + T")
         ); // Default: (0 ; 1) + T
 
-        assert_ne!(parse_single_unwrap("(~0)*"), parse_single_unwrap("~0*")); // Default: ~(0*)
+        assert_ne!(
+            parse_single_unwrap(arena, "(~0)*"),
+            parse_single_unwrap(arena, "~0*")
+        ); // Default: ~(0*)
 
         assert_ne!(
-            parse_single_unwrap("(0 U 1) + T"),
-            parse_single_unwrap("0 U 1 + T")
+            parse_single_unwrap(arena, "(0 U 1) + T"),
+            parse_single_unwrap(arena, "0 U 1 + T")
         ); // Default: 0 U (1 + T)
     }
 
     #[test]
     fn test_field_operations_precedence() {
+        let arena = &bumpalo::Bump::new();
         // Field operations should be atomic (highest precedence)
         assert_eq!(
-            parse_single_unwrap("x1 := 0 + x2 == 1"),
-            parse_single_unwrap("(x1 := 0) + (x2 == 1)")
+            parse_single_unwrap(arena, "x1 := 0 + x2 == 1"),
+            parse_single_unwrap(arena, "(x1 := 0) + (x2 == 1)")
         );
         assert_eq!(
-            parse_single_unwrap("~x1 := 0"),
-            parse_single_unwrap("~(x1 := 0)")
+            parse_single_unwrap(arena, "~x1 := 0"),
+            parse_single_unwrap(arena, "~(x1 := 0)")
         );
         assert_eq!(
-            parse_single_unwrap("x1 == 1*"),
-            parse_single_unwrap("(x1 == 1)*")
+            parse_single_unwrap(arena, "x1 == 1*"),
+            parse_single_unwrap(arena, "(x1 == 1)*")
         );
     }
 
     #[test]
     fn test_precedence_edge_cases() {
+        let arena = &bumpalo::Bump::new();
         // Edge cases that might be tricky
 
         // Prefix followed by postfix should work
-        assert_eq!(parse_single_unwrap("~T*"), parse_single_unwrap("~(T*)"));
+        assert_eq!(
+            parse_single_unwrap(arena, "~T*"),
+            parse_single_unwrap(arena, "~(T*)")
+        );
 
         // Multiple prefix operators
         assert_eq!(
-            parse_single_unwrap("~~X F 0"),
-            parse_single_unwrap("~(~(X (F 0)))")
+            parse_single_unwrap(arena, "~~X F 0"),
+            parse_single_unwrap(arena, "~(~(X (F 0)))")
         );
 
         // Mixing all operator types
         assert_eq!(
-            parse_single_unwrap("~(x1:=0)* + T ; dup & 1 U 0"),
-            parse_single_unwrap("(~(x1:=0)* + (T ; (dup & 1))) U 0")
+            parse_single_unwrap(arena, "~(x1:=0)* + T ; dup & 1 U 0"),
+            parse_single_unwrap(arena, "(~(x1:=0)* + (T ; (dup & 1))) U 0")
         );
     }
 
     #[test]
     fn test_original_user_issue() {
+        let arena = &bumpalo::Bump::new();
         // Test the specific issue reported by the user:
         // (a ; b + c) should be parsed as (a ; b) + c, not a ; (b + c)
 
         // Using concrete expressions to make the test clearer
         assert_eq!(
-            parse_single_unwrap("x1==0 ; x2==1 + T"),
-            parse_single_unwrap("(x1==0 ; x2==1) + T")
+            parse_single_unwrap(arena, "x1==0 ; x2==1 + T"),
+            parse_single_unwrap(arena, "(x1==0 ; x2==1) + T")
         );
 
         // Verify the opposite case with parentheses
         assert_eq!(
-            parse_single_unwrap("x1==0 ; (x2==1 + T)"),
-            parse_single_unwrap("x1==0 ; (x2==1 + T)")
+            parse_single_unwrap(arena, "x1==0 ; (x2==1 + T)"),
+            parse_single_unwrap(arena, "x1==0 ; (x2==1 + T)")
         ); // Already correct
 
         // They should be different expressions
         assert_ne!(
-            parse_single_unwrap("x1==0 ; x2==1 + T"),
-            parse_single_unwrap("x1==0 ; (x2==1 + T)")
+            parse_single_unwrap(arena, "x1==0 ; x2==1 + T"),
+            parse_single_unwrap(arena, "x1==0 ; (x2==1 + T)")
         );
 
         // More examples showing the fix
         assert_eq!(
-            parse_single_unwrap("0 ; 1 + T"),
-            parse_single_unwrap("(0 ; 1) + T")
+            parse_single_unwrap(arena, "0 ; 1 + T"),
+            parse_single_unwrap(arena, "(0 ; 1) + T")
         );
         assert_eq!(
-            parse_single_unwrap("dup ; T ^ 1"),
-            parse_single_unwrap("(dup ; T) ^ 1")
+            parse_single_unwrap(arena, "dup ; T ^ 1"),
+            parse_single_unwrap(arena, "(dup ; T) ^ 1")
         );
         assert_eq!(
-            parse_single_unwrap("T ; 0 - 1"),
-            parse_single_unwrap("(T ; 0) - 1")
+            parse_single_unwrap(arena, "T ; 0 - 1"),
+            parse_single_unwrap(arena, "(T ; 0) - 1")
         );
     }
 
     #[test]
     fn test_bit_range_parsing() {
+        let arena = &bumpalo::Bump::new();
         // Test parsing bit range assignments
         assert_eq!(
-            parse_single_unwrap("x[0..8] := 255"),
-            Expr::bit_range_assign(0, 8, vec![true, true, true, true, true, true, true, true])
+            parse_single_unwrap(arena, "x[0..8] := 255"),
+            Expr::bit_range_assign(
+                arena,
+                0,
+                8,
+                vec![true, true, true, true, true, true, true, true]
+            )
         );
 
         // Test parsing bit range pattern matches
         assert_eq!(
-            parse_single_unwrap("x[2..4] ~ 3"),
-            Expr::bit_range_match(2, 4, Pattern::Exact(vec![true, true]))
+            parse_single_unwrap(arena, "x[2..4] ~ 3"),
+            Expr::bit_range_match(arena, 2, 4, Pattern::Exact(&[true, true]))
         );
 
         // Test with zero
         assert_eq!(
-            parse_single_unwrap("x[0..4] ~ 0"),
-            Expr::bit_range_match(0, 4, Pattern::Exact(vec![false, false, false, false]))
+            parse_single_unwrap(arena, "x[0..4] ~ 0"),
+            Expr::bit_range_match(arena, 0, 4, Pattern::Exact(&[false, false, false, false]))
         );
 
         // Test single bit range
         assert_eq!(
-            parse_single_unwrap("x[5..6] := 1"),
-            Expr::bit_range_assign(5, 6, vec![true])
+            parse_single_unwrap(arena, "x[5..6] := 1"),
+            Expr::bit_range_assign(arena, 5, 6, vec![true])
         );
     }
 
     #[test]
     fn test_bit_range_in_expression() {
+        let arena = &bumpalo::Bump::new();
         // Test bit ranges in larger expressions
-        let expr = parse_single_unwrap("x[0..4] ~ 5 + x[4..8] := 10");
+        let expr = parse_single_unwrap(arena, "x[0..4] ~ 5 + x[4..8] := 10");
         let expected = Expr::union(
-            Expr::bit_range_match(0, 4, Pattern::Exact(vec![true, false, true, false])),
-            Expr::bit_range_assign(4, 8, vec![false, true, false, true]),
+            arena,
+            Expr::bit_range_match(arena, 0, 4, Pattern::Exact(&[true, false, true, false])),
+            Expr::bit_range_assign(arena, 4, 8, vec![false, true, false, true]),
         );
         assert_eq!(expr, expected);
 
         // Test with sequence
-        let expr2 = parse_single_unwrap("x[0..2] := 3 ; x[2..4] ~ 0");
+        let expr2 = parse_single_unwrap(arena, "x[0..2] := 3 ; x[2..4] ~ 0");
         let expected2 = Expr::sequence(
-            Expr::bit_range_assign(0, 2, vec![true, true]),
-            Expr::bit_range_match(2, 4, Pattern::Exact(vec![false, false])),
+            arena,
+            Expr::bit_range_assign(arena, 0, 2, vec![true, true]),
+            Expr::bit_range_match(arena, 2, 4, Pattern::Exact(&[false, false])),
         );
         assert_eq!(expr2, expected2);
     }
 
     #[test]
     fn test_literal_formats() {
+        let arena = &bumpalo::Bump::new();
         // Test binary literals
-        let expr1 = parse_single_unwrap("x[0..4] := 0b1010");
+        let expr1 = parse_single_unwrap(arena, "x[0..4] := 0b1010");
         assert_eq!(
             expr1,
-            Expr::bit_range_assign(0, 4, vec![false, true, false, true])
+            Expr::bit_range_assign(arena, 0, 4, vec![false, true, false, true])
         );
 
         // Test hexadecimal literals
-        let expr2 = parse_single_unwrap("x[0..8] := 0xFF");
+        let expr2 = parse_single_unwrap(arena, "x[0..8] := 0xFF");
         assert_eq!(
             expr2,
-            Expr::bit_range_assign(0, 8, vec![true, true, true, true, true, true, true, true])
+            Expr::bit_range_assign(
+                arena,
+                0,
+                8,
+                vec![true, true, true, true, true, true, true, true]
+            )
         );
 
         // Test IP address literals (192.168.1.1 = 0xC0A80101)
-        let expr3 = parse_single_unwrap("x[0..32] := 192.168.1.1");
+        let expr3 = parse_single_unwrap(arena, "x[0..32] := 192.168.1.1");
         // IP addresses are converted in big-endian format: 192.168.1.1 = 0xC0A80101
         // But our bit vector is little-endian, so bit 0 is the LSB
         // 0xC0A80101 = 3232235777 in decimal
         let ip_num = 0xC0A80101u32;
         let ip_bits: Vec<bool> = (0..32).map(|i| (ip_num >> i) & 1 == 1).collect();
-        assert_eq!(expr3, Expr::bit_range_assign(0, 32, ip_bits));
+        assert_eq!(expr3, Expr::bit_range_assign(arena, 0, 32, ip_bits));
 
         // Test mixed formats in compound expression
-        let expr4 = parse_single_unwrap("x[0..4] ~ 0b1100 + x[4..12] := 0xF0");
+        let expr4 = parse_single_unwrap(arena, "x[0..4] ~ 0b1100 + x[4..12] := 0xF0");
         let expected4 = Expr::union(
-            Expr::bit_range_match(0, 4, Pattern::Exact(vec![false, false, true, true])),
+            arena,
+            Expr::bit_range_match(arena, 0, 4, Pattern::Exact(&[false, false, true, true])),
             Expr::bit_range_assign(
+                arena,
                 4,
                 12,
                 vec![false, false, false, false, true, true, true, true],
@@ -2865,21 +3013,23 @@ mod tests {
 
     #[test]
     fn test_literal_edge_cases() {
+        let arena = &bumpalo::Bump::new();
         // Test single bits
         assert_eq!(
-            parse_single_unwrap("x[0..1] := 0b1"),
-            Expr::bit_range_assign(0, 1, vec![true])
+            parse_single_unwrap(arena, "x[0..1] := 0b1"),
+            Expr::bit_range_assign(arena, 0, 1, vec![true])
         );
 
         assert_eq!(
-            parse_single_unwrap("x[5..6] ~ 0"),
-            Expr::bit_range_match(5, 6, Pattern::Exact(vec![false]))
+            parse_single_unwrap(arena, "x[5..6] ~ 0"),
+            Expr::bit_range_match(arena, 5, 6, Pattern::Exact(&[false]))
         );
 
         // Test larger hex values
         assert_eq!(
-            parse_single_unwrap("x[0..16] := 0xABCD"),
+            parse_single_unwrap(arena, "x[0..16] := 0xABCD"),
             Expr::bit_range_assign(
+                arena,
                 0,
                 16,
                 vec![
@@ -2892,50 +3042,55 @@ mod tests {
 
     #[test]
     fn test_bit_range_number_ranges() {
+        let arena = &bumpalo::Bump::new();
         // Test range patterns starting with 0 and 1 like x[0..3] ~ 1-3
-        let expr1 = parse_single_unwrap("x[0..3] ~ 1-3");
+        let expr1 = parse_single_unwrap(arena, "x[0..3] ~ 1-3");
         let expected1 = Expr::bit_range_match(
+            arena,
             0,
             3,
             Pattern::IpRange {
-                start: vec![true, false, false], // 1 in 3 bits (LSB first)
-                end: vec![true, true, false],    // 3 in 3 bits (LSB first)
+                start: &[true, false, false], // 1 in 3 bits (LSB first)
+                end: &[true, true, false],    // 3 in 3 bits (LSB first)
             },
         );
         assert_eq!(expr1, expected1);
 
         // Test range starting with 0
-        let expr2 = parse_single_unwrap("x[0..4] ~ 0-7");
+        let expr2 = parse_single_unwrap(arena, "x[0..4] ~ 0-7");
         let expected2 = Expr::bit_range_match(
+            arena,
             0,
             4,
             Pattern::IpRange {
-                start: vec![false, false, false, false], // 0 in 4 bits
-                end: vec![true, true, true, false],      // 7 in 4 bits (LSB first)
+                start: &[false, false, false, false], // 0 in 4 bits
+                end: &[true, true, true, false],      // 7 in 4 bits (LSB first)
             },
         );
         assert_eq!(expr2, expected2);
 
         // Test range with single bit
-        let expr3 = parse_single_unwrap("x[5..6] ~ 0-1");
+        let expr3 = parse_single_unwrap(arena, "x[5..6] ~ 0-1");
         let expected3 = Expr::bit_range_match(
+            arena,
             5,
             6,
             Pattern::IpRange {
-                start: vec![false], // 0 in 1 bit
-                end: vec![true],    // 1 in 1 bit
+                start: &[false], // 0 in 1 bit
+                end: &[true],    // 1 in 1 bit
             },
         );
         assert_eq!(expr3, expected3);
 
         // Test the specific requested case: x[0..3] ~ 1-4 (needs 4 bits for range 1-4)
-        let expr4 = parse_single_unwrap("x[0..4] ~ 1-4");
+        let expr4 = parse_single_unwrap(arena, "x[0..4] ~ 1-4");
         let expected4 = Expr::bit_range_match(
+            arena,
             0,
             4,
             Pattern::IpRange {
-                start: vec![true, false, false, false], // 1 in 4 bits (LSB first)
-                end: vec![false, false, true, false],   // 4 in 4 bits (LSB first)
+                start: &[true, false, false, false], // 1 in 4 bits (LSB first)
+                end: &[false, false, true, false],   // 4 in 4 bits (LSB first)
             },
         );
         assert_eq!(expr4, expected4);
@@ -2943,67 +3098,84 @@ mod tests {
 
     #[test]
     fn test_let_parsing() {
+        let arena = &bumpalo::Bump::new();
         // Basic let binding
-        let expr = parse_single_unwrap("let x = 1 in x + 0");
+        let expr = parse_single_unwrap(arena, "let x = 1 in x + 0");
         assert_eq!(
             expr,
             Expr::let_in(
-                "x".to_string(),
-                Expr::one(),
-                Expr::union(Expr::var("x".to_string()), Expr::zero())
+                arena,
+                "x",
+                Expr::one(arena),
+                Expr::union(arena, Expr::var(arena, "x"), Expr::zero(arena))
             )
         );
 
         // Let with assignment
-        let expr = parse_single_unwrap("let config = x0 := 1 in config ; x1 := 0");
+        let expr = parse_single_unwrap(arena, "let config = x0 := 1 in config ; x1 := 0");
         assert_eq!(
             expr,
             Expr::let_in(
-                "config".to_string(),
-                Expr::assign(0, true),
-                Expr::sequence(Expr::var("config".to_string()), Expr::assign(1, false))
+                arena,
+                "config",
+                Expr::assign(arena, 0, true),
+                Expr::sequence(
+                    arena,
+                    Expr::var(arena, "config"),
+                    Expr::assign(arena, 1, false)
+                )
             )
         );
 
         // Let with test
-        let expr = parse_single_unwrap("let test = x0 == 1 in test & x1 == 0");
+        let expr = parse_single_unwrap(arena, "let test = x0 == 1 in test & x1 == 0");
         assert_eq!(
             expr,
             Expr::let_in(
-                "test".to_string(),
-                Expr::test(0, true),
-                Expr::intersect(Expr::var("test".to_string()), Expr::test(1, false))
+                arena,
+                "test",
+                Expr::test(arena, 0, true),
+                Expr::intersect(arena, Expr::var(arena, "test"), Expr::test(arena, 1, false))
             )
         );
     }
 
     #[test]
     fn test_nested_let_parsing() {
+        let arena = &bumpalo::Bump::new();
         // Nested let bindings
-        let expr = parse_single_unwrap("let x = 0 in let y = 1 in x + y");
+        let expr = parse_single_unwrap(arena, "let x = 0 in let y = 1 in x + y");
         assert_eq!(
             expr,
             Expr::let_in(
-                "x".to_string(),
-                Expr::zero(),
+                arena,
+                "x",
+                Expr::zero(arena),
                 Expr::let_in(
-                    "y".to_string(),
-                    Expr::one(),
-                    Expr::union(Expr::var("x".to_string()), Expr::var("y".to_string()))
+                    arena,
+                    "y",
+                    Expr::one(arena),
+                    Expr::union(arena, Expr::var(arena, "x"), Expr::var(arena, "y"))
                 )
             )
         );
 
         // Let with complex expression
-        let expr = parse_single_unwrap("let p = (x0 := 1 ; x1 := 0) in p + p*");
+        let expr = parse_single_unwrap(arena, "let p = (x0 := 1 ; x1 := 0) in p + p*");
         assert_eq!(
             expr,
             Expr::let_in(
-                "p".to_string(),
-                Expr::sequence(Expr::assign(0, true), Expr::assign(1, false)),
+                arena,
+                "p",
+                Expr::sequence(
+                    arena,
+                    Expr::assign(arena, 0, true),
+                    Expr::assign(arena, 1, false)
+                ),
                 Expr::union(
-                    Expr::var("p".to_string()),
-                    Expr::star(Expr::var("p".to_string()))
+                    arena,
+                    Expr::var(arena, "p"),
+                    Expr::star(arena, Expr::var(arena, "p"))
                 )
             )
         );
@@ -3011,112 +3183,117 @@ mod tests {
 
     #[test]
     fn test_let_with_various_names() {
+        let arena = &bumpalo::Bump::new();
         // Let with various valid variable names
-        let expr = parse_single_unwrap("let myVar = 1 in myVar");
+        let expr = parse_single_unwrap(arena, "let myVar = 1 in myVar");
+        assert_eq!(
+            expr,
+            Expr::let_in(arena, "myVar", Expr::one(arena), Expr::var(arena, "myVar"))
+        );
+
+        let expr = parse_single_unwrap(arena, "let test_var = 0 in test_var");
         assert_eq!(
             expr,
             Expr::let_in(
-                "myVar".to_string(),
-                Expr::one(),
-                Expr::var("myVar".to_string())
+                arena,
+                "test_var",
+                Expr::zero(arena),
+                Expr::var(arena, "test_var")
             )
         );
 
-        let expr = parse_single_unwrap("let test_var = 0 in test_var");
+        let expr = parse_single_unwrap(arena, "let v123 = x0 := 1 in v123");
         assert_eq!(
             expr,
             Expr::let_in(
-                "test_var".to_string(),
-                Expr::zero(),
-                Expr::var("test_var".to_string())
-            )
-        );
-
-        let expr = parse_single_unwrap("let v123 = x0 := 1 in v123");
-        assert_eq!(
-            expr,
-            Expr::let_in(
-                "v123".to_string(),
-                Expr::assign(0, true),
-                Expr::var("v123".to_string())
+                arena,
+                "v123",
+                Expr::assign(arena, 0, true),
+                Expr::var(arena, "v123")
             )
         );
     }
 
     #[test]
     fn test_let_precedence() {
+        let arena = &bumpalo::Bump::new();
         // Let has low precedence, binds to the right
-        let expr = parse_single_unwrap("0 + let x = 1 in x");
+        let expr = parse_single_unwrap(arena, "0 + let x = 1 in x");
         assert_eq!(
             expr,
             Expr::union(
-                Expr::zero(),
-                Expr::let_in("x".to_string(), Expr::one(), Expr::var("x".to_string()))
+                arena,
+                Expr::zero(arena),
+                Expr::let_in(arena, "x", Expr::one(arena), Expr::var(arena, "x"))
             )
         );
 
         // Parentheses override precedence
-        let expr = parse_single_unwrap("(let x = 1 in x) + 0");
+        let expr = parse_single_unwrap(arena, "(let x = 1 in x) + 0");
         assert_eq!(
             expr,
             Expr::union(
-                Expr::let_in("x".to_string(), Expr::one(), Expr::var("x".to_string())),
-                Expr::zero()
+                arena,
+                Expr::let_in(arena, "x", Expr::one(arena), Expr::var(arena, "x")),
+                Expr::zero(arena)
             )
         );
     }
 
     #[test]
     fn test_let_errors() {
+        let arena = &bumpalo::Bump::new();
         // Missing 'in' keyword
-        assert!(parse_all("let x = 1 x").is_err());
+        assert!(parse_all(arena, "let x = 1 x").is_err());
 
         // Missing body
-        assert!(parse_all("let x = 1 in").is_err());
+        assert!(parse_all(arena, "let x = 1 in").is_err());
 
         // Missing definition
-        assert!(parse_all("let x = in 1").is_err());
+        assert!(parse_all(arena, "let x = in 1").is_err());
 
         // Missing variable name
-        assert!(parse_all("let = 1 in 0").is_err());
+        assert!(parse_all(arena, "let = 1 in 0").is_err());
 
         // Invalid variable name
-        assert!(parse_all("let 123 = 1 in 0").is_err());
+        assert!(parse_all(arena, "let 123 = 1 in 0").is_err());
     }
 
     #[test]
     fn test_bit_range_alias_parsing() {
+        let arena = &bumpalo::Bump::new();
         // Basic bit range alias
-        let expr = parse_single_unwrap("let ip = &x[0..32] in ip := 192.168.1.1");
+        let expr = parse_single_unwrap(arena, "let ip = &x[0..32] in ip := 192.168.1.1");
         // IP address 192.168.1.1 in little-endian bit representation
         // Using the same conversion as in test_literal_formats
         let ip_num = 0xC0A80101u32; // 192.168.1.1 in hex
         let ip_bits: Vec<bool> = (0..32).map(|i| (ip_num >> i) & 1 == 1).collect();
         assert_eq!(
             expr,
-            Expr::let_bit_range(
-                "ip".to_string(),
-                0,
-                32,
-                Expr::var_assign("ip".to_string(), ip_bits)
-            )
+            Expr::let_bit_range(arena, "ip", 0, 32, Expr::var_assign(arena, "ip", ip_bits))
         );
 
         // Bit range alias with test
-        let expr = parse_single_unwrap("let port = &x[32..48] in port ~ 80");
+        let expr = parse_single_unwrap(arena, "let port = &x[32..48] in port ~ 80");
         let port_bits = vec![false, false, false, false, true, false, true]; // 80 in 7 bits (minimal)
         assert_eq!(
             expr,
             Expr::let_bit_range(
-                "port".to_string(),
+                arena,
+                "port",
                 32,
                 48,
-                Expr::var_match("port".to_string(), Pattern::Exact(port_bits))
+                Expr::var_match(
+                    arena,
+                    "port",
+                    Pattern::Exact(arena.alloc_slice_copy(&port_bits))
+                )
             )
         );
 
         // Multiple bit range aliases
         let expr = parse_single_unwrap(
+            arena,
             "let src = &x[0..32] in let dst = &x[32..64] in src ~ 10.0.0.1 & dst ~ 10.0.0.2",
         );
         let ip1_num = 0x0A000001u32; // 10.0.0.1 in hex
@@ -3127,16 +3304,27 @@ mod tests {
         assert_eq!(
             expr,
             Expr::let_bit_range(
-                "src".to_string(),
+                arena,
+                "src",
                 0,
                 32,
                 Expr::let_bit_range(
-                    "dst".to_string(),
+                    arena,
+                    "dst",
                     32,
                     64,
                     Expr::intersect(
-                        Expr::var_match("src".to_string(), Pattern::Exact(ip1_bits)),
-                        Expr::var_match("dst".to_string(), Pattern::Exact(ip2_bits))
+                        arena,
+                        Expr::var_match(
+                            arena,
+                            "src",
+                            Pattern::Exact(arena.alloc_slice_copy(&ip1_bits))
+                        ),
+                        Expr::var_match(
+                            arena,
+                            "dst",
+                            Pattern::Exact(arena.alloc_slice_copy(&ip2_bits))
+                        )
                     )
                 )
             )
@@ -3145,8 +3333,10 @@ mod tests {
 
     #[test]
     fn test_alias_with_regular_let() {
+        let arena = &bumpalo::Bump::new();
         // Mix of regular let and bit range alias
         let expr = parse_single_unwrap(
+            arena,
             "let config = x0 := 1 in let ip = &x[0..32] in config ; ip := 192.168.1.1",
         );
         let ip_num = 0xC0A80101u32; // 192.168.1.1 in hex
@@ -3154,15 +3344,18 @@ mod tests {
         assert_eq!(
             expr,
             Expr::let_in(
-                "config".to_string(),
-                Expr::assign(0, true),
+                arena,
+                "config",
+                Expr::assign(arena, 0, true),
                 Expr::let_bit_range(
-                    "ip".to_string(),
+                    arena,
+                    "ip",
                     0,
                     32,
                     Expr::sequence(
-                        Expr::var("config".to_string()),
-                        Expr::var_assign("ip".to_string(), ip_bits)
+                        arena,
+                        Expr::var(arena, "config"),
+                        Expr::var_assign(arena, "ip", ip_bits)
                     )
                 )
             )
@@ -3171,41 +3364,49 @@ mod tests {
 
     #[test]
     fn test_alias_errors() {
+        let arena = &bumpalo::Bump::new();
         // Missing ampersand
-        assert!(parse_all("let ip = x[0..32] in ip := 1").is_err());
+        assert!(parse_all(arena, "let ip = x[0..32] in ip := 1").is_err());
 
         // Missing brackets
-        assert!(parse_all("let ip = &x in ip := 1").is_err());
+        assert!(parse_all(arena, "let ip = &x in ip := 1").is_err());
 
         // Missing range
-        assert!(parse_all("let ip = &x[] in ip := 1").is_err());
+        assert!(parse_all(arena, "let ip = &x[] in ip := 1").is_err());
 
         // Invalid range syntax
-        assert!(parse_all("let ip = &x[0-32] in ip := 1").is_err());
+        assert!(parse_all(arena, "let ip = &x[0-32] in ip := 1").is_err());
 
         // Non-x field reference
-        assert!(parse_all("let ip = &y[0..32] in ip := 1").is_err());
+        assert!(parse_all(arena, "let ip = &y[0..32] in ip := 1").is_err());
 
         // Missing 'in' keyword
-        assert!(parse_all("let ip = &x[0..32] ip := 1").is_err());
+        assert!(parse_all(arena, "let ip = &x[0..32] ip := 1").is_err());
     }
 
     #[test]
     fn test_alias_precedence() {
+        let arena = &bumpalo::Bump::new();
         // Alias in larger expression
-        let expr = parse_single_unwrap("0 + let ip = &x[0..32] in ip ~ 10.0.0.1");
+        let expr = parse_single_unwrap(arena, "0 + let ip = &x[0..32] in ip ~ 10.0.0.1");
         let ip_num = 0x0A000001u32; // 10.0.0.1 in hex
         // Generate LSB-first order to match ip_to_bits
         let ip_bits: Vec<bool> = (0..32).map(|i| (ip_num >> i) & 1 == 1).collect();
         assert_eq!(
             expr,
             Expr::union(
-                Expr::zero(),
+                arena,
+                Expr::zero(arena),
                 Expr::let_bit_range(
-                    "ip".to_string(),
+                    arena,
+                    "ip",
                     0,
                     32,
-                    Expr::var_match("ip".to_string(), Pattern::Exact(ip_bits))
+                    Expr::var_match(
+                        arena,
+                        "ip",
+                        Pattern::Exact(arena.alloc_slice_copy(&ip_bits))
+                    )
                 )
             )
         );
@@ -3214,10 +3415,11 @@ mod tests {
     // ===== ERROR MESSAGE TESTS =====
     #[test]
     fn test_helpful_error_messages_for_disallowed_equals() {
+        let arena = &bumpalo::Bump::new();
         // Test that we get helpful error messages when using == incorrectly
 
         // Variable with == should suggest ~
-        let result = parse_all("let port = &x[0..16] in port == 1024");
+        let result = parse_all(arena, "let port = &x[0..16] in port == 1024");
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.contains("The '==' operator is only supported for simple field tests"));
@@ -3225,19 +3427,22 @@ mod tests {
         assert!(error.contains("port ~ 1024"));
 
         // Bit range with == should suggest ~
-        let result = parse_all("x[0..8] == 255");
+        let result = parse_all(arena, "x[0..8] == 255");
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.contains("Expected ':=' or '~' after bit range"));
 
         // IP address with variable == should suggest ~
-        let result = parse_all("let ip = &x[0..32] in ip == 192.168.1.1");
+        let result = parse_all(arena, "let ip = &x[0..32] in ip == 192.168.1.1");
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.contains("The '==' operator is only supported for simple field tests"));
 
         // Multiple variables with == should suggest ~
-        let result = parse_all("let a = &x[0..8] in let b = &x[8..16] in a == 10 & b == 20");
+        let result = parse_all(
+            arena,
+            "let a = &x[0..8] in let b = &x[8..16] in a == 10 & b == 20",
+        );
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.contains("The '==' operator is only supported for simple field tests"));
@@ -3245,46 +3450,51 @@ mod tests {
 
     #[test]
     fn test_allowed_equals_still_work() {
+        let arena = &bumpalo::Bump::new();
         // Test that simple field tests with == still work
 
         // Single bit tests should still work
-        assert!(parse_all("x0 == 0").is_ok());
-        assert!(parse_all("x1 == 1").is_ok());
-        assert!(parse_all("x42 == 0").is_ok());
+        assert!(parse_all(arena, "x0 == 0").is_ok());
+        assert!(parse_all(arena, "x1 == 1").is_ok());
+        assert!(parse_all(arena, "x42 == 0").is_ok());
 
         // Combinations of simple field tests should work
-        assert!(parse_all("x0 == 1 & x1 == 0").is_ok());
-        assert!(parse_all("(x0 == 1; x1 := 0) + (x0 == 0; x1 := 1)").is_ok());
+        assert!(parse_all(arena, "x0 == 1 & x1 == 0").is_ok());
+        assert!(parse_all(arena, "(x0 == 1; x1 := 0) + (x0 == 0; x1 := 1)").is_ok());
 
         // Mixed with other operations should work
-        assert!(parse_all("x0 == 1; x[8..16] ~ 255").is_ok());
-        assert!(parse_all("let port = &x[0..16] in x0 == 1 & port ~ 80").is_ok());
+        assert!(parse_all(arena, "x0 == 1; x[8..16] ~ 255").is_ok());
+        assert!(parse_all(arena, "let port = &x[0..16] in x0 == 1 & port ~ 80").is_ok());
     }
 
     #[test]
     fn test_error_message_context() {
+        let arena = &bumpalo::Bump::new();
         // Test error messages in different contexts
 
         // In sequence
-        let result = parse_all("x0 := 1; let port = &x[0..16] in port == 80");
+        let result = parse_all(arena, "x0 := 1; let port = &x[0..16] in port == 80");
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.contains("The '==' operator is only supported for simple field tests"));
 
         // In union
-        let result = parse_all("x0 == 1 + let port = &x[0..16] in port == 80");
+        let result = parse_all(arena, "x0 == 1 + let port = &x[0..16] in port == 80");
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.contains("The '==' operator is only supported for simple field tests"));
 
         // In intersection
-        let result = parse_all("x0 == 1 & let port = &x[0..16] in port == 80");
+        let result = parse_all(arena, "x0 == 1 & let port = &x[0..16] in port == 80");
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.contains("The '==' operator is only supported for simple field tests"));
 
         // Nested in let
-        let result = parse_all("let outer = x0 == 1 in let port = &x[0..16] in port == 80");
+        let result = parse_all(
+            arena,
+            "let outer = x0 == 1 in let port = &x[0..16] in port == 80",
+        );
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.contains("The '==' operator is only supported for simple field tests"));
@@ -3292,29 +3502,30 @@ mod tests {
 
     #[test]
     fn test_specific_suggestions_in_error_messages() {
+        let arena = &bumpalo::Bump::new();
         // Test that error messages contain specific helpful suggestions
 
         // Hexadecimal values
-        let result = parse_all("let byte = &x[0..8] in byte == 0xFF");
+        let result = parse_all(arena, "let byte = &x[0..8] in byte == 0xFF");
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.contains("use the '~' operator instead"));
 
         // Binary values
-        let result = parse_all("x[0..4] == 0b1010");
+        let result = parse_all(arena, "x[0..4] == 0b1010");
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.contains("Expected ':=' or '~' after bit range"));
 
         // IP addresses
-        let result = parse_all("let src = &x[0..32] in src == 10.0.0.1");
+        let result = parse_all(arena, "let src = &x[0..32] in src == 10.0.0.1");
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.contains("The '==' operator is only supported for simple field tests"));
         assert!(error.contains("x0 == 1"));
 
         // Large numbers
-        let result = parse_all("let port = &x[0..16] in port == 65535");
+        let result = parse_all(arena, "let port = &x[0..16] in port == 65535");
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.contains("port ~ 1024"));
@@ -3323,5 +3534,5 @@ mod tests {
 
 // Temporary function to satisfy lib.rs if it's calling something specific not yet refactored.
 // pub fn old_tokenize_placeholder(input: &str) -> Result<Vec<super::Token>, String> {
-//     Err("Tokenizer placeholder".to_string())
+//     Err("Tokenizer placeholder")
 // }

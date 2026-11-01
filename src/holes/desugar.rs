@@ -165,16 +165,16 @@ impl Term {
 }
 
 #[derive(Clone, Default)]
-pub(super) struct Env {
-    bindings: HashMap<String, Term>,
-    aliases: DesugarEnv,
+pub(super) struct Env<'a> {
+    bindings: HashMap<&'a str, Term>,
+    aliases: DesugarEnv<'a>,
 }
-impl Env {
-    pub fn bind(&mut self, name: String, term: Term) {
+impl<'a> Env<'a> {
+    pub fn bind(&mut self, name: &'a str, term: Term) {
         self.bindings.insert(name, term);
     }
 
-    pub fn compile(&self, expr: &Expr, store: &mut SPPstore) -> Result<Term, DesugarError> {
+    pub fn compile<'e>(&self, expr: &Expr<'e>, store: &mut SPPstore) -> Result<Term, DesugarError> {
         let binary = |op, a: &Expr, b: &Expr, store: &mut SPPstore| {
             Ok(Term::binary(
                 op,
@@ -213,20 +213,21 @@ impl Env {
                 if bits.len() > width {
                     return Err(error(format!("Bit width mismatch: value has {} bits but alias '{}' expects {} bits", bits.len(), name, width)));
                 }
-                let mut padded = bits.clone(); padded.resize(width, false);
+                let mut padded = bits.to_vec(); padded.resize(width, false);
                 range(start, end, &padded, matches!(expr, Expr::VarTest(..)), store)?
             }
             Expr::VarMatch(name, pattern) => {
                 let Some((start, end)) = self.aliases.lookup_alias(name) else {
                     return Err(error(format!("Unknown alias '{}' in pattern match", name)));
                 };
-                self.compile(&Expr::BitRangeMatch(start, end, pattern.clone()), store)?
+                self.compile(&Expr::BitRangeMatch(start, end, *pattern), store)?
             }
             Expr::BitRangeMatch(..) => {
                 // Complex patterns expand only a single bounded-width predicate;
                 // compile it immediately rather than retaining its bit-level AST.
-                let expanded = desugar_with_env(expr, &self.aliases)?;
-                self.compile(&expanded, store)?
+                let arena = bumpalo::Bump::new();
+                let expanded = desugar_with_env(&arena, expr, &self.aliases)?;
+                self.compile(expanded, store)?
             }
             Expr::Union(..) => {
                 // Generated policies contain hundreds of thousands of alternatives.
@@ -285,11 +286,11 @@ impl Env {
             }
             Expr::Let(name, definition, body) => {
                 let value = self.compile(definition, store)?;
-                let mut scoped = self.clone(); scoped.bind(name.clone(), value);
+                let mut scoped = self.clone(); scoped.bind(name, value);
                 scoped.compile(body, store)?
             }
             Expr::LetBitRange(name, start, end, body) => {
-                let mut scoped = self.clone(); scoped.aliases.add_alias(name.clone(), *start, *end);
+                let mut scoped = self.clone(); scoped.aliases.add_alias(name, *start, *end);
                 scoped.compile(body, store)?
             }
             Expr::Var(name) => self.bindings.get(name).cloned().ok_or_else(|| {
@@ -343,21 +344,15 @@ fn range(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::holes::{
-        aut::{expr_to_dfa, is_empty, ops},
-        parser::{Stmt, parse_program},
-    };
+    use crate::holes::aut::{expr_to_dfa, is_empty, ops};
 
-    fn expression(source: &str) -> Box<Expr> {
-        let program = parse_program(&format!("def value = {source}")).unwrap();
-        let Stmt::Def(_, e) = program.statements.into_iter().next().unwrap() else {
-            unreachable!()
-        };
-        e
+    fn expression<'a>(arena: &'a bumpalo::Bump, source: &'a str) -> crate::expr::Exp<'a> {
+        crate::parser::parse_expressions(arena, source).unwrap()[0]
     }
 
     #[test]
     fn eager_compilation_matches_legacy_language() {
+        let arena = &bumpalo::Bump::new();
         for source in [
             "x[0..3] := 5",
             "x[0..3] ~ 5",
@@ -380,11 +375,11 @@ mod tests {
             "let p = &x[0..3] in p := 2",
             "let p = &x[0..3] in p ~ 2",
         ] {
-            let e = expression(source);
+            let e = expression(arena, source);
             let mut store = SPPstore::new(e.num_fields());
-            let legacy = desugar_with_env(&e, &DesugarEnv::new()).unwrap();
-            let expected = expr_to_dfa(&legacy, &mut store);
-            let compiled = Env::default().compile(&e, &mut store).unwrap();
+            let legacy = desugar_with_env(arena, e, &DesugarEnv::new()).unwrap();
+            let expected = expr_to_dfa(legacy, &mut store);
+            let compiled = Env::default().compile(e, &mut store).unwrap();
             let actual = compiled.to_dfa(&mut store);
             assert!(
                 is_empty(
@@ -405,26 +400,28 @@ mod tests {
 
     #[test]
     fn negated_tests_preserve_packets_and_compact_definitions_are_shared() {
+        let arena = &bumpalo::Bump::new();
         let mut store = SPPstore::new(3);
         let mut env = Env::default();
         let negated = env
-            .compile(&expression("!(x0 == 1)"), &mut store)
+            .compile(expression(arena, "!(x0 == 1)"), &mut store)
             .unwrap()
             .spp()
             .unwrap();
         assert_eq!(negated, store.test(0, false));
         let policy = env
-            .compile(&expression("(x[0..3] := 5 + x[0..3] := 2)*"), &mut store)
+            .compile(
+                expression(arena, "(x[0..3] := 5 + x[0..3] := 2)*"),
+                &mut store,
+            )
             .unwrap();
         assert!(policy.spp().is_some());
-        env.bind("policy".to_string(), policy.clone());
-        let reference = env
-            .compile(&Expr::Var("policy".to_string()), &mut store)
-            .unwrap();
+        env.bind("policy", policy.clone());
+        let reference = env.compile(&Expr::Var("policy"), &mut store).unwrap();
         assert!(Rc::ptr_eq(&policy.node, &reference.node));
-        env.bind("h".to_string(), Term::hole(Hole(0)));
+        env.bind("h", Term::hole(Hole(0)));
         let mixed = env
-            .compile(&expression("policy; h; policy"), &mut store)
+            .compile(expression(arena, "policy; h; policy"), &mut store)
             .unwrap();
         assert!(mixed.has_holes);
         let HExpr::Sequence(_, _) = mixed.to_hole_expr() else {
@@ -434,28 +431,29 @@ mod tests {
 
     #[test]
     fn aliases_patterns_and_validation_match_legacy() {
+        let arena = &bumpalo::Bump::new();
         use crate::expr::Pattern;
         let patterns = [
-            Pattern::Exact(vec![true]),
+            Pattern::Exact(&[true]),
             Pattern::Cidr {
-                address: vec![false, true, false, true],
+                address: &[false, true, false, true],
                 prefix_len: 2,
             },
             Pattern::Wildcard {
-                address: vec![false, true, false, true],
-                mask: vec![true, false, false, true],
+                address: &[false, true, false, true],
+                mask: &[true, false, false, true],
             },
             Pattern::IpRange {
-                start: vec![false, true, false, false],
-                end: vec![true, false, true, false],
+                start: &[false, true, false, false],
+                end: &[true, false, true, false],
             },
         ];
         for pattern in patterns {
             let e = Expr::BitRangeMatch(0, 4, pattern);
             let mut store = SPPstore::new(4);
-            let expanded = desugar_with_env(&e, &DesugarEnv::new()).unwrap();
+            let expanded = desugar_with_env(arena, &e, &DesugarEnv::new()).unwrap();
             let expected = Env::default()
-                .compile(&expanded, &mut store)
+                .compile(expanded, &mut store)
                 .unwrap()
                 .spp()
                 .unwrap();
@@ -470,9 +468,9 @@ mod tests {
             "let p = &x[0..2] in p := 7",
             "missing",
         ] {
-            let e = expression(source);
-            let old = desugar_with_env(&e, &DesugarEnv::new());
-            let new = Env::default().compile(&e, &mut SPPstore::new(e.num_fields()));
+            let e = expression(arena, source);
+            let old = desugar_with_env(arena, e, &DesugarEnv::new());
+            let new = Env::default().compile(e, &mut SPPstore::new(e.num_fields()));
             assert!(old.is_err() && new.is_err(), "{source}");
         }
     }

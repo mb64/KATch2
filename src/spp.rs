@@ -610,8 +610,9 @@ impl SPPstore {
     /// with depth 1 and width 5: complete trees for the five lowest-entropy
     /// first splits, then keep the smallest expression. There is no sharing,
     /// so the result may be exponentially larger than the SPP.
-    pub fn to_expr(&mut self, spp: SPP) -> Exp {
+    pub fn to_expr<'a>(&mut self, arena: &'a bumpalo::Bump, spp: SPP) -> Exp<'a> {
         reduce::to_expr_tree(
+            arena,
             self,
             spp,
             reduce::SplitHeuristic::LookaheadTop { depth: 1, width: 5 },
@@ -818,11 +819,12 @@ mod tests {
 
     const N: Var = 2;
 
-    /// Check that compiling `to_expr(spp)` gives back `spp`
+    /// Check that compiling `to_expr(arena, spp)` gives back `spp`
     fn check_to_expr_roundtrip(aut: &mut crate::aut::Aut, spp: SPP) {
-        let expr = aut.spp_store_mut().to_expr(spp);
-        let state = aut.expr_to_state(&expr);
-        assert_eq!(aut.epsilon(state), spp, "to_expr({spp}) = {expr}");
+        let arena = &bumpalo::Bump::new();
+        let expr = aut.spp_store_mut().to_expr(arena, spp);
+        let state = aut.expr_to_state(expr);
+        assert_eq!(aut.epsilon(state), spp, "to_expr(arena, {spp}) = {expr}");
     }
 
     #[test]
@@ -917,23 +919,32 @@ mod tests {
 
     #[test]
     fn test_to_expr_simple() {
+        let arena = &bumpalo::Bump::new();
         let mut s = SPPstore::new(3);
-        assert_eq!(*s.to_expr(s.zero), Expr::Zero);
-        assert_eq!(*s.to_expr(s.one), Expr::One);
+        assert_eq!(*s.to_expr(arena, s.zero), Expr::Zero);
+        assert_eq!(*s.to_expr(arena, s.one), Expr::One);
         let t = s.test(1, true);
-        assert_eq!(s.to_expr(t), Expr::test(1, true));
+        assert_eq!(s.to_expr(arena, t), Expr::test(arena, 1, true));
         let a = s.assign(2, false);
-        assert_eq!(s.to_expr(a), Expr::assign(2, false));
+        assert_eq!(s.to_expr(arena, a), Expr::assign(arena, 2, false));
         // A test that only lets one value through
         let t0 = s.test(0, false);
         let t0_a2 = s.sequence(t0, a);
-        let expected = Expr::sequence(Expr::test(0, false), Expr::assign(2, false));
-        assert_eq!(s.to_expr(t0_a2), expected);
+        let expected = Expr::sequence(
+            arena,
+            Expr::test(arena, 0, false),
+            Expr::assign(arena, 2, false),
+        );
+        assert_eq!(s.to_expr(arena, t0_a2), expected);
         // An assignment after a test on the same field
         let a0 = s.assign(0, true);
         let t0_a0 = s.sequence(t0, a0);
-        let expected = Expr::sequence(Expr::test(0, false), Expr::assign(0, true));
-        assert_eq!(s.to_expr(t0_a0), expected);
+        let expected = Expr::sequence(
+            arena,
+            Expr::test(arena, 0, false),
+            Expr::assign(arena, 0, true),
+        );
+        assert_eq!(s.to_expr(arena, t0_a0), expected);
     }
 
     /// Test that `naive_forward` and `fwd` behave the same
