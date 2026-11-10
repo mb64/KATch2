@@ -272,8 +272,8 @@ fn build_constraint(
     }
 
     if !lhs_holes && !rhs_holes {
-        let lhs_dfa = lhs.to_dfa(store);
-        let rhs_dfa = rhs.to_dfa(store);
+        let lhs_dfa = lhs.to_lazy_dfa(store);
+        let rhs_dfa = rhs.to_lazy_dfa(store);
         let contained = |store: &mut spp::SPPstore, lhs, rhs| {
             is_empty(&ops::intersection(lhs, ops::complement(rhs)), store)
         };

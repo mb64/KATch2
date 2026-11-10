@@ -58,7 +58,6 @@ pub struct Aut {
     eliminate_dup_cache: HashMap<State, spp::SPP>,
     spp: spp::SPPstore,
     // num_vars: u32,
-    num_calls: u32,
 }
 
 impl Aut {
@@ -71,7 +70,6 @@ impl Aut {
             eliminate_dup_cache: HashMap::new(),
             spp: store,
             // num_vars,
-            num_calls: 0,
         }
     }
 
@@ -673,21 +671,6 @@ impl Aut {
     // --- Automaton construction: delta, epsilon ---
 
     pub fn delta(&mut self, state: State) -> ST {
-        self.num_calls += 1;
-        if self.num_calls > 100000 {
-            panic!(
-                "Delta called {} times, artificial limit reached for state {}",
-                self.num_calls,
-                self.state_to_string(state)
-            );
-        }
-        if self.state_to_string(state).len() > 1000000 {
-            panic!(
-                "Delta called with state length = {}: {}",
-                self.state_to_string(state).len(),
-                self.state_to_string(state)
-            );
-        }
         if let Some(st) = self.delta_map.get(&state) {
             return st.clone();
         }

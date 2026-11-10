@@ -1,10 +1,11 @@
 //! Compile packet-only subexpressions immediately, keeping shared definitions
 //! compact instead of expanding them into boxed per-bit expression trees.
 use crate::hash::{HashMap, HashMapExt as _};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::{
-    aut::{ExplicitDFA, aut_to_dfa},
+    aut::{DFA, ENFA, ExplicitDFA, NFA, aut_to_dfa},
     nk_with_holes::Expr as HExpr,
 };
 use crate::{
@@ -13,6 +14,51 @@ use crate::{
     expr::{Expr, Hole, Pattern},
     spp::{SPP, SPPstore},
 };
+
+/// Compute derivatives only for states reached by the containment check.
+struct LazyDfa {
+    aut: RefCell<Aut>,
+    start: usize,
+}
+
+impl LazyDfa {
+    fn with_store<T>(&self, store: &mut SPPstore, f: impl FnOnce(&mut Aut) -> T) -> T {
+        let mut aut = self.aut.borrow_mut();
+        std::mem::swap(store, aut.spp_store_mut());
+        let value = f(&mut aut);
+        std::mem::swap(store, aut.spp_store_mut());
+        value
+    }
+}
+
+impl ENFA for LazyDfa {
+    type State = usize;
+
+    fn start(&self, _: &mut SPPstore) -> usize {
+        self.start
+    }
+
+    fn is_visible(&self, _: &mut SPPstore, _: &usize) -> bool {
+        true
+    }
+
+    fn transitions(&self, store: &mut SPPstore, q: &usize) -> Vec<(SPP, usize)> {
+        self.with_store(store, |aut| {
+            aut.delta(*q)
+                .get_transitions()
+                .iter()
+                .map(|(&next, &label)| (label, next))
+                .collect()
+        })
+    }
+
+    fn output(&self, store: &mut SPPstore, q: &usize) -> SPP {
+        self.with_store(store, |aut| aut.epsilon(*q))
+    }
+}
+
+impl NFA for LazyDfa {}
+impl DFA for LazyDfa {}
 
 #[derive(Clone)]
 pub(super) struct Term {
@@ -120,6 +166,18 @@ impl Term {
             _ => panic!("construct not supported by nk_with_holes::Expr"),
         }
     }
+    pub fn to_lazy_dfa(&self, store: &mut SPPstore) -> impl DFA + use<> {
+        assert!(!self.has_holes);
+        let mut aut = Aut::from_spp_store(SPPstore::new(0));
+        std::mem::swap(store, aut.spp_store_mut());
+        let start = self.to_state(&mut aut, &mut HashMap::new());
+        std::mem::swap(store, aut.spp_store_mut());
+        LazyDfa {
+            aut: RefCell::new(aut),
+            start,
+        }
+    }
+
     pub fn to_dfa(&self, store: &mut SPPstore) -> ExplicitDFA {
         assert!(!self.has_holes);
         let mut aut = Aut::from_spp_store(std::mem::replace(store, SPPstore::new(0)));
