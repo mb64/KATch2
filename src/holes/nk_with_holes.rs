@@ -1,5 +1,5 @@
 //! NetKAT expressions extended with *holes*: formal variables that stand for
-//! an unknown SPP.  This module compiles such an expression into a special
+//! an unknown program. This module compiles such an expression into a special
 //! automaton whose edges are each either a *concrete* edge (labelled by a
 //! known SPP) or an *abstract* edge (labelled by a hole).  Multi-piece
 //! transitions like `p ; H ; p'` are broken up by inserting invisible
@@ -81,8 +81,8 @@ impl Expr {
     }
 }
 
-/// One edge of the automaton: either a concrete SPP or a hole standing for
-/// an SPP-to-be-filled-in.
+/// One edge of the automaton: either a concrete SPP or a hole to be filled
+/// with a candidate program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EdgeLabel {
     Concrete(spp::SPP),
@@ -117,9 +117,10 @@ pub struct State {
 
 /// Automaton for NetKAT-with-holes.
 ///
-/// Owns hash-consed expressions and lazy caches for the Antimirov
-/// derivative.  The SPP store is supplied externally to each method that
-/// needs it.
+/// Owns hash-consed expressions and lazy Antimirov derivatives. Constraint
+/// compilation calls [`Self::preprocess_epsilon`] once to materialize concrete
+/// epsilon shortcuts shared by all subsequent hole assignments and restarts.
+/// The SPP store is supplied externally.
 #[derive(Debug, Clone)]
 pub struct AutWithHoles {
     aexprs: Vec<AExpr>,
@@ -128,6 +129,16 @@ pub struct AutWithHoles {
     /// the source state's visibility (only on its `AExpr`), so we cache
     /// once per expression and reuse across visibilities.
     delta_cache: HashMap<AExprIdx, Vec<(EdgeLabel, State)>>,
+    // Elimination depends on visibility and incoming edges, so these results
+    // must be keyed by the full state rather than just its expression.
+    preprocessed: HashMap<State, PreprocessedState>,
+}
+
+/// Materialized results after eliminating concrete epsilon paths.
+#[derive(Debug, Clone)]
+struct PreprocessedState {
+    transitions: Vec<(EdgeLabel, State)>,
+    output: spp::SPP,
 }
 
 impl AutWithHoles {
@@ -136,6 +147,7 @@ impl AutWithHoles {
             aexprs: Vec::new(),
             aexpr_map: HashMap::new(),
             delta_cache: HashMap::new(),
+            preprocessed: HashMap::new(),
         }
     }
 
@@ -184,15 +196,40 @@ impl AutWithHoles {
     /// Outgoing edges of `q`.  Each edge is either a concrete SPP edge or
     /// an abstract (hole) edge.  Targets carry their own visibility.
     pub fn transitions(&mut self, store: &mut spp::SPPstore, q: State) -> Vec<(EdgeLabel, State)> {
+        if let Some(state) = self.preprocessed.get(&q) {
+            return state.transitions.clone();
+        }
         self.delta_for_aexpr(store, q.aexpr)
     }
 
-    /// Atomic summands of `ε(q)`: the sum of edge labels under which `q`
-    /// itself accepts the empty trace.  An empty vector means "the zero
-    /// SPP" (no acceptance).  A single entry `Concrete(one)` means "the
-    /// identity SPP" (always accept the empty trace).
+    /// The concrete SPP accepted from `q` without consuming another trace
+    /// packet. Acceptance involving a hole is represented by abstract edges.
     pub fn output(&mut self, store: &mut spp::SPPstore, q: State) -> spp::SPP {
+        if let Some(state) = self.preprocessed.get(&q) {
+            return state.output;
+        }
         self.output_for_aexpr(store, q.aexpr)
+    }
+
+    /// Eliminate concrete epsilon paths before substituting hole candidates.
+    ///
+    /// Pins `start` and all visible states. Other states are eligible when
+    /// their incoming or outgoing edges are all concrete. Concrete self-loops
+    /// are folded with Kleene star, and concrete predecessor/successor pairs
+    /// are bypassed. Hole edges remain atomic and are never composed with SPPs.
+    ///
+    /// A state with abstract exits retains its incoming concrete edges; one
+    /// with abstract arrivals retains its outgoing concrete edges and output.
+    /// A state with neither is removed completely. Abstract edges on both
+    /// sides (including abstract self-loops) prevent elimination.
+    ///
+    /// This preserves the language from the pinned start for every hole
+    /// assignment, including candidates emitting dup. Eliminated states are
+    /// not valid alternative entry points into this compiled automaton.
+    pub fn preprocess_epsilon(&mut self, store: &mut spp::SPPstore, start: State) {
+        let mut graph = ConcreteEpsilonGraph::collect(self, store, start);
+        graph.eliminate(store);
+        graph.install(self, store);
     }
 
     // ---- hash-consing ---------------------------------------------------
@@ -459,8 +496,139 @@ impl AutWithHoles {
                 out
             }
             AExpr::Sequence(_) => store.zero,
-            // self.output_sequence(store, &children),
             AExpr::Star(_) => store.one,
+        }
+    }
+}
+
+/// Temporary sparse graph used only during concrete epsilon elimination.
+/// Concrete edges compose as SPPs; abstract edges retain their hole labels.
+struct ConcreteEpsilonGraph {
+    states: Vec<State>,
+    concrete: Vec<HashMap<usize, spp::SPP>>,
+    abstract_edges: Vec<Vec<(Hole, usize)>>,
+    outputs: Vec<spp::SPP>,
+    has_abstract_incoming: Vec<bool>,
+}
+
+impl ConcreteEpsilonGraph {
+    fn collect(aut: &mut AutWithHoles, store: &mut spp::SPPstore, start: State) -> Self {
+        let mut states = vec![start];
+        let mut index = HashMap::new();
+        index.insert(start, 0);
+        let mut concrete: Vec<HashMap<usize, spp::SPP>> = Vec::new();
+        let mut abstract_edges: Vec<Vec<(Hole, usize)>> = Vec::new();
+        let mut outputs = Vec::new();
+        let mut has_abstract_incoming = vec![false];
+        let mut cursor = 0;
+        while cursor < states.len() {
+            let state = states[cursor];
+            let mut row = HashMap::new();
+            let mut holes = Vec::new();
+            for (label, target) in aut.transitions(store, state) {
+                if matches!(label, EdgeLabel::Concrete(s) if s == store.zero) {
+                    continue;
+                }
+                let next = *index.entry(target).or_insert_with(|| {
+                    let next = states.len();
+                    states.push(target);
+                    has_abstract_incoming.push(false);
+                    next
+                });
+                match label {
+                    EdgeLabel::Concrete(s) => {
+                        let entry = row.entry(next).or_insert(store.zero);
+                        *entry = store.union(*entry, s);
+                    }
+                    EdgeLabel::Abstract(hole) => {
+                        holes.push((hole, next));
+                        has_abstract_incoming[next] = true;
+                    }
+                }
+            }
+            concrete.push(row);
+            abstract_edges.push(holes);
+            outputs.push(aut.output(store, state));
+            cursor += 1;
+        }
+
+        Self {
+            states,
+            concrete,
+            abstract_edges,
+            outputs,
+            has_abstract_incoming,
+        }
+    }
+
+    fn eliminate(&mut self, store: &mut spp::SPPstore) {
+        // Abstract edges are preserved throughout elimination, so incoming
+        // and outgoing abstract-edge flags remain valid for the entire pass.
+        // Index 0 is the pinned start, even if it is invisible.
+        for k in 1..self.states.len() {
+            let abstract_in = self.has_abstract_incoming[k];
+            let abstract_out = !self.abstract_edges[k].is_empty();
+            if self.states[k].visible || (abstract_in && abstract_out) {
+                continue;
+            }
+            let loop_edge = self.concrete[k].remove(&k).unwrap_or(store.zero);
+            let loop_star = store.star(loop_edge);
+            for edge in self.concrete[k].values_mut() {
+                *edge = store.sequence(loop_star, *edge);
+            }
+            self.outputs[k] = store.sequence(loop_star, self.outputs[k]);
+            let outgoing = self.concrete[k].clone();
+            let output = self.outputs[k];
+
+            for i in 0..self.states.len() {
+                if i == k {
+                    continue;
+                }
+                let Some(incoming) = self.concrete[i].remove(&k) else {
+                    continue;
+                };
+                let contribution = store.sequence(incoming, output);
+                self.outputs[i] = store.union(self.outputs[i], contribution);
+                for (&j, &edge) in &outgoing {
+                    let contribution = store.sequence(incoming, edge);
+                    if contribution != store.zero {
+                        let entry = self.concrete[i].entry(j).or_insert(store.zero);
+                        *entry = store.union(*entry, contribution);
+                    }
+                }
+                if abstract_out {
+                    // Keep the path to k's hole exits, absorbing its loop.
+                    let incoming = store.sequence(incoming, loop_star);
+                    self.concrete[i].insert(k, incoming);
+                }
+            }
+            if !abstract_in {
+                // All concrete exits and acceptance have moved to predecessors.
+                self.concrete[k].clear();
+                self.outputs[k] = store.zero;
+            }
+        }
+    }
+
+    fn install(self, aut: &mut AutWithHoles, store: &spp::SPPstore) {
+        for (i, &state) in self.states.iter().enumerate() {
+            let mut transitions: Vec<_> = self.concrete[i]
+                .iter()
+                .filter(|(_, s)| **s != store.zero)
+                .map(|(&j, &s)| (EdgeLabel::Concrete(s), self.states[j]))
+                .collect();
+            transitions.extend(
+                self.abstract_edges[i]
+                    .iter()
+                    .map(|&(hole, j)| (EdgeLabel::Abstract(hole), self.states[j])),
+            );
+            aut.preprocessed.insert(
+                state,
+                PreprocessedState {
+                    transitions,
+                    output: self.outputs[i],
+                },
+            );
         }
     }
 }
@@ -634,6 +802,195 @@ mod tests {
                 assert_eq!(ch, &sorted);
             }
             other => panic!("expected Union, got {:?}", other),
+        }
+    }
+
+    // ---- concrete epsilon preprocessing tests --------------------------
+
+    fn assert_preprocessing_equivalent(
+        store: &mut spp::SPPstore,
+        original: &AutWithHoles,
+        optimized: &AutWithHoles,
+        start: State,
+        candidates: HashMap<Hole, crate::holes::aut::ExplicitDFA>,
+    ) {
+        use crate::holes::aut::{EpsilonClosure, ExplicitDFA, SubsetDfa, is_empty, ops};
+        use crate::holes::inst::Instantiate;
+
+        let before = Instantiate::new(original.clone(), start, candidates.clone());
+        let after = Instantiate::new(optimized.clone(), start, candidates);
+        let before = ExplicitDFA::from_dfa(store, SubsetDfa::new(EpsilonClosure::new(before)));
+        let after = ExplicitDFA::from_dfa(store, SubsetDfa::new(EpsilonClosure::new(after)));
+        assert!(is_empty(
+            &ops::intersection(&before, ops::complement(&after)),
+            store
+        ));
+        assert!(is_empty(
+            &ops::intersection(&after, ops::complement(&before)),
+            store
+        ));
+    }
+
+    #[test]
+    fn preprocess_epsilon_preserves_hole_boundaries_loops_outputs_and_visibility() {
+        use crate::holes::aut::ExplicitDFA;
+
+        let mut store = spp::SPPstore::new(2);
+        let set = store.assign(0, true);
+        let clear = store.assign(0, false);
+        let test = store.test(1, true);
+        let mut states: Vec<_> = (0..6)
+            .map(|aexpr| State {
+                aexpr,
+                visible: aexpr == 0 || aexpr == 5,
+            })
+            .collect();
+        // The visible and invisible variants of an expression must have
+        // separate preprocessed entries.
+        states[5].aexpr = states[1].aexpr;
+        let c = |s, i| (EdgeLabel::Concrete(s), states[i]);
+        let h = |hole, i| (EdgeLabel::Abstract(Hole(hole)), states[i]);
+        let edges = [
+            vec![
+                c(test, 1),
+                h(1, 2),
+                c(store.one, 3),
+                h(0, 4),
+                c(store.one, 5),
+            ],
+            vec![c(set, 1), h(0, 2), c(test, 3)],
+            vec![c(set, 2), c(clear, 3), c(store.one, 5)],
+            vec![c(clear, 3), c(test, 1), c(store.one, 5)],
+            vec![h(0, 4), c(set, 4), h(1, 5), c(store.one, 3)],
+            vec![c(test, 1)],
+        ];
+        let outputs = [store.zero, test, clear, store.one, set, store.one];
+        let mut original = AutWithHoles::new();
+        for ((&state, transitions), output) in states.iter().zip(edges).zip(outputs) {
+            original.preprocessed.insert(
+                state,
+                PreprocessedState {
+                    transitions,
+                    output,
+                },
+            );
+        }
+        let mut optimized = original.clone();
+        optimized.preprocess_epsilon(&mut store, states[0]);
+        assert!(optimized.transitions(&mut store, states[3]).is_empty());
+        assert_eq!(optimized.output(&mut store, states[3]), store.zero);
+        assert!(
+            optimized
+                .transitions(&mut store, states[1])
+                .iter()
+                .all(|(edge, _)| matches!(edge, EdgeLabel::Abstract(_)))
+        );
+        assert!(
+            optimized
+                .transitions(&mut store, states[4])
+                .contains(&h(0, 4))
+        );
+        assert!(!optimized.transitions(&mut store, states[5]).is_empty());
+
+        let candidates = [
+            ExplicitDFA {
+                start: 0,
+                transitions: vec![vec![]],
+                outputs: vec![store.zero],
+            },
+            ExplicitDFA {
+                start: 0,
+                transitions: vec![vec![]],
+                outputs: vec![store.one],
+            },
+            ExplicitDFA {
+                start: 0,
+                transitions: vec![vec![]],
+                outputs: vec![clear],
+            },
+            // A candidate emitting dup, including multiple visible steps.
+            ExplicitDFA {
+                start: 0,
+                transitions: vec![vec![(set, 0)]],
+                outputs: vec![test],
+            },
+        ];
+        for first in &candidates {
+            for second in &candidates {
+                assert_preprocessing_equivalent(
+                    &mut store,
+                    &original,
+                    &optimized,
+                    states[0],
+                    HashMap::from_iter([(Hole(0), first.clone()), (Hole(1), second.clone())]),
+                );
+            }
+        }
+        // Running preprocessing again must preserve the same language.
+        let mut twice = optimized.clone();
+        twice.preprocess_epsilon(&mut store, states[0]);
+        assert_preprocessing_equivalent(
+            &mut store,
+            &optimized,
+            &twice,
+            states[0],
+            HashMap::from_iter([
+                (Hole(0), candidates[3].clone()),
+                (Hole(1), candidates[2].clone()),
+            ]),
+        );
+    }
+
+    #[test]
+    fn fuzz_preprocess_epsilon_preserves_language() {
+        use crate::holes::aut::ExplicitDFA;
+        crate::fuzz::seed_fuzzer(0xEC10_2026);
+        for _ in 0..100 {
+            let mut store = spp::SPPstore::new(2);
+            let mut original = AutWithHoles::new();
+            let states: Vec<_> = (0..5)
+                .map(|aexpr| State {
+                    aexpr,
+                    visible: aexpr == 0 || crate::fuzz::random::<bool>(),
+                })
+                .collect();
+            for &state in &states {
+                let mut transitions = Vec::new();
+                for &target in &states {
+                    if crate::fuzz::random::<u8>().is_multiple_of(4) {
+                        let label = if crate::fuzz::random::<u8>().is_multiple_of(3) {
+                            EdgeLabel::Abstract(Hole(0))
+                        } else {
+                            EdgeLabel::Concrete(store.rand())
+                        };
+                        transitions.push((label, target));
+                    }
+                }
+                let output = store.rand();
+                original.preprocessed.insert(
+                    state,
+                    PreprocessedState {
+                        transitions,
+                        output,
+                    },
+                );
+            }
+            let mut optimized = original.clone();
+            optimized.preprocess_epsilon(&mut store, states[0]);
+            let edge = store.rand();
+            let output = store.rand();
+            let candidate = ExplicitDFA {
+                start: 0,
+                transitions: vec![vec![(edge, 0)]],
+                outputs: vec![output],
+            };
+            assert_preprocessing_equivalent(
+                &mut store,
+                &original,
+                &optimized,
+                states[0],
+                HashMap::from_iter([(Hole(0), candidate)]),
+            );
         }
     }
 

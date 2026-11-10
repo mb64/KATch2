@@ -113,10 +113,12 @@ impl Constraint {
     }
 }
 
-/// Compile a hole-bearing [`Expr`] into its automaton and visible start state.
+/// Compile and preprocess a hole-bearing [`Expr`] before any candidates are
+/// installed. All CEGIS iterations and restart attempts reuse the result.
 fn compile(store: &mut spp::SPPstore, expr: &Expr) -> (AutWithHoles, State) {
     let mut aut = AutWithHoles::new();
     let start = aut.expr_to_state(store, expr);
+    aut.preprocess_epsilon(store, start);
     (aut, start)
 }
 
