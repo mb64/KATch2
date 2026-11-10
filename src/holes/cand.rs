@@ -14,10 +14,12 @@ use crate::hash::{HashMap, HashMapExt as _};
 use crate::holes::aut::{DFA, ENFA, ExplicitDFA, NFA, ops};
 use crate::spp;
 
+mod bounds;
+
 #[derive(Debug, Clone)]
 pub struct Cand<'a> {
-    nodes: Vec<CandNode>,
-    head: CandIdx,
+    pub(crate) nodes: std::sync::Arc<[CandNode]>,
+    pub(crate) head: CandIdx,
     /// The DFA this candidate is built over.
     ///
     /// **Invariant:** `dfa` must be *complete* — its transition function must be
@@ -32,7 +34,7 @@ pub struct Cand<'a> {
 type CandIdx = u32;
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-enum CandNode {
+pub(crate) enum CandNode {
     /// Examine the next pair of fields in the input packet and "first" packet.
     NextField {
         b00: CandIdx,
@@ -267,7 +269,7 @@ impl<'a> Cand<'a> {
                 });
             }
             return Ok(Cand {
-                nodes: builder.nodes,
+                nodes: builder.nodes.into(),
                 head: node,
                 dfa,
             });
@@ -309,7 +311,7 @@ impl<'a> Cand<'a> {
             }
             let head = builder.mk(CandNode::Root(spp::SPP::new(label as u32)));
             return Ok(Cand {
-                nodes: builder.nodes,
+                nodes: builder.nodes.into(),
                 head,
                 dfa,
             });
@@ -413,7 +415,7 @@ impl<'a> Cand<'a> {
         // The root (node 0) is the sole depth-0 class.
         let head = cand_of[0].unwrap();
         Ok(Cand {
-            nodes: builder.nodes,
+            nodes: builder.nodes.into(),
             head,
             dfa,
         })
@@ -427,7 +429,7 @@ impl<'a> Cand<'a> {
         &self.nodes[idx as usize]
     }
 
-    pub fn accepts_input(&self, store: &mut spp::SPPstore, input: &Input) -> bool {
+    pub fn accepts_input(&self, store: &spp::SPPstore, input: &Input) -> bool {
         // Check that the input is well-formed
         let num_vars = store.num_vars() as usize;
         assert_eq!(input.pkt_in.len(), num_vars);
@@ -641,7 +643,7 @@ mod tests {
             &[true, true],
             &[false, false],
         );
-        assert!(cand.accepts_input(&mut store, &inp));
+        assert!(cand.accepts_input(&store, &inp));
     }
 
     #[test]
@@ -777,10 +779,7 @@ mod tests {
         let cand = Cand::from_examples(&mut store, &dfa, &examples).unwrap();
         assert_consistent(&cand, &mut store, &examples);
         assert!(
-            cand.accepts_input(
-                &mut store,
-                &input(&[true], &[true], &[0], &[false], &[false])
-            ),
+            cand.accepts_input(&store, &input(&[true], &[true], &[0], &[false], &[false])),
             "positive evidence under prefix (0,0) must generalize to the merged prefix (1,1)"
         );
     }
@@ -836,7 +835,7 @@ mod tests {
                 let pkt_out = bits(NV);
 
                 let via_input = cand.accepts_input(
-                    &mut store,
+                    &store,
                     &input(&pkt_in, &pkt_start, &identity, &pkt_start, &pkt_out),
                 );
                 let trace = vec![pkt_in, pkt_start];

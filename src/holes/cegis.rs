@@ -38,8 +38,9 @@
 //!
 //! # Limitations
 //!
-//! * Symbolic upper-bound generalization requires a single SPP traversal.
-//!   Multiple traversals and [`crate::holes::cand::Cand`] use concrete clauses.
+//! * Symbolic upper-bound generalization requires a single hole traversal.
+//!   For Cand, the internal trace stays fixed while boundary packets vary.
+//!   Multiple traversals use concrete clauses.
 
 use crate::hash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use std::collections::VecDeque;
@@ -130,14 +131,42 @@ impl Constraint {
                     metrics.add("negative_counterexamples", 1);
                     if crate::experiment::symbolic_upper() && cex.witnesses.len() == 1 {
                         let (hole, (input, inner, output)) = &cex.witnesses[0];
-                        if let Literal::Spp { spp, .. } =
-                            C::reject_literal(hole_to_var[hole], input, inner, output)
-                            && let Some(forbidden) =
-                                inst::upper_bound_forbidden(inst, &cex, dfa, store)
-                        {
-                            debug_assert!(store.accepts(forbidden, input, output));
-                            learner.forbid_spp(spp, forbidden, store);
-                            return false;
+                        match C::reject_literal(hole_to_var[hole], input, inner, output) {
+                            Literal::Spp { spp, .. } => {
+                                if let Some(forbidden) =
+                                    inst::upper_bound_forbidden(inst, &cex, dfa, store)
+                                {
+                                    debug_assert!(store.accepts(forbidden, input, output));
+                                    learner.forbid_spp(spp, forbidden, store);
+                                    return false;
+                                }
+                            }
+                            Literal::Cand { cand, states, .. } => {
+                                if let Some(regions) =
+                                    inst::upper_bound_forbidden_cand(inst, &cex, dfa, store)
+                                {
+                                    let mut forbidden = crate::holes::cand::Cand::constant(
+                                        store,
+                                        reference_dfa,
+                                        false,
+                                    );
+                                    for (incoming, outgoing) in regions {
+                                        let region = crate::holes::cand::Cand::product(
+                                            store,
+                                            reference_dfa,
+                                            incoming,
+                                            Some(&states),
+                                            outgoing,
+                                        );
+                                        forbidden = forbidden.union(&region, store);
+                                    }
+                                    debug_assert!(!forbidden.is_empty(store));
+                                    if learner.forbid_cand(cand, forbidden, store) {
+                                        return false;
+                                    }
+                                }
+                            }
+                            Literal::SppMember { .. } => unreachable!(),
                         }
                     }
                     add_upper_bound_clause::<C, L>(
@@ -1486,7 +1515,7 @@ mod tests {
         .unwrap();
         let cand = &result[&Hole(0)];
         assert!(cand.accepts_input(
-            &mut store,
+            &store,
             &Input {
                 pkt_in: vec![false, false, false],
                 pkt_start: vec![true, false, true],
@@ -1523,7 +1552,7 @@ mod tests {
         .unwrap();
         let cand = &result[&Hole(0)];
         assert!(!cand.accepts_input(
-            &mut store,
+            &store,
             &Input {
                 pkt_in: vec![false],
                 pkt_start: vec![false],
@@ -1766,5 +1795,57 @@ mod tests {
         assert!(store.sp.accepts(out_sp, &[false]));
         assert!(!store.sp.accepts(out_sp, &[true]));
         assert!(inst.holes().values().all(|&spp| spp == store.zero));
+    }
+    #[test]
+    fn cand_lower_bound_literals_prune_forbidden_boundary_packets() {
+        use crate::holes::smt::SmtLearner;
+        let mut store = spp::SPPstore::new(1);
+        let reference = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(store.top, 0)]],
+            outputs: vec![store.zero],
+        };
+        let mut learner = Native::new(1);
+        let var = Cand::fresh_var(&mut learner, &reference);
+        let incoming = store.sp.test(0, false);
+        let incoming = store.ibwd(incoming);
+        let top = store.top;
+        let forbidden = Cand::product(&mut store, &reference, incoming, Some(&[0]), top);
+        learner.forbid_cand(var, forbidden, &mut store);
+        let one = store.sp.one;
+        let blocked = store.sp.test(0, false);
+        assert!(
+            Cand::accept_literal(
+                var,
+                &mut learner,
+                &mut store,
+                &reference,
+                blocked,
+                one,
+                &[vec![false]]
+            )
+            .is_none()
+        );
+        let literal = Cand::accept_literal(
+            var,
+            &mut learner,
+            &mut store,
+            &reference,
+            one,
+            one,
+            &[vec![false]],
+        )
+        .unwrap();
+        learner.add_clause(
+            AbstractClause {
+                literals: vec![literal],
+            },
+            &mut store.sp,
+        );
+        let solution = learner.extract(&mut store).unwrap();
+        let candidate = &solution.cands[&var];
+        let (_, upper) = learner.cand_bounds(var, &mut store).unwrap();
+        assert!(candidate.difference(&upper, &mut store).is_empty(&store));
+        assert!(!candidate.is_empty(&store));
     }
 }

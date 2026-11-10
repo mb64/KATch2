@@ -14,7 +14,7 @@ use crate::spp;
 use std::cell::RefCell;
 
 mod upper;
-pub(crate) use upper::upper_bound_forbidden;
+pub(crate) use upper::{upper_bound_forbidden, upper_bound_forbidden_cand};
 
 /// Witness produced by [`Instantiate::check_greater_than`] when the lower
 /// bound is not contained in the instantiated automaton.

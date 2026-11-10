@@ -11,9 +11,9 @@
 //! A consistent SAT assignment is copied into a native array once per solve.
 //! The existing greedy example cover then selects training examples for the
 //! BDD learners, preserving the clause merge and example cover optimizations.
-//! Universal negative SPP regions are instantiated lazily when a model
-//! violates them, and passed as shared diagrams to the SPP learner. DFA state
-//! arguments are concrete.
+//! Universal SPP and Cand regions are instantiated lazily when a model
+//! violates them, and passed as shared evidence diagrams to candidate learning.
+//! DFA state arguments are concrete.
 
 use crate::hash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 mod sat;
@@ -225,6 +225,16 @@ pub trait SmtLearner<'a> {
     /// evidence to candidate learning, including pairs absent from SAT atoms.
     fn forbid_spp(&mut self, spp: SppVar, relation: SPP, store: &mut SPPstore);
 
+    /// Proven bounds on the full Cand predicate, including its state arguments.
+    fn cand_bounds(&self, _cand: CandVar, _store: &mut SPPstore) -> Option<(Cand<'a>, Cand<'a>)> {
+        None
+    }
+
+    /// Returns false when a backend does not support symbolic Cand evidence.
+    fn forbid_cand(&mut self, _cand: CandVar, _region: Cand<'a>, _store: &mut SPPstore) -> bool {
+        false
+    }
+
     /// Solve once and read back one concrete diagram per allocated slot, or
     /// [`InconsistentError`] if the accumulated clauses are unsatisfiable.
     fn extract(&mut self, spp_store: &mut SPPstore) -> Result<Solution<'a>, InconsistentError>;
@@ -268,6 +278,20 @@ struct SelectedExamples {
     cands: HashMap<u32, Vec<(Input, bool)>>,
 }
 
+fn cand_input(values: &[u64], n: usize, ns: usize) -> Input {
+    let packet = |range: std::ops::Range<usize>| values[range].iter().map(|&v| v != 0).collect();
+    Input {
+        pkt_in: packet(0..n),
+        pkt_start: packet(n..2 * n),
+        states: values[2 * n..2 * n + ns]
+            .iter()
+            .map(|&v| v as usize)
+            .collect(),
+        pkt_end: packet(2 * n + ns..3 * n + ns),
+        pkt_out: packet(3 * n + ns..4 * n + ns),
+    }
+}
+
 /// Native bitvector and uninterpreted predicate learner using RustSAT/CaDiCaL.
 /// Clauses, gates, and learned congruence lemmas persist across extractions.
 pub struct Native<'a> {
@@ -282,6 +306,10 @@ pub struct Native<'a> {
     forbidden: Vec<Option<SPP>>,
     required: Vec<Option<SPP>>,
     sure_bounds: Vec<(SPP, SPP)>,
+    cand_forbidden: Vec<Option<Cand<'a>>>,
+    cand_required: Vec<Option<Cand<'a>>>,
+    cand_upper: Vec<Option<Cand<'a>>>,
+    cand_bound_atoms: HashSet<usize>,
     metrics: crate::holes::metrics::Metrics,
     candidate_stats: crate::holes::candidate_stats::CandidateStats,
 }
@@ -291,6 +319,30 @@ pub struct Native<'a> {
 pub type Z3<'a> = Native<'a>;
 
 impl<'a> SmtLearner<'a> for Native<'a> {
+    fn cand_bounds(&self, cand: CandVar, store: &mut SPPstore) -> Option<(Cand<'a>, Cand<'a>)> {
+        let i = cand.0 as usize;
+        let lower = self.cand_required[i]
+            .clone()
+            .unwrap_or_else(|| Cand::constant(store, self.cands[i], false));
+        let upper = self.cand_upper[i].clone().unwrap_or_else(|| {
+            let top = Cand::constant(store, self.cands[i], true);
+            self.cand_forbidden[i]
+                .as_ref()
+                .map_or_else(|| top.clone(), |r| top.difference(r, store))
+        });
+        Some((lower, upper))
+    }
+
+    fn forbid_cand(&mut self, cand: CandVar, region: Cand<'a>, store: &mut SPPstore) -> bool {
+        let slot = &mut self.cand_forbidden[cand.0 as usize];
+        *slot = Some(
+            slot.as_ref()
+                .map_or_else(|| region.clone(), |old| old.union(&region, store)),
+        );
+        self.metrics.add("cand_forbidden_regions", 1);
+        self.cand_upper[cand.0 as usize] = None;
+        true
+    }
     fn save_spp_bounds(&mut self, store: &mut SPPstore) -> Vec<(SPP, SPP)> {
         self.refresh_bounds(store);
         self.sure_bounds.clone()
@@ -329,6 +381,10 @@ impl<'a> SmtLearner<'a> for Native<'a> {
             forbidden: Vec::new(),
             required: Vec::new(),
             sure_bounds: Vec::new(),
+            cand_forbidden: Vec::new(),
+            cand_required: Vec::new(),
+            cand_upper: Vec::new(),
+            cand_bound_atoms: HashSet::new(),
             metrics: crate::holes::metrics::Metrics::new("native"),
             candidate_stats: crate::holes::candidate_stats::CandidateStats::new(),
         }
@@ -349,6 +405,9 @@ impl<'a> SmtLearner<'a> for Native<'a> {
     fn fresh_cand(&mut self, dfa: &'a ExplicitDFA) -> CandVar {
         let id = self.cands.len() as u32;
         self.cands.push(dfa);
+        self.cand_forbidden.push(None);
+        self.cand_required.push(None);
+        self.cand_upper.push(None);
         CandVar(id)
     }
 
@@ -519,8 +578,19 @@ impl<'a> SmtLearner<'a> for Native<'a> {
         let mut cands = HashMap::with_capacity(self.cands.len());
         for (idx, dfa) in self.cands.iter().enumerate() {
             let exs = examples.cands.remove(&(idx as u32)).unwrap_or_default();
-            let cand = Cand::from_examples(spp_store, dfa, &exs)
-                .expect("native model is internally consistent");
+            let cand = if self.cand_forbidden[idx].is_some() || self.cand_required[idx].is_some() {
+                let empty = Cand::constant(spp_store, dfa, false);
+                Cand::from_examples_with_bounds(
+                    spp_store,
+                    dfa,
+                    &exs,
+                    self.cand_required[idx].as_ref().unwrap_or(&empty),
+                    self.cand_forbidden[idx].as_ref().unwrap_or(&empty),
+                )
+            } else {
+                Cand::from_examples(spp_store, dfa, &exs)
+            }
+            .expect("native model is internally consistent");
             cands.insert(CandVar(idx as u32), cand);
         }
 
@@ -531,7 +601,146 @@ impl<'a> SmtLearner<'a> for Native<'a> {
 }
 
 impl<'a> Native<'a> {
+    fn refresh_cand_bounds(&mut self, store: &mut SPPstore) {
+        let mut roots = HashMap::new();
+        for (idx, atom) in self.atoms.iter().enumerate() {
+            let SlotRef::Cand(slot) = atom.slot else {
+                continue;
+            };
+            if self.cand_bound_atoms.contains(&idx) {
+                continue;
+            }
+            let Some(value) = *roots
+                .entry(atom.result)
+                .or_insert_with(|| self.solver.root_value(atom.result))
+            else {
+                continue;
+            };
+            let values: Option<Vec<u64>> = atom
+                .args
+                .iter()
+                .map(|a| match a {
+                    Arg::State(s) => Some(*s as u64),
+                    Arg::Bit(lit) => roots
+                        .entry(*lit)
+                        .or_insert_with(|| self.solver.root_value(*lit))
+                        .map(u64::from),
+                })
+                .collect();
+            let Some(values) = values else {
+                continue;
+            };
+            let dfa = self.cands[slot as usize];
+            let input = cand_input(&values, self.num_vars as usize, dfa.num_states());
+            let region = Cand::singleton(store, dfa, &input);
+            let bounds = if value {
+                &mut self.cand_required
+            } else {
+                &mut self.cand_forbidden
+            };
+            let prior = &mut bounds[slot as usize];
+            *prior = Some(
+                prior
+                    .as_ref()
+                    .map_or_else(|| region.clone(), |old| old.union(&region, store)),
+            );
+            self.cand_bound_atoms.insert(idx);
+            if !value {
+                self.cand_upper[slot as usize] = None;
+            }
+        }
+        for (i, &dfa) in self.cands.iter().enumerate() {
+            if self.cand_upper[i].is_some() {
+                continue;
+            }
+            let top = Cand::constant(store, dfa, true);
+            self.cand_upper[i] = Some(
+                self.cand_forbidden[i]
+                    .as_ref()
+                    .map_or_else(|| top.clone(), |r| top.difference(r, store)),
+            );
+        }
+    }
+
+    fn refine_cand_regions(&mut self, model: &Model, store: &SPPstore) -> bool {
+        let mut violations = Vec::new();
+        for (idx, atom) in self.atoms.iter().enumerate() {
+            let SlotRef::Cand(slot) = atom.slot else {
+                continue;
+            };
+            let value = model.value(atom.result);
+            let region = if value {
+                &self.cand_forbidden[slot as usize]
+            } else {
+                &self.cand_required[slot as usize]
+            };
+            let Some(region) = region else {
+                continue;
+            };
+            let values: Vec<_> = atom.args.iter().map(|a| a.value(model)).collect();
+            let input = cand_input(&values, self.num_vars as usize, region.num_states());
+            if region.accepts_input(store, &input) {
+                violations.push((idx, region.clone(), !value));
+            }
+        }
+        for (idx, region, required) in &violations {
+            let args = self.atoms[*idx].args.clone();
+            let result = self.atoms[*idx].result;
+            let member =
+                self.build_cand_bool(region, region.head, &args, 0, store, &mut HashMap::new());
+            self.solver
+                .clause([if *required { result } else { !result }, !member]);
+        }
+        self.metrics
+            .add("cand_forbidden_instances", violations.len() as u64);
+        !violations.is_empty()
+    }
+
+    fn build_cand_bool(
+        &mut self,
+        region: &Cand<'_>,
+        node: u32,
+        args: &[Arg],
+        depth: usize,
+        store: &SPPstore,
+        memo: &mut HashMap<(u32, usize), Lit>,
+    ) -> Lit {
+        use crate::holes::cand::CandNode;
+        if let Some(&lit) = memo.get(&(node, depth)) {
+            return lit;
+        }
+        let n = self.num_vars as usize;
+        let bit = |i| {
+            let Arg::Bit(lit) = args[i] else {
+                unreachable!()
+            };
+            lit
+        };
+        let result = match &region.nodes[node as usize] {
+            CandNode::NextField { b00, b01, b10, b11 } => {
+                let [x00, x01, x10, x11] = [b00, b01, b10, b11]
+                    .map(|&q| self.build_cand_bool(region, q, args, depth + 1, store, memo));
+                let low = self.solver.ite(bit(n + depth), x01, x00);
+                let high = self.solver.ite(bit(n + depth), x11, x10);
+                self.solver.ite(bit(depth), high, low)
+            }
+            CandNode::NextState(children) => {
+                let Arg::State(state) = args[n + depth] else {
+                    unreachable!()
+                };
+                self.build_cand_bool(region, children[state], args, depth + 1, store, memo)
+            }
+            CandNode::Root(r) => {
+                let bits: Vec<_> = (2 * n + region.num_states()..args.len()).map(bit).collect();
+                self.build_spp_bool(*r, &bits, 0, store, &mut HashMap::new())
+            }
+        };
+        memo.insert((node, depth), result);
+        result
+    }
+
     fn refresh_bounds(&mut self, store: &mut SPPstore) {
+        self.refresh_cand_bounds(store);
         self.sure_bounds = self
             .forbidden
             .iter()
@@ -786,7 +995,8 @@ impl<'a> Native<'a> {
                 }
             }
             self.metrics.elapsed("congruence_check_ns", started);
-            let forbidden_refined = self.refine_forbidden(&model, store);
+            let forbidden_refined =
+                self.refine_forbidden(&model, store) | self.refine_cand_regions(&model, store);
             if conflicts.is_empty() && !forbidden_refined {
                 return Ok(model);
             }
@@ -1348,7 +1558,7 @@ mod tests {
         let solution = learner.extract(&mut store).unwrap();
         let cand = &solution.cands[&cv];
         assert!(cand.accepts_input(
-            &mut store,
+            &store,
             &Input {
                 pkt_in: vec![false, false, false],
                 pkt_start: vec![true, false, true],
@@ -1561,7 +1771,7 @@ mod tests {
             &[false, false, false],
             &[true, true, true],
         );
-        let b = solution.cands[&cv].accepts_input(&mut store, &input);
+        let b = solution.cands[&cv].accepts_input(&store, &input);
         assert!(a || b, "no disjunct satisfied across SPP and Cand");
     }
     #[test]
@@ -1701,9 +1911,9 @@ mod tests {
             pkt_end: vec![false],
             pkt_out: vec![false],
         };
-        assert!(solution.cands[&cv].accepts_input(&mut store, &input));
+        assert!(solution.cands[&cv].accepts_input(&store, &input));
         input.states[1] = 1;
-        assert!(!solution.cands[&cv].accepts_input(&mut store, &input));
+        assert!(!solution.cands[&cv].accepts_input(&store, &input));
         learner.add_clause(
             AbstractClause {
                 literals: vec![make_lit(y, vec![2, 0, 1], false)],
@@ -2106,5 +2316,125 @@ mod tests {
             learner.save_spp_bounds(&mut store),
             vec![(store.zero, store.top)]
         );
+    }
+    #[test]
+    fn cand_symbolic_regions_constrain_existentials_and_unseen_inputs() {
+        for state in [0, 1] {
+            let mut store = SPPstore::new(1);
+            let dfa = ExplicitDFA {
+                start: 0,
+                transitions: vec![vec![(store.top, 0)], vec![(store.top, 1)]],
+                outputs: vec![store.zero; 2],
+            };
+            let mut learner = Native::new(1);
+            let cv = learner.fresh_cand(&dfa);
+            let in_sp = store.sp.test(0, false);
+            let incoming = store.ibwd(in_sp);
+            let top = store.top;
+            let region = Cand::product(&mut store, &dfa, incoming, Some(&[0, 1]), top);
+            learner.forbid_cand(cv, region.clone(), &mut store);
+            let x = learner.fresh_existential();
+            learner.add_clause(
+                AbstractClause {
+                    literals: vec![Literal::Cand {
+                        cand: cv,
+                        pkt_in: vec![AbstractBit::Exist(x)],
+                        pkt_start: vec![AbstractBit::Concrete(false)],
+                        states: vec![state, 1],
+                        pkt_end: vec![AbstractBit::Concrete(false)],
+                        pkt_out: vec![AbstractBit::Concrete(false)],
+                        polarity: true,
+                    }],
+                },
+                &mut store.sp,
+            );
+            let solution = learner.extract(&mut store).unwrap();
+            assert!(
+                solution.cands[&cv]
+                    .intersect(&region, &mut store)
+                    .is_empty(&store)
+            );
+            assert!(!solution.cands[&cv].is_empty(&store));
+            let all = Cand::constant(&mut store, &dfa, true);
+            learner.forbid_cand(cv, all, &mut store);
+            assert!(learner.extract(&mut store).is_err());
+        }
+    }
+
+    #[test]
+    fn cand_bounds_use_root_facts_and_preserve_the_state_vector() {
+        let mut store = SPPstore::new(1);
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(store.top, 0)], vec![(store.top, 1)]],
+            outputs: vec![store.zero; 2],
+        };
+        let mut learner = Native::new(1);
+        let cv = learner.fresh_cand(&dfa);
+        for (states, polarity) in [(vec![0, 1], true), (vec![1, 0], false)] {
+            learner.add_clause(
+                AbstractClause {
+                    literals: vec![Literal::Cand {
+                        cand: cv,
+                        pkt_in: ap_concrete(&[false]),
+                        pkt_start: ap_concrete(&[true]),
+                        states,
+                        pkt_end: ap_concrete(&[false]),
+                        pkt_out: ap_concrete(&[true]),
+                        polarity,
+                    }],
+                },
+                &mut store.sp,
+            );
+        }
+        learner.extract(&mut store).unwrap();
+        let (lower, upper) = learner.cand_bounds(cv, &mut store).unwrap();
+        for (states, required, allowed) in [
+            (vec![0, 1], true, true),
+            (vec![1, 0], false, false),
+            (vec![0, 0], false, true),
+        ] {
+            let input = Input {
+                pkt_in: vec![false],
+                pkt_start: vec![true],
+                states,
+                pkt_end: vec![false],
+                pkt_out: vec![true],
+            };
+            assert_eq!(lower.accepts_input(&store, &input), required);
+            assert_eq!(upper.accepts_input(&store, &input), allowed);
+        }
+    }
+
+    #[test]
+    fn cand_bounds_never_promote_model_choices_to_proven_facts() {
+        let mut store = SPPstore::new(1);
+        let dfa = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(store.top, 0)]],
+            outputs: vec![store.zero],
+        };
+        let mut learner = Native::new(1);
+        let cv = learner.fresh_cand(&dfa);
+        let literals = [false, true].map(|bit| Literal::Cand {
+            cand: cv,
+            pkt_in: ap_concrete(&[bit]),
+            pkt_start: ap_concrete(&[false]),
+            states: vec![0],
+            pkt_end: ap_concrete(&[false]),
+            pkt_out: ap_concrete(&[false]),
+            polarity: true,
+        });
+        learner.add_clause(
+            AbstractClause {
+                literals: literals.into(),
+            },
+            &mut store.sp,
+        );
+        learner.extract(&mut store).unwrap();
+        let (lower, upper) = learner.cand_bounds(cv, &mut store).unwrap();
+        assert!(lower.is_empty(&store));
+        let top = Cand::constant(&mut store, &dfa, true);
+        assert!(top.difference(&upper, &mut store).is_empty(&store));
     }
 }

@@ -1,4 +1,4 @@
-//! Generalize a single SPP traversal on an upper-bound counterexample path.
+//! Generalize a single hole traversal on an upper-bound counterexample path.
 //!
 //! Keep the path's state sequence and all other trace packets fixed, but let
 //! the two visible endpoints surrounding the hole vary. Forward/backward
@@ -18,13 +18,14 @@ enum Segment {
 }
 
 /// Recover the concrete SPP segments between visible states on this path.
-/// The hole must be traversed exactly once and consume no internal trace.
+/// The hole must be traversed exactly once. Its internal packets are retained
+/// in the witness rather than treated as concrete context segments.
 fn path_segments<C: NFA>(
     inst: &Instantiate<C>,
     cex: &UpperBoundCounterexample<C::State>,
     store: &mut SPPstore,
 ) -> Option<(Vec<Segment>, Vec<Vec<bool>>)> {
-    if cex.witnesses.len() != 1 || !cex.witnesses[0].1.1.is_empty() {
+    if cex.witnesses.len() != 1 {
         return None;
     }
     let mut segments = Vec::new();
@@ -35,11 +36,21 @@ fn path_segments<C: NFA>(
     for (idx, (source, input)) in cex.path.iter().enumerate() {
         let (relation, boundary) = if let Some((target, output)) = cex.path.get(idx + 1) {
             if matches!(source, State::Entering(_, _)) {
-                if !matches!(target, State::Outer(_)) || has_hole {
+                if has_hole {
                     return None;
                 }
                 has_hole = true;
-                (None, inst.is_visible(store, target).then_some(output))
+                (
+                    None,
+                    (matches!(target, State::Outer(_)) && inst.is_visible(store, target))
+                        .then_some(output),
+                )
+            } else if matches!(source, State::Inner(_, _, _)) {
+                (
+                    None,
+                    (matches!(target, State::Outer(_)) && inst.is_visible(store, target))
+                        .then_some(output),
+                )
             } else {
                 // Only the chosen state path is explored, but all concrete
                 // labels between these same states may safely be unioned.
@@ -92,6 +103,38 @@ pub(crate) fn upper_bound_forbidden<C: NFA>(
     upper: &ExplicitDFA,
     store: &mut SPPstore,
 ) -> Option<SPP> {
+    match upper_bound_region(inst, cex, upper, store)? {
+        Forbidden::Spp(r) => Some(r),
+        Forbidden::Cand(_) => None,
+    }
+}
+
+/// Correlated regions are a union of products over the incoming and outgoing
+/// packet pairs. The concrete internal trace (and thus its state vector) stays
+/// fixed; the packets outside the hole vary symbolically.
+pub(crate) fn upper_bound_forbidden_cand<C: NFA>(
+    inst: &Instantiate<C>,
+    cex: &UpperBoundCounterexample<C::State>,
+    upper: &ExplicitDFA,
+    store: &mut SPPstore,
+) -> Option<Vec<(SPP, SPP)>> {
+    match upper_bound_region(inst, cex, upper, store)? {
+        Forbidden::Cand(regions) => Some(regions),
+        Forbidden::Spp(_) => None,
+    }
+}
+
+enum Forbidden {
+    Spp(SPP),
+    Cand(Vec<(SPP, SPP)>),
+}
+
+fn upper_bound_region<C: NFA>(
+    inst: &Instantiate<C>,
+    cex: &UpperBoundCounterexample<C::State>,
+    upper: &ExplicitDFA,
+    store: &mut SPPstore,
+) -> Option<Forbidden> {
     let (segments, packets) = path_segments(inst, cex, store)?;
     let mut holes = segments.iter().enumerate().filter_map(|(i, s)| match s {
         Segment::Hole { before, after } => Some((i, *before, *after)),
@@ -182,6 +225,60 @@ pub(crate) fn upper_bound_forbidden<C: NFA>(
         backward = previous;
     }
 
+    let inner = &cex.witnesses[0].1.1;
+    if !inner.is_empty() {
+        let first = store.sp.singleton(&inner.first()?.1);
+        let last = store.sp.singleton(&inner.last()?.1);
+        let mut origins = vec![store.sp.zero; size];
+        for q in 0..size {
+            for &(relation, target) in &transitions[q] {
+                let pre = store.pull(relation, first);
+                let pre = store.sp.intersect(pre, forward[q]);
+                origins[target] = store.sp.union(origins[target], pre);
+            }
+        }
+        for pair in inner.windows(2) {
+            let mut next = vec![store.sp.zero; size];
+            for q in 0..size {
+                for &(relation, target) in &transitions[q] {
+                    if store.accepts(relation, &pair[0].1, &pair[1].1) {
+                        next[target] = store.sp.union(next[target], origins[q]);
+                    }
+                }
+            }
+            origins = next;
+        }
+        let mut regions = Vec::new();
+        for q in 0..size {
+            if store.sp.is_zero(origins[q]) {
+                continue;
+            }
+            let mut post = store.sp.zero;
+            if hole + 1 == segments.len() {
+                post = store.push(last, outputs[q]);
+            } else {
+                for &(relation, target) in &transitions[q] {
+                    let image = store.push(last, relation);
+                    let image = store.sp.intersect(image, backward[target]);
+                    post = store.sp.union(post, image);
+                }
+            }
+            let pre = store.push(origins[q], before);
+            let post = store.pull(after, post);
+            if store.sp.is_zero(pre) || store.sp.is_zero(post) {
+                continue;
+            }
+            let pre = store.ibwd(pre);
+            let first = store.ifwd(first);
+            let incoming = store.intersect(pre, first);
+            let last = store.ibwd(last);
+            let post = store.ifwd(post);
+            let outgoing = store.intersect(last, post);
+            regions.push((incoming, outgoing));
+        }
+        return Some(Forbidden::Cand(regions));
+    }
+
     let mut bad = store.zero;
     for q in 0..size {
         if store.sp.is_zero(forward[q]) {
@@ -206,7 +303,7 @@ pub(crate) fn upper_bound_forbidden<C: NFA>(
     let before = store.flip(before);
     let after = store.flip(after);
     let bad = store.sequence(before, bad);
-    Some(store.sequence(bad, after))
+    Some(Forbidden::Spp(store.sequence(bad, after)))
 }
 
 #[cfg(test)]
@@ -215,6 +312,116 @@ mod tests {
     use crate::hash::{HashMap, HashMapExt as _};
     use crate::holes::aut::expr_to_dfa;
     use crate::holes::nk_with_holes::{AutWithHoles, Expr, Hole};
+
+    #[test]
+    fn cand_regions_are_sound_for_every_one_bit_concrete_context() {
+        use crate::holes::cand::{Cand, Input};
+        let mut store = SPPstore::new(1);
+        let reference = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(store.top, 0)]],
+            outputs: vec![store.zero],
+        };
+        let upper = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(store.top, 0)]],
+            outputs: vec![store.one],
+        };
+        for a in 0..16 {
+            for b in 0..16 {
+                let a = relation(a, &mut store);
+                let b = relation(b, &mut store);
+                let expr = Expr::sequence(
+                    Expr::spp(a),
+                    Expr::sequence(Expr::hole(Hole(0)), Expr::spp(b)),
+                );
+                let mut aut = AutWithHoles::new();
+                let start = aut.expr_to_state(&mut store, &expr);
+                let top = Cand::constant(&mut store, &reference, true);
+                let mut inst = Instantiate::new(aut, start, HashMap::from_iter([(Hole(0), top)]));
+                let Err(cex) = inst.check_upper_bound(&mut store, &upper, &HashMap::new()) else {
+                    continue;
+                };
+                let regions = upper_bound_forbidden_cand(&inst, &cex, &upper, &mut store).unwrap();
+                let inner = &cex.witnesses[0].1.1;
+                let first = inner.first().unwrap().1.clone();
+                let last = inner.last().unwrap().1.clone();
+                assert!(!regions.is_empty());
+                for x in [false, true] {
+                    for y in [false, true] {
+                        let forbidden = regions.iter().any(|&(incoming, outgoing)| {
+                            store.accepts(incoming, &[x], &first)
+                                && store.accepts(outgoing, &last, &[y])
+                        });
+                        if !forbidden {
+                            continue;
+                        }
+                        let input = Input {
+                            pkt_in: vec![x],
+                            pkt_start: first.clone(),
+                            states: vec![0],
+                            pkt_end: last.clone(),
+                            pkt_out: vec![y],
+                        };
+                        let singleton = Cand::singleton(&mut store, &reference, &input);
+                        inst.set_hole(Hole(0), singleton);
+                        assert!(
+                            inst.check_upper_bound(&mut store, &upper, &HashMap::new())
+                                .is_err(),
+                            "A={a:?} B={b:?} input={x} output={y}"
+                        );
+                    }
+                }
+                let (_, (x, _, y)) = &cex.witnesses[0];
+                assert!(
+                    regions
+                        .iter()
+                        .any(|&(a, b)| store.accepts(a, x, &first) && store.accepts(b, &last, y))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cand_regions_cross_visible_context_and_multiple_internal_packets() {
+        use crate::holes::cand::Cand;
+        let mut store = SPPstore::new(1);
+        let reference = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(store.top, 1)], vec![(store.top, 0)]],
+            outputs: vec![store.zero; 2],
+        };
+        let upper = ExplicitDFA {
+            start: 0,
+            transitions: vec![vec![(store.top, 0)]],
+            outputs: vec![store.one],
+        };
+        let top = store.top;
+        let expr = Expr::sequence(
+            Expr::dup(),
+            Expr::sequence(
+                Expr::hole(Hole(0)),
+                Expr::sequence(Expr::dup(), Expr::spp(top)),
+            ),
+        );
+        let candidate = Cand::product(&mut store, &reference, top, Some(&[1, 0]), top);
+        let mut aut = AutWithHoles::new();
+        let start = aut.expr_to_state(&mut store, &expr);
+        let inst = Instantiate::new(aut, start, HashMap::from_iter([(Hole(0), candidate)]));
+        let cex = inst
+            .check_upper_bound(&mut store, &upper, &HashMap::new())
+            .unwrap_err();
+        let inner = &cex.witnesses[0].1.1;
+        assert!(inner.len() >= 2);
+        let regions = upper_bound_forbidden_cand(&inst, &cex, &upper, &mut store).unwrap();
+        let (_, (input, _, output)) = &cex.witnesses[0];
+        assert!(
+            regions
+                .iter()
+                .any(|&(a, b)| store.accepts(a, input, &inner[0].1)
+                    && store.accepts(b, &inner.last().unwrap().1, output))
+        );
+    }
 
     fn instantiate(store: &mut SPPstore, expr: &Expr, candidate: SPP) -> Instantiate<SPP> {
         let mut aut = AutWithHoles::new();
